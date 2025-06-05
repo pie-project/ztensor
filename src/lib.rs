@@ -3,6 +3,7 @@ pub mod models;
 pub mod reader;
 pub mod utils;
 pub mod writer;
+pub mod ffi;
 
 pub use error::ZTensorError;
 pub use models::{ChecksumAlgorithm, DType, DataEndianness, Encoding, TensorMetadata};

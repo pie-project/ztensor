@@ -140,6 +140,3 @@ A zTensor file containing zero tensors is valid.
 * New `dtype` and `encoding` string values may be defined in future versions of this specification. Consumers should be prepared to handle unknown string values gracefully (e.g., by skipping the tensor or reporting an unsupported feature).
 * Custom key-value pairs can be added to the tensor metadata objects. Consumers must ignore keys they do not understand.
 * Future versions of the zTensor specification might define new well-known optional fields or modify the Magic Number.
-
----
-This version of the spec is more assertive about the design choices based on the consolidated recommendations.
