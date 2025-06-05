@@ -25,11 +25,17 @@ pub enum ZTensorError {
         expected: String,
         calculated: String,
     },
+    ChecksumFormatError(String), // New error for checksum parsing
     UnexpectedEof,
     InconsistentDataSize {
         expected: u64,
         found: u64,
     },
+    TypeMismatch {
+        expected: String,
+        found: String,
+        context: String,
+    }, // For typed data retrieval
     Other(String),
 }
 
@@ -71,17 +77,28 @@ impl fmt::Display for ZTensorError {
                 "Checksum mismatch for tensor '{}'. Expected: {}, Calculated: {}",
                 tensor_name, expected, calculated
             ),
+            ZTensorError::ChecksumFormatError(msg) => write!(f, "Checksum format error: {}", msg),
             ZTensorError::UnexpectedEof => write!(f, "Unexpected end of file"),
             ZTensorError::InconsistentDataSize { expected, found } => write!(
                 f,
                 "Inconsistent data size. Expected {} bytes, found {} bytes.",
                 expected, found
             ),
+            ZTensorError::TypeMismatch {
+                expected,
+                found,
+                context,
+            } => write!(
+                f,
+                "Type mismatch for {}. Expected type compatible with zTensor dtype '{}', found incompatible type '{}'",
+                context, expected, found
+            ),
             ZTensorError::Other(msg) => write!(f, "Other error: {}", msg),
         }
     }
 }
 
+// Error trait and From implementations remain largely the same
 impl std::error::Error for ZTensorError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
@@ -103,8 +120,6 @@ impl From<std::io::Error> for ZTensorError {
 
 impl From<serde_cbor::Error> for ZTensorError {
     fn from(err: serde_cbor::Error) -> Self {
-        // Differentiate between serialization and deserialization based on context if possible,
-        // or use a more generic CBOR error. For now, assume deserialization as it's more common for errors.
-        ZTensorError::CborDeserialize(err)
+        ZTensorError::CborDeserialize(err) // Default, context might create CborSerialize
     }
 }
