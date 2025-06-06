@@ -6,7 +6,7 @@ pub mod writer;
 pub mod ffi;
 
 pub use error::ZTensorError;
-pub use models::{ChecksumAlgorithm, DType, DataEndianness, Encoding, TensorMetadata};
+pub use models::{ChecksumAlgorithm, DType, Layout, DataEndianness, Encoding, TensorMetadata};
 pub use reader::{Pod, ZTensorReader};
 pub use writer::ZTensorWriter;
 
@@ -63,6 +63,7 @@ mod tests {
             tensor_name,
             shape.clone(),
             dtype_val.clone(), // Use cloned dtype_val
+            Layout::Dense,
             Encoding::Raw,
             tensor_data_bytes.clone(),
             Some(DataEndianness::Little),
@@ -94,6 +95,7 @@ mod tests {
             tensor_name,
             vec![tensor_data_bytes.len() as u64],
             DType::Uint8,
+            Layout::Dense,
             Encoding::Raw,
             tensor_data_bytes.clone(),
             None,
@@ -149,6 +151,7 @@ mod tests {
             "f32_tensor",
             vec![4],
             DType::Float32,
+            Layout::Dense,
             Encoding::Raw,
             f32_bytes,
             Some(DataEndianness::Little),
@@ -162,6 +165,7 @@ mod tests {
             "u16_tensor",
             vec![2, 2],
             DType::Uint16,
+            Layout::Dense,
             Encoding::Raw,
             u16_bytes,
             Some(DataEndianness::Little),

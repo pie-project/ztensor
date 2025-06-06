@@ -7,7 +7,7 @@ use std::path::Path;
 // Updated models import
 use crate::error::ZTensorError;
 use crate::models::{
-    ChecksumAlgorithm, DType, DataEndianness, Encoding, MAGIC_NUMBER, TensorMetadata,
+    ChecksumAlgorithm, DType, Layout, DataEndianness, Encoding, MAGIC_NUMBER, TensorMetadata,
 };
 use crate::utils::{NATIVE_ENDIANNESS, calculate_padding, swap_endianness_in_place};
 use serde_cbor::Value as CborValue;
@@ -54,6 +54,7 @@ impl<W: Write + Seek> ZTensorWriter<W> {
     /// * `name`: Name of the tensor.
     /// * `shape`: Shape (dimensions) of the tensor.
     /// * `dtype`: Data type of the tensor elements.
+    /// * `layout`: Layout of the tensor (e.g., Dense, Coo, etc).
     /// * `encoding`: Encoding to use for storing the tensor data (e.g., Raw, Zstd).
     /// * `raw_native_data`: Raw tensor data as bytes, in the host's native endianness.
     /// * `store_endianness`: If `encoding` is `Raw` and `dtype` is multi-byte, this specifies
@@ -66,6 +67,7 @@ impl<W: Write + Seek> ZTensorWriter<W> {
         name: &str,
         shape: Vec<u64>,
         dtype: DType,
+        layout: Layout,
         encoding: Encoding,
         mut raw_native_data: Vec<u8>, // Input data is raw, in native host endianness
         store_endianness: Option<DataEndianness>, // For raw encoding: how to store it. Defaults to Little.
@@ -121,6 +123,7 @@ impl<W: Write + Seek> ZTensorWriter<W> {
             offset: 0, // Placeholder, filled during finalize
             size: on_disk_size,
             dtype,
+            layout,
             shape,
             encoding,
             data_endianness: final_data_endianness_field,

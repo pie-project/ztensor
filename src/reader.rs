@@ -74,7 +74,8 @@ impl Pod for bool {
         dtype == &DType::Bool
     }
 }
-// Note: Float16/BFloat16 are not standard Rust types, would need a library and more complex Pod impl.
+
+// Note: Float16/BFloat16 are not standard Rust types. Maybe support them later with a custom Pod impl.
 
 /// Reads zTensor files.
 pub struct ZTensorReader<R: Read + Seek> {
@@ -329,5 +330,137 @@ impl<R: Read + Seek> ZTensorReader<R> {
             typed_data.push(val);
         }
         Ok(typed_data)
+    }
+
+    // --- Sparse tensor support ---
+
+    /// Reads a COO sparse tensor by name.
+    pub fn read_coo_tensor<T: Pod>(&mut self, name: &str) -> Result<crate::models::CooTensor<T>, ZTensorError> {
+        let metadata = self
+            .metadata_list
+            .iter()
+            .find(|m| m.name == name)
+            .cloned()
+            .ok_or_else(|| ZTensorError::TensorNotFound(name.to_string()))?;
+        if metadata.layout != crate::models::Layout::SparseCoo {
+            return Err(ZTensorError::TypeMismatch {
+                expected: "sparse_coo layout".to_string(),
+                found: format!("{:?}", metadata.layout),
+                context: format!("tensor '{}'", name),
+            });
+        }
+        let raw_bytes = self.read_raw_tensor_data(&metadata)?;
+        // Convention: [indices (u64), values (T)]
+        // nnz = number of nonzeros = raw_bytes.len() / (ndim*8 + T::SIZE)
+        let ndim = metadata.shape.len();
+        if ndim == 0 {
+            return Err(ZTensorError::DataConversionError("COO tensor must have nonzero rank".to_string()));
+        }
+        let t_bytes = T::SIZE;
+        let u64_bytes = std::mem::size_of::<u64>();
+        let entry_bytes = ndim * u64_bytes + t_bytes;
+        if raw_bytes.len() % entry_bytes != 0 {
+            return Err(ZTensorError::DataConversionError(format!(
+                "COO tensor: raw data size {} is not a multiple of entry size {} (ndim={}, t_bytes={})",
+                raw_bytes.len(), entry_bytes, ndim, t_bytes
+            )));
+        }
+        let nnz = raw_bytes.len() / entry_bytes;
+        let mut indices = Vec::with_capacity(nnz);
+        let mut values = Vec::with_capacity(nnz);
+        for i in 0..nnz {
+            let base = i * entry_bytes;
+            let mut idx = Vec::with_capacity(ndim);
+            for d in 0..ndim {
+                let start = base + d * u64_bytes;
+                let end = start + u64_bytes;
+                let idx_bytes = &raw_bytes[start..end];
+                idx.push(u64::from_le_bytes(idx_bytes.try_into().unwrap()));
+            }
+            let val_start = base + ndim * u64_bytes;
+            let val_end = val_start + t_bytes;
+            let val_bytes = &raw_bytes[val_start..val_end];
+            let val = if cfg!(target_endian = "little") {
+                T::from_le_bytes(val_bytes)
+            } else {
+                T::from_be_bytes(val_bytes)
+            };
+            indices.push(idx);
+            values.push(val);
+        }
+        Ok(crate::models::CooTensor {
+            shape: metadata.shape.clone(),
+            indices,
+            values,
+        })
+    }
+
+    /// Reads a CSR sparse tensor by name.
+    pub fn read_csr_tensor<T: Pod>(&mut self, name: &str) -> Result<crate::models::CsrTensor<T>, ZTensorError> {
+        let metadata = self
+            .metadata_list
+            .iter()
+            .find(|m| m.name == name)
+            .cloned()
+            .ok_or_else(|| ZTensorError::TensorNotFound(name.to_string()))?;
+        if metadata.layout != crate::models::Layout::SparseCsr {
+            return Err(ZTensorError::TypeMismatch {
+                expected: "sparse_csr layout".to_string(),
+                found: format!("{:?}", metadata.layout),
+                context: format!("tensor '{}'", name),
+            });
+        }
+        let raw_bytes = self.read_raw_tensor_data(&metadata)?;
+        // CSR layout: [indptr (u64; nrows+1), indices (u64; nnz), values (T; nnz)]
+        let nrows = metadata.shape.get(0).copied().ok_or_else(|| ZTensorError::DataConversionError("CSR tensor must have at least 1 dimension".to_string()))?;
+        let u64_bytes = std::mem::size_of::<u64>();
+        let t_bytes = T::SIZE;
+        if raw_bytes.len() < (nrows as usize + 1) * u64_bytes {
+            return Err(ZTensorError::DataConversionError("CSR tensor: raw data too small for indptr".to_string()));
+        }
+        let indptr_len = nrows as usize + 1;
+        let indptr_bytes = indptr_len * u64_bytes;
+        let indptr: Vec<u64> = (0..indptr_len)
+            .map(|i| {
+                let start = i * u64_bytes;
+                let end = start + u64_bytes;
+                u64::from_le_bytes(raw_bytes[start..end].try_into().unwrap())
+            })
+            .collect();
+        let nnz = *indptr.last().ok_or_else(|| ZTensorError::DataConversionError("CSR indptr missing last element".to_string()))? as usize;
+        let indices_bytes = nnz * u64_bytes;
+        let values_bytes = nnz * t_bytes;
+        if raw_bytes.len() != indptr_bytes + indices_bytes + values_bytes {
+            return Err(ZTensorError::DataConversionError(format!(
+                "CSR tensor: expected {} bytes, found {}",
+                indptr_bytes + indices_bytes + values_bytes,
+                raw_bytes.len()
+            )));
+        }
+        let indices: Vec<u64> = (0..nnz)
+            .map(|i| {
+                let start = indptr_bytes + i * u64_bytes;
+                let end = start + u64_bytes;
+                u64::from_le_bytes(raw_bytes[start..end].try_into().unwrap())
+            })
+            .collect();
+        let values: Vec<T> = (0..nnz)
+            .map(|i| {
+                let start = indptr_bytes + indices_bytes + i * t_bytes;
+                let end = start + t_bytes;
+                let val_bytes = &raw_bytes[start..end];
+                if cfg!(target_endian = "little") {
+                    T::from_le_bytes(val_bytes)
+                } else {
+                    T::from_be_bytes(val_bytes)
+                }
+            })
+            .collect();
+        Ok(crate::models::CsrTensor {
+            shape: metadata.shape.clone(),
+            indptr,
+            indices,
+            values,
+        })
     }
 }

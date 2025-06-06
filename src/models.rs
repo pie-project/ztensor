@@ -6,7 +6,7 @@ use std::collections::BTreeMap; // Added for DType methods
 pub const MAGIC_NUMBER: &[u8; 8] = b"ZTEN0001";
 pub const ALIGNMENT: u64 = 64;
 
-/// Data types supported by zTensor.
+/// Data types supported by zTensor 1.0
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DType {
@@ -63,6 +63,17 @@ impl DType {
     }
 }
 
+
+/// Tensor data encoding types.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Layout {
+    Dense,
+    SparseCoo,
+    SparseCsr,
+}
+
+
 /// Tensor data encoding types.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -93,6 +104,7 @@ pub struct TensorMetadata {
     pub offset: u64,
     pub size: u64, // On-disk size
     pub dtype: DType,
+    pub layout: Layout,
     pub shape: Vec<u64>,
     pub encoding: Encoding,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -127,4 +139,19 @@ impl TensorMetadata {
 pub enum ChecksumAlgorithm {
     None,
     Crc32c,
+}
+
+#[derive(Debug, Clone)]
+pub struct CooTensor<T> {
+    pub shape: Vec<u64>,
+    pub indices: Vec<Vec<u64>>, // indices[i][j]: j-th index of i-th nonzero
+    pub values: Vec<T>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CsrTensor<T> {
+    pub shape: Vec<u64>,
+    pub indptr: Vec<u64>,
+    pub indices: Vec<u64>,
+    pub values: Vec<T>,
 }
