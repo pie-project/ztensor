@@ -15,7 +15,14 @@ use humansize::{format_size, DECIMAL};
 use serde_pickle::Value as PickleValue;
 
 #[derive(Parser)]
-#[command(name = "ztensor", version, about = "zTensor CLI: inspect and convert tensor files", author, propagate_version = true)]
+#[command(
+    name = "ztensor",
+    version,
+    about = "zTensor CLI: inspect, convert, and compress tensor files",
+    long_about = "zTensor CLI is a tool for inspecting, converting, and compressing tensor files.\n\nSupported formats:\n  - SafeTensor (.safetensor, .safetensors)\n  - GGUF (.gguf)\n  - Pickle (.pkl, .pickle)\n  - zTensor (.zt)\n\nYou can convert between formats, compress/decompress zTensor files, and view metadata/stats.",
+    author,
+    propagate_version = true
+)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
@@ -24,35 +31,58 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Convert a tensor file (SafeTensor, GGUF, Pickle) to zTensor format
+    #[command(
+        about = "Convert a tensor file (SafeTensor, GGUF, Pickle) to zTensor format.",
+        long_about = "Convert a tensor file to zTensor format.\n\nSupported input formats: SafeTensor (.safetensor), GGUF (.gguf), Pickle (.pkl, .pickle).\n\nExamples:\n  ztensor convert model.safetensor model.zt\n  ztensor convert --format gguf model.gguf model.zt --compress\n  ztensor convert --format pickle model.pkl model.zt\n"
+    )]
     Convert {
         /// Input file (.safetensor, .gguf, .pkl, etc)
+        #[arg(help = "Path to the input tensor file (SafeTensor, GGUF, Pickle)")]
         input: String,
         /// Output .zt file
+        #[arg(help = "Path to the output .zt file")]
         output: String,
         /// Compress tensor data with zstd
-        #[arg(long)]
+        #[arg(long, help = "Compress tensor data using zstd (smaller file size, slower read)")]
         compress: bool,
         /// Input format: auto, safetensor, gguf, pickle
-        #[arg(long, value_name = "FORMAT", default_value = "auto")]
+        #[arg(long, value_name = "FORMAT", default_value = "auto", help = "Input format: auto, safetensor, gguf, pickle. Default: auto-detect from extension.")]
         format: String,
     },
     /// Compress an uncompressed zTensor file (raw encoding) to zstd encoding
+    #[command(
+        about = "Compress an uncompressed zTensor file (raw encoding) to zstd encoding.",
+        long_about = "Compress a zTensor file that is currently uncompressed (raw encoding) to zstd encoding.\n\nExample:\n  ztensor compress model_raw.zt model_compressed.zt\n"
+    )]
     Compress {
         /// Input .zt file (uncompressed)
+        #[arg(help = "Path to the input .zt file (must be uncompressed)")]
         input: String,
         /// Output .zt file (compressed)
+        #[arg(help = "Path to the output .zt file (compressed)")]
         output: String,
     },
     /// Decompress a compressed zTensor file (zstd encoding) to raw encoding
+    #[command(
+        about = "Decompress a compressed zTensor file (zstd encoding) to raw encoding.",
+        long_about = "Decompress a zTensor file that is compressed (zstd encoding) to raw encoding.\n\nExample:\n  ztensor decompress model_compressed.zt model_raw.zt\n"
+    )]
     Decompress {
         /// Input .zt file (compressed)
+        #[arg(help = "Path to the input .zt file (must be compressed)")]
         input: String,
         /// Output .zt file (uncompressed)
+        #[arg(help = "Path to the output .zt file (uncompressed)")]
         output: String,
     },
     /// Show metadata and stats for a zTensor file
+    #[command(
+        about = "Show metadata and stats for a zTensor file.",
+        long_about = "Display metadata and statistics for a zTensor file, including tensor names, shapes, data types, encodings, and sizes.\n\nExample:\n  ztensor info model.zt\n"
+    )]
     Info {
         /// Path to the .zt file
+        #[arg(help = "Path to the .zt file to inspect")]
         file: String,
     },
 }
