@@ -4,6 +4,8 @@
 
 zTensor is a binary format for storing large multi-dimensional arrays (tensors), designed for efficient, safe, and flexible access. It supports raw and compressed (zstd) encodings, quantized and sparse layouts, and is extensible.
 
+For dense tensors stored with encoding: "raw" and matching endianness, zTensor enables zero-copy access to tensor data.
+
 ## File Layout
 
 ```
