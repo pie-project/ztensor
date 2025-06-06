@@ -117,8 +117,8 @@ fn dtype_size(dtype: &ztensor::DType) -> Option<usize> {
     use ztensor::DType::*;
     Some(match dtype {
         Float64 | Int64 | Uint64 => 8,
-        Float32 | Int32 | Uint32 | BFloat16 | Float16 => 4,
-        Int16 | Uint16 => 2,
+        Float32 | Int32 | Uint32 => 4,
+        BFloat16 | Float16  | Int16 | Uint16 => 2,
         Int8 | Uint8 | Bool => 1,
         _ => return None,
     })
