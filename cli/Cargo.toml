@@ -1,0 +1,9 @@
+[package]
+name = "ztensor-cli"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ztensor = { path = ".."}
+safetensors = "0.4"
+memmap2 = "0.9"
