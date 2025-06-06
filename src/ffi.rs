@@ -1,4 +1,4 @@
-use libc::{c_char, c_int, size_t, uint64_t};
+use libc::{c_char, c_int, size_t};
 use std::ffi::{CStr, CString};
 use std::path::Path;
 use std::ptr;
@@ -181,14 +181,14 @@ pub extern "C" fn ztensor_metadata_get_encoding_str(metadata_ptr: *const CTensor
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn ztensor_metadata_get_offset(metadata_ptr: *const CTensorMetadata) -> uint64_t {
+pub extern "C" fn ztensor_metadata_get_offset(metadata_ptr: *const CTensorMetadata) -> u64 {
     if metadata_ptr.is_null() { return 0; }
     let metadata = unsafe { &*metadata_ptr };
     metadata.offset
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn ztensor_metadata_get_size(metadata_ptr: *const CTensorMetadata) -> uint64_t {
+pub extern "C" fn ztensor_metadata_get_size(metadata_ptr: *const CTensorMetadata) -> u64 {
     if metadata_ptr.is_null() { return 0; }
     let metadata = unsafe { &*metadata_ptr };
     metadata.size
@@ -203,7 +203,7 @@ pub extern "C" fn ztensor_metadata_get_shape_len(metadata_ptr: *const CTensorMet
 
 // Returns a copy of the shape data, must be freed by ztensor_free_u64_array
 #[unsafe(no_mangle)]
-pub extern "C" fn ztensor_metadata_get_shape_data(metadata_ptr: *const CTensorMetadata) -> *mut uint64_t {
+pub extern "C" fn ztensor_metadata_get_shape_data(metadata_ptr: *const CTensorMetadata) -> *mut u64 {
     if metadata_ptr.is_null() { return ptr::null_mut(); }
     let metadata = unsafe { &*metadata_ptr };
     let mut shape_copy = metadata.shape.to_vec();
@@ -254,7 +254,7 @@ pub extern "C" fn ztensor_free_string(s_ptr: *mut c_char) {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn ztensor_free_u64_array(arr_ptr: *mut uint64_t, len: size_t) {
+pub extern "C" fn ztensor_free_u64_array(arr_ptr: *mut u64, len: size_t) {
     if !arr_ptr.is_null() {
         unsafe { Vec::from_raw_parts(arr_ptr, len, len); }
     }

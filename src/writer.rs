@@ -1,13 +1,15 @@
-use std::fs::File;
-use std::io::{Write, Seek, SeekFrom, BufWriter};
-use std::path::Path;
 use byteorder::{LittleEndian, WriteBytesExt};
 use std::collections::BTreeMap;
+use std::fs::File;
+use std::io::{BufWriter, Seek, SeekFrom, Write};
+use std::path::Path;
 
 // Updated models import
-use crate::models::{TensorMetadata, DType, Encoding, DataEndianness, MAGIC_NUMBER, ALIGNMENT, ChecksumAlgorithm};
 use crate::error::ZTensorError;
-use crate::utils::{calculate_padding, NATIVE_ENDIANNESS, swap_endianness_in_place};
+use crate::models::{
+    ChecksumAlgorithm, DType, DataEndianness, Encoding, MAGIC_NUMBER, TensorMetadata,
+};
+use crate::utils::{NATIVE_ENDIANNESS, calculate_padding, swap_endianness_in_place};
 use serde_cbor::Value as CborValue;
 
 struct PendingTensor {
@@ -70,9 +72,11 @@ impl<W: Write + Seek> ZTensorWriter<W> {
         checksum_algo: ChecksumAlgorithm,
         custom_fields: Option<BTreeMap<String, CborValue>>,
     ) -> Result<(), ZTensorError> {
-      
-
-        let num_elements = if shape.is_empty() { 1 } else { shape.iter().product() };
+        let num_elements = if shape.is_empty() {
+            1
+        } else {
+            shape.iter().product()
+        };
         let expected_raw_size = num_elements * dtype.byte_size()? as u64;
 
         if raw_native_data.len() as u64 != expected_raw_size {
@@ -92,14 +96,14 @@ impl<W: Write + Seek> ZTensorWriter<W> {
         } else {
             None
         };
-        
+
         // Process data for on-disk storage (compression)
         let on_disk_data = match encoding {
             Encoding::Raw => raw_native_data, // Already endian-swapped if needed
             Encoding::Zstd => zstd::encode_all(std::io::Cursor::new(raw_native_data), 0)
                 .map_err(ZTensorError::ZstdCompression)?,
         };
-        
+
         let on_disk_size = on_disk_data.len() as u64;
 
         // Calculate checksum if requested
@@ -111,7 +115,7 @@ impl<W: Write + Seek> ZTensorWriter<W> {
                 Some(format!("crc32c:0x{:08X}", cs_val))
             }
         };
-        
+
         let metadata = TensorMetadata {
             name: name.to_string(),
             offset: 0, // Placeholder, filled during finalize
@@ -131,20 +135,20 @@ impl<W: Write + Seek> ZTensorWriter<W> {
 
         Ok(())
     }
-    
+
     fn write_tensor_blobs(&mut self) -> Result<Vec<TensorMetadata>, ZTensorError> {
         let mut finalized_metadata_list = Vec::new();
 
         for pending_tensor in self.tensors_to_write.iter_mut() {
             let (aligned_offset, padding_bytes) = calculate_padding(self.current_offset);
-            
+
             if padding_bytes > 0 {
                 self.writer.write_all(&vec![0u8; padding_bytes as usize])?;
             }
-            
+
             pending_tensor.metadata.offset = aligned_offset;
             self.writer.write_all(&pending_tensor.data_to_write)?;
-            
+
             self.current_offset = aligned_offset + pending_tensor.metadata.size;
             finalized_metadata_list.push(pending_tensor.metadata.clone());
         }
@@ -159,28 +163,18 @@ impl<W: Write + Seek> ZTensorWriter<W> {
     pub fn finalize(mut self) -> Result<u64, ZTensorError> {
         let finalized_metadata = self.write_tensor_blobs()?;
 
-        let cbor_blob = serde_cbor::to_vec(&finalized_metadata)
-            .map_err(ZTensorError::CborSerialize)?;
-        
+        let cbor_blob =
+            serde_cbor::to_vec(&finalized_metadata).map_err(ZTensorError::CborSerialize)?;
+
         self.writer.write_all(&cbor_blob)?;
-        
+
         let cbor_blob_size = cbor_blob.len() as u64;
         self.writer.write_u64::<LittleEndian>(cbor_blob_size)?;
-        
-        self.writer.flush()?;
-        
-        self.writer.seek(SeekFrom::Current(0)).map_err(ZTensorError::Io)
-    }
-}
 
-/// Writes a zTensor file with zero tensors.
-/// This is a convenience function. The same result can be achieved by creating a `ZTensorWriter`
-/// and calling `finalize` without adding any tensors.
-pub fn write_empty_ztensor_file<W: Write + Seek>(mut writer: W) -> Result<u64, ZTensorError> {
-    writer.write_all(MAGIC_NUMBER)?;
-    let empty_cbor_array = [0x80u8]; 
-    writer.write_all(&empty_cbor_array)?;
-    writer.write_u64::<LittleEndian>(1u64)?; 
-    writer.flush()?;
-    Ok((MAGIC_NUMBER.len() + 1 + 8) as u64)
+        self.writer.flush()?;
+
+        self.writer
+            .seek(SeekFrom::Current(0))
+            .map_err(ZTensorError::Io)
+    }
 }

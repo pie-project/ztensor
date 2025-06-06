@@ -1,10 +1,10 @@
-use std::fs::File;
-use std::io::{Read, Seek, SeekFrom, BufReader};
-use std::path::Path;
 use byteorder::{LittleEndian, ReadBytesExt};
+use std::fs::File;
+use std::io::{BufReader, Read, Seek, SeekFrom};
+use std::path::Path;
 
-use crate::models::{TensorMetadata, MAGIC_NUMBER, ALIGNMENT, DType, Encoding, DataEndianness};
 use crate::error::ZTensorError;
+use crate::models::{ALIGNMENT, DType, Encoding, MAGIC_NUMBER, TensorMetadata};
 use crate::utils::{NATIVE_ENDIANNESS, swap_endianness_in_place};
 
 /// Trait for Plain Old Data types that can be safely created from byte sequences.
@@ -47,9 +47,15 @@ impl_pod!(u16, DType::Uint16, from_le_bytes, from_be_bytes);
 macro_rules! impl_pod_byte {
     ($t:ty, $d:path) => {
         impl Pod for $t {
-            fn from_le_bytes(bytes: &[u8]) -> Self { bytes[0] as $t }
-            fn from_be_bytes(bytes: &[u8]) -> Self { bytes[0] as $t }
-            fn dtype_matches(dtype: &DType) -> bool { dtype == &$d }
+            fn from_le_bytes(bytes: &[u8]) -> Self {
+                bytes[0] as $t
+            }
+            fn from_be_bytes(bytes: &[u8]) -> Self {
+                bytes[0] as $t
+            }
+            fn dtype_matches(dtype: &DType) -> bool {
+                dtype == &$d
+            }
         }
     };
 }
@@ -58,9 +64,15 @@ impl_pod_byte!(i8, DType::Int8);
 
 // Bool needs special handling if it were multi-byte, but spec says 1 byte.
 impl Pod for bool {
-    fn from_le_bytes(bytes: &[u8]) -> Self { bytes[0] != 0 }
-    fn from_be_bytes(bytes: &[u8]) -> Self { bytes[0] != 0 }
-    fn dtype_matches(dtype: &DType) -> bool { dtype == &DType::Bool }
+    fn from_le_bytes(bytes: &[u8]) -> Self {
+        bytes[0] != 0
+    }
+    fn from_be_bytes(bytes: &[u8]) -> Self {
+        bytes[0] != 0
+    }
+    fn dtype_matches(dtype: &DType) -> bool {
+        dtype == &DType::Bool
+    }
 }
 // Note: Float16/BFloat16 are not standard Rust types, would need a library and more complex Pod impl.
 
@@ -84,56 +96,78 @@ impl<R: Read + Seek> ZTensorReader<R> {
         let mut magic_buf = [0u8; 8];
         reader.read_exact(&mut magic_buf)?;
         if magic_buf != *MAGIC_NUMBER {
-            return Err(ZTensorError::InvalidMagicNumber { found: magic_buf.to_vec() });
+            return Err(ZTensorError::InvalidMagicNumber {
+                found: magic_buf.to_vec(),
+            });
         }
 
         reader.seek(SeekFrom::End(-8))?;
         let cbor_blob_size = reader.read_u64::<LittleEndian>()?;
 
         let file_size = reader.seek(SeekFrom::End(0))?;
-        if cbor_blob_size == 0 && file_size == (MAGIC_NUMBER.len() as u64 + 8) { // No CBOR blob, only size field which is 0
-             return Ok(Self { reader, metadata_list: Vec::new() });
+        if cbor_blob_size == 0 && file_size == (MAGIC_NUMBER.len() as u64 + 8) {
+            // No CBOR blob, only size field which is 0
+            return Ok(Self {
+                reader,
+                metadata_list: Vec::new(),
+            });
         }
-        if cbor_blob_size == 1 { // Potentially empty array for zero tensors
+        if cbor_blob_size == 1 {
+            // Potentially empty array for zero tensors
             if file_size == (MAGIC_NUMBER.len() as u64 + 1 + 8) {
                 reader.seek(SeekFrom::Start(MAGIC_NUMBER.len() as u64))?;
-                let mut cbor_byte = [0u8;1];
+                let mut cbor_byte = [0u8; 1];
                 reader.read_exact(&mut cbor_byte)?;
-                if cbor_byte[0] == 0x80 { // Empty CBOR array
-                    return Ok(Self { reader, metadata_list: Vec::new() });
+                if cbor_byte[0] == 0x80 {
+                    // Empty CBOR array
+                    return Ok(Self {
+                        reader,
+                        metadata_list: Vec::new(),
+                    });
                 }
             }
         }
-        
+
         if cbor_blob_size > file_size.saturating_sub(MAGIC_NUMBER.len() as u64 + 8) {
-             return Err(ZTensorError::InvalidFileStructure(format!("CBOR blob size {} is too large for file size {}", cbor_blob_size, file_size)));
+            return Err(ZTensorError::InvalidFileStructure(format!(
+                "CBOR blob size {} is too large for file size {}",
+                cbor_blob_size, file_size
+            )));
         }
-        if cbor_blob_size == 0 { // Valid case: no tensors, CBOR blob size is 0.
-            return Ok(Self {reader, metadata_list: Vec::new() });
+        if cbor_blob_size == 0 {
+            // Valid case: no tensors, CBOR blob size is 0.
+            return Ok(Self {
+                reader,
+                metadata_list: Vec::new(),
+            });
         }
 
         reader.seek(SeekFrom::End(-8 - (cbor_blob_size as i64)))?;
         let mut cbor_buf = vec![0u8; cbor_blob_size as usize];
         reader.read_exact(&mut cbor_buf)?;
 
-        let metadata_list: Vec<TensorMetadata> = serde_cbor::from_slice(&cbor_buf)
-            .map_err(ZTensorError::CborDeserialize)?;
+        let metadata_list: Vec<TensorMetadata> =
+            serde_cbor::from_slice(&cbor_buf).map_err(ZTensorError::CborDeserialize)?;
 
         for meta in &metadata_list {
             if meta.offset < MAGIC_NUMBER.len() as u64 {
                 return Err(ZTensorError::InvalidFileStructure(format!(
-                    "Tensor '{}' offset {} is within magic number.", meta.name, meta.offset
+                    "Tensor '{}' offset {} is within magic number.",
+                    meta.name, meta.offset
                 )));
             }
             if meta.offset % ALIGNMENT != 0 {
-                 return Err(ZTensorError::InvalidAlignment {
+                return Err(ZTensorError::InvalidAlignment {
                     offset: meta.offset,
                     required_alignment: ALIGNMENT,
                     actual_offset: meta.offset % ALIGNMENT, // Corrected this part
                 });
             }
         }
-        Ok(Self { reader, metadata_list })
+        Ok(Self {
+            reader,
+            metadata_list,
+        })
     }
 
     /// Lists all tensor metadata entries in the file.
@@ -145,7 +179,7 @@ impl<R: Read + Seek> ZTensorReader<R> {
     pub fn get_tensor_metadata(&self, name: &str) -> Option<&TensorMetadata> {
         self.metadata_list.iter().find(|m| m.name == name)
     }
-    
+
     /// Reads the raw, processed (decompressed, endian-swapped to native) byte data of a tensor.
     ///
     /// # Arguments
@@ -153,19 +187,26 @@ impl<R: Read + Seek> ZTensorReader<R> {
     pub fn read_raw_tensor_data_by_name(&mut self, name: &str) -> Result<Vec<u8>, ZTensorError> {
         // Find metadata by name, clone it to satisfy borrow checker, as reading requires mutable self.
         // A more optimized way might involve passing index or a non-mutable lookup then a mutable read.
-        let metadata = self.metadata_list.iter().find(|m| m.name == name)
+        let metadata = self
+            .metadata_list
+            .iter()
+            .find(|m| m.name == name)
             .cloned() // Clone to avoid lifetime issues with self.reader
             .ok_or_else(|| ZTensorError::TensorNotFound(name.to_string()))?;
         self.read_raw_tensor_data(&metadata)
     }
-    
+
     /// Reads the raw, processed (decompressed, endian-swapped to native) byte data of a tensor
     /// using its metadata.
     ///
     /// # Arguments
     /// * `metadata`: The `TensorMetadata` for the tensor to read.
-    pub fn read_raw_tensor_data(&mut self, metadata: &TensorMetadata) -> Result<Vec<u8>, ZTensorError> {
-        if metadata.offset % ALIGNMENT != 0 { // Should have been caught at load time
+    pub fn read_raw_tensor_data(
+        &mut self,
+        metadata: &TensorMetadata,
+    ) -> Result<Vec<u8>, ZTensorError> {
+        if metadata.offset % ALIGNMENT != 0 {
+            // Should have been caught at load time
             return Err(ZTensorError::InvalidAlignment {
                 offset: metadata.offset,
                 required_alignment: ALIGNMENT,
@@ -181,9 +222,13 @@ impl<R: Read + Seek> ZTensorReader<R> {
         if let Some(checksum_str) = &metadata.checksum {
             if checksum_str.starts_with("crc32c:0x") {
                 let expected_cs_hex = &checksum_str[9..];
-                let expected_cs = u32::from_str_radix(expected_cs_hex, 16)
-                    .map_err(|_| ZTensorError::ChecksumFormatError(format!("Invalid CRC32C hex: {}", expected_cs_hex)))?;
-                
+                let expected_cs = u32::from_str_radix(expected_cs_hex, 16).map_err(|_| {
+                    ZTensorError::ChecksumFormatError(format!(
+                        "Invalid CRC32C hex: {}",
+                        expected_cs_hex
+                    ))
+                })?;
+
                 let calculated_cs = crc32c::crc32c(&on_disk_data);
 
                 if calculated_cs != expected_cs {
@@ -196,7 +241,10 @@ impl<R: Read + Seek> ZTensorReader<R> {
             } else {
                 // Silently ignore unknown checksum formats for now, or return an error/warning
                 // return Err(ZTensorError::ChecksumFormatError(format!("Unsupported checksum format: {}", checksum_str)));
-                eprintln!("Warning: Tensor '{}' has an unsupported checksum format: {}", metadata.name, checksum_str);
+                eprintln!(
+                    "Warning: Tensor '{}' has an unsupported checksum format: {}",
+                    metadata.name, checksum_str
+                );
             }
         }
 
@@ -232,10 +280,13 @@ impl<R: Read + Seek> ZTensorReader<R> {
     /// # Arguments
     /// * `name`: The name of the tensor to read.
     pub fn read_typed_tensor_data<T: Pod>(&mut self, name: &str) -> Result<Vec<T>, ZTensorError> {
-        let metadata = self.metadata_list.iter().find(|m| m.name == name)
+        let metadata = self
+            .metadata_list
+            .iter()
+            .find(|m| m.name == name)
             .cloned()
             .ok_or_else(|| ZTensorError::TensorNotFound(name.to_string()))?;
-        
+
         if !T::dtype_matches(&metadata.dtype) {
             return Err(ZTensorError::TypeMismatch {
                 expected: metadata.dtype.to_string_key(),
@@ -243,14 +294,16 @@ impl<R: Read + Seek> ZTensorReader<R> {
                 context: format!("tensor '{}'", name),
             });
         }
-       
+
         let raw_bytes = self.read_raw_tensor_data(&metadata)?;
-        
+
         let element_size = T::SIZE;
         if raw_bytes.len() % element_size != 0 {
             return Err(ZTensorError::DataConversionError(format!(
                 "Raw data size {} is not a multiple of element size {} for type {}",
-                raw_bytes.len(), element_size, std::any::type_name::<T>()
+                raw_bytes.len(),
+                element_size,
+                std::any::type_name::<T>()
             )));
         }
 
@@ -265,10 +318,10 @@ impl<R: Read + Seek> ZTensorReader<R> {
             // This logic might need refinement based on Pod trait design.
             // Let's assume Pod::from_le_bytes and from_be_bytes are for when data IS le/be.
             // The raw_bytes are already NATIVE.
-            
+
             // Simplified: if native is little, use from_le, if native is big, use from_be.
             // This assumes T::from_le_bytes correctly interprets LE bytes regardless of host.
-             let val = if cfg!(target_endian = "little") {
+            let val = if cfg!(target_endian = "little") {
                 T::from_le_bytes(chunk)
             } else {
                 T::from_be_bytes(chunk)

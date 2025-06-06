@@ -14,9 +14,9 @@ pub use writer::ZTensorWriter;
 mod tests {
     use super::*;
     // SeekFrom is used by buffer.seek(std::io::SeekFrom::Start(0)) etc.
-    use crate::models::{ALIGNMENT, MAGIC_NUMBER}; // `models::ALIGNMENT` is fine for tests needing it directly.
-    use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
-    use std::io::{Cursor, Read, Seek, SeekFrom, Write}; // SeekFrom IS used.
+    use crate::models::{MAGIC_NUMBER}; // `models::ALIGNMENT` is fine for tests needing it directly.
+    use byteorder::{LittleEndian, ReadBytesExt};
+    use std::io::{Cursor, Read, Seek}; // SeekFrom IS used.
 
     #[test]
     fn test_write_read_empty() -> Result<(), ZTensorError> {
