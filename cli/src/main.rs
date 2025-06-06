@@ -6,7 +6,7 @@ use ztensor::{ChecksumAlgorithm, ZTensorReader, ZTensorError};
 use safetensors::SafeTensorError;
 use safetensors::tensor::SafeTensors;
 use std::fs::File;
-use std::io::{BufWriter, Write, Seek, SeekFrom};
+use std::io::{BufWriter, Write, Seek, SeekFrom, Read};
 use ztensor::{ZTensorWriter, DType, Layout, Encoding, DataEndianness};
 use clap::{Parser, Subcommand};
 use clap::CommandFactory;
@@ -14,7 +14,7 @@ use comfy_table::{Table, Row, Cell, presets::UTF8_FULL, ContentArrangement};
 use humansize::{format_size, DECIMAL};
 
 #[derive(Parser)]
-#[command(name = "ztensor", version, about = "zTensor CLI: inspect and convert tensor files", author)]
+#[command(name = "ztensor", version, about = "zTensor CLI: inspect and convert tensor files", author, propagate_version = true)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
@@ -36,6 +36,30 @@ enum Commands {
         /// Compress tensor data with zstd
         #[arg(long)]
         compress: bool,
+    },
+    /// Convert a GGUF file to zTensor format
+    ConvertGGUF {
+        /// Input .gguf file
+        input: String,
+        /// Output .zt file
+        output: String,
+        /// Compress tensor data with zstd
+        #[arg(long)]
+        compress: bool,
+    },
+    /// Compress an uncompressed zTensor file (raw encoding) to zstd encoding
+    Compress {
+        /// Input .zt file (uncompressed)
+        input: String,
+        /// Output .zt file (compressed)
+        output: String,
+    },
+    /// Decompress a compressed zTensor file (zstd encoding) to raw encoding
+    Decompress {
+        /// Input .zt file (compressed)
+        input: String,
+        /// Output .zt file (uncompressed)
+        output: String,
     },
 }
 
@@ -87,6 +111,21 @@ fn safetensor_dtype_to_ztensor(dtype: &safetensors::tensor::Dtype) -> Option<zte
     }
 }
 
+fn gguf_dtype_to_ztensor(dtype: &gguf_rs::GGMLType) -> Option<ztensor::DType> {
+    match dtype {
+        gguf_rs::GGMLType::F64 => Some(ztensor::DType::Float64),
+        gguf_rs::GGMLType::F32 => Some(ztensor::DType::Float32),
+        gguf_rs::GGMLType::F16 => Some(ztensor::DType::Float16),
+        gguf_rs::GGMLType::BF16 => Some(ztensor::DType::BFloat16),
+        gguf_rs::GGMLType::I64 => Some(ztensor::DType::Int64),
+        gguf_rs::GGMLType::I32 => Some(ztensor::DType::Int32),
+        gguf_rs::GGMLType::I16 => Some(ztensor::DType::Int16),
+        gguf_rs::GGMLType::I8 => Some(ztensor::DType::Int8),
+        // gguf_rs::GGMLType::BOOL => Some(ztensor::DType::Bool), // GGUF does not have a BOOL type
+        _ => None,
+    }
+}
+
 fn convert_safetensor_to_ztensor(input: &str, output: &str, compress: bool) -> Result<(), Box<dyn std::error::Error>> {
     let file = File::open(input)?;
     let mmap = unsafe { memmap2::Mmap::map(&file)? };
@@ -113,6 +152,96 @@ fn convert_safetensor_to_ztensor(input: &str, output: &str, compress: bool) -> R
     Ok(())
 }
 
+fn convert_gguf_to_ztensor(input: &str, output: &str, compress: bool) -> Result<(), Box<dyn std::error::Error>> {
+    let mut container = gguf_rs::get_gguf_container(input)?;
+    let model = container.decode()?;
+    let mut writer = ZTensorWriter::create(output)?;
+
+    let mut f = File::open(input)?;
+
+    for tensor_info in model.tensors() {
+        let ggml_dtype: gguf_rs::GGMLType = tensor_info.kind.try_into()
+            .map_err(|e| format!("Unsupported GGUF dtype: {}", e))?;
+
+        if let Some(dtype) = gguf_dtype_to_ztensor(&ggml_dtype) {
+            let shape: Vec<u64> = tensor_info.shape.iter().map(|&d| d as u64).filter(|&d| d > 0).collect();
+            let numel: u64 = shape.iter().product();
+            let type_size = match dtype {
+                ztensor::DType::Float64 | ztensor::DType::Int64 | ztensor::DType::Uint64 => 8,
+                ztensor::DType::Float32 | ztensor::DType::Int32 | ztensor::DType::Uint32 => 4,
+                ztensor::DType::BFloat16 | ztensor::DType::Float16  | ztensor::DType::Int16 | ztensor::DType::Uint16 => 2,
+                ztensor::DType::Int8 | ztensor::DType::Uint8 | ztensor::DType::Bool => 1,
+                _ => return Err(format!("Unsupported ztensor dtype for size calculation: {:?}", dtype).into()),
+            };
+            let data_size = numel * type_size;
+            let mut data = vec![0u8; data_size as usize];
+
+            f.seek(SeekFrom::Start(tensor_info.offset))?;
+            f.read_exact(&mut data)?;
+
+            writer.add_tensor(
+                &tensor_info.name,
+                shape,
+                dtype,
+                Layout::Dense,
+                if compress { Encoding::Zstd } else { Encoding::Raw },
+                data,
+                Some(DataEndianness::Little), // GGUF is typically little endian, adjust if needed
+                ChecksumAlgorithm::None,
+                Some(BTreeMap::new()),
+            )?;
+        } else {
+            eprintln!("Warning: Skipping tensor '{}' with unsupported GGUF dtype: {:?}", tensor_info.name, ggml_dtype);
+        }
+    }
+    writer.finalize()?;
+    Ok(())
+}
+
+fn compress_ztensor(input: &str, output: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let mut reader = ZTensorReader::open(input)?;
+    let mut writer = ZTensorWriter::create(output)?;
+    let metas = reader.list_tensors().clone();
+    for meta in metas {
+        let data = reader.read_raw_tensor_data(&meta)?;
+        writer.add_tensor(
+            &meta.name,
+            meta.shape.clone(),
+            meta.dtype.clone(),
+            meta.layout.clone(),
+            Encoding::Zstd,
+            data,
+            meta.data_endianness.clone(),
+            ChecksumAlgorithm::None,
+            Some(meta.custom_fields.clone()),
+        )?;
+    }
+    writer.finalize()?;
+    Ok(())
+}
+
+fn decompress_ztensor(input: &str, output: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let mut reader = ZTensorReader::open(input)?;
+    let mut writer = ZTensorWriter::create(output)?;
+    let metas = reader.list_tensors().clone();
+    for meta in metas {
+        let data = reader.read_raw_tensor_data(&meta)?;
+        writer.add_tensor(
+            &meta.name,
+            meta.shape.clone(),
+            meta.dtype.clone(),
+            meta.layout.clone(),
+            Encoding::Raw,
+            data,
+            meta.data_endianness.clone(),
+            ChecksumAlgorithm::None,
+            Some(meta.custom_fields.clone()),
+        )?;
+    }
+    writer.finalize()?;
+    Ok(())
+}
+
 fn dtype_size(dtype: &ztensor::DType) -> Option<usize> {
     use ztensor::DType::*;
     Some(match dtype {
@@ -130,7 +259,7 @@ fn shape_numel(shape: &[u64]) -> u64 {
 
 fn print_tensors_table(tensors: &[ztensor::TensorMetadata]) {
     let mut table = Table::new();
-    table.load_preset(UTF8_FULL)
+    table.load_preset(comfy_table::presets::UTF8_HORIZONTAL_ONLY)
         .set_content_arrangement(ContentArrangement::Dynamic);
     table.set_header(vec![
         "#", "Name", "Shape", "DType", "Encoding", "Layout", "Offset", "Size", "On-disk Size"
@@ -172,6 +301,33 @@ fn main() {
                 Ok(()) => println!("Successfully converted {} to {}", input, output),
                 Err(e) => {
                     eprintln!("Conversion failed: {}", e);
+                    process::exit(1);
+                }
+            }
+        }
+        Some(Commands::ConvertGGUF { input, output, compress }) => {
+            match convert_gguf_to_ztensor(input, output, *compress) {
+                Ok(()) => println!("Successfully converted GGUF {} to zTensor {}", input, output),
+                Err(e) => {
+                    eprintln!("GGUF to zTensor conversion failed: {}", e);
+                    process::exit(1);
+                }
+            }
+        }
+        Some(Commands::Compress { input, output }) => {
+            match compress_ztensor(input, output) {
+                Ok(()) => println!("Successfully compressed {} to {}", input, output),
+                Err(e) => {
+                    eprintln!("Compression failed: {}", e);
+                    process::exit(1);
+                }
+            }
+        }
+        Some(Commands::Decompress { input, output }) => {
+            match decompress_ztensor(input, output) {
+                Ok(()) => println!("Successfully decompressed {} to {}", input, output),
+                Err(e) => {
+                    eprintln!("Decompression failed: {}", e);
                     process::exit(1);
                 }
             }
