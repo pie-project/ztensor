@@ -63,7 +63,6 @@ impl DType {
     }
 }
 
-
 /// Tensor data encoding types.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -73,14 +72,12 @@ pub enum Layout {
     SparseCsr,
 }
 
-
 /// Tensor data encoding types.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Encoding {
     Raw,
     Zstd,
-
 }
 
 /// Endianness of multi-byte tensor data when `encoding` is `raw`.

@@ -1,18 +1,18 @@
-use std::collections::BTreeMap;
-use std::env;
-use std::process;
-use std::path::Path;
-use ztensor::{ChecksumAlgorithm, ZTensorReader, ZTensorError};
+use clap::CommandFactory;
+use clap::{Parser, Subcommand};
+use comfy_table::{Cell, ContentArrangement, Row, Table, presets::UTF8_FULL};
+use humansize::{DECIMAL, format_size};
 use safetensors::SafeTensorError;
 use safetensors::tensor::SafeTensors;
-use std::fs::File;
-use std::io::{BufWriter, Write, Seek, SeekFrom, Read, BufReader};
-use ztensor::{ZTensorWriter, DType, Layout, Encoding, DataEndianness};
-use clap::{Parser, Subcommand};
-use clap::CommandFactory;
-use comfy_table::{Table, Row, Cell, presets::UTF8_FULL, ContentArrangement};
-use humansize::{format_size, DECIMAL};
 use serde_pickle::Value as PickleValue;
+use std::collections::BTreeMap;
+use std::env;
+use std::fs::File;
+use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
+use std::path::Path;
+use std::process;
+use ztensor::{ChecksumAlgorithm, ZTensorError, ZTensorReader};
+use ztensor::{DType, DataEndianness, Encoding, Layout, ZTensorWriter};
 
 #[derive(Parser)]
 #[command(
@@ -43,10 +43,18 @@ enum Commands {
         #[arg(help = "Path to the output .zt file")]
         output: String,
         /// Compress tensor data with zstd
-        #[arg(long, help = "Compress tensor data using zstd (smaller file size, slower read)")]
+        #[arg(
+            long,
+            help = "Compress tensor data using zstd (smaller file size, slower read)"
+        )]
         compress: bool,
         /// Input format: auto, safetensor, gguf, pickle
-        #[arg(long, value_name = "FORMAT", default_value = "auto", help = "Input format: auto, safetensor, gguf, pickle. Default: auto-detect from extension.")]
+        #[arg(
+            long,
+            value_name = "FORMAT",
+            default_value = "auto",
+            help = "Input format: auto, safetensor, gguf, pickle. Default: auto-detect from extension."
+        )]
         format: String,
     },
     /// Compress an uncompressed zTensor file (raw encoding) to zstd encoding
@@ -89,29 +97,58 @@ enum Commands {
 
 fn print_tensor_metadata(meta: &ztensor::TensorMetadata) {
     let mut table = Table::new();
-    table.load_preset(UTF8_FULL)
+    table
+        .load_preset(UTF8_FULL)
         .set_content_arrangement(ContentArrangement::Dynamic);
     table.set_header(vec!["Field", "Value"]);
     table.add_row(Row::from(vec![Cell::new("Name"), Cell::new(&meta.name)]));
-    table.add_row(Row::from(vec![Cell::new("DType"), Cell::new(format!("{:?}", meta.dtype))]));
-    table.add_row(Row::from(vec![Cell::new("Encoding"), Cell::new(format!("{:?}", meta.encoding))]));
-    table.add_row(Row::from(vec![Cell::new("Layout"), Cell::new(format!("{:?}", meta.layout))]));
+    table.add_row(Row::from(vec![
+        Cell::new("DType"),
+        Cell::new(format!("{:?}", meta.dtype)),
+    ]));
+    table.add_row(Row::from(vec![
+        Cell::new("Encoding"),
+        Cell::new(format!("{:?}", meta.encoding)),
+    ]));
+    table.add_row(Row::from(vec![
+        Cell::new("Layout"),
+        Cell::new(format!("{:?}", meta.layout)),
+    ]));
     let shape_str = if meta.shape.len() == 0 {
         "(scalar)".to_string()
     } else {
-        format!("[{}]", meta.shape.iter().map(|d| d.to_string()).collect::<Vec<_>>().join(", "))
+        format!(
+            "[{}]",
+            meta.shape
+                .iter()
+                .map(|d| d.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
     };
     table.add_row(Row::from(vec![Cell::new("Shape"), Cell::new(shape_str)]));
-    table.add_row(Row::from(vec![Cell::new("Offset"), Cell::new(meta.offset.to_string())]));
-    table.add_row(Row::from(vec![Cell::new("Size (on-disk)"), Cell::new(format_size(meta.size, DECIMAL))]));
+    table.add_row(Row::from(vec![
+        Cell::new("Offset"),
+        Cell::new(meta.offset.to_string()),
+    ]));
+    table.add_row(Row::from(vec![
+        Cell::new("Size (on-disk)"),
+        Cell::new(format_size(meta.size, DECIMAL)),
+    ]));
     if let Some(endian) = &meta.data_endianness {
-        table.add_row(Row::from(vec![Cell::new("Data Endianness"), Cell::new(format!("{:?}", endian))]));
+        table.add_row(Row::from(vec![
+            Cell::new("Data Endianness"),
+            Cell::new(format!("{:?}", endian)),
+        ]));
     }
     if let Some(cs) = &meta.checksum {
         table.add_row(Row::from(vec![Cell::new("Checksum"), Cell::new(cs)]));
     }
     if !meta.custom_fields.is_empty() {
-        table.add_row(Row::from(vec![Cell::new("Custom fields"), Cell::new(format!("{:?}", meta.custom_fields))]));
+        table.add_row(Row::from(vec![
+            Cell::new("Custom fields"),
+            Cell::new(format!("{:?}", meta.custom_fields)),
+        ]));
     }
     println!("{}", table);
 }
@@ -150,7 +187,11 @@ fn gguf_dtype_to_ztensor(dtype: &gguf_rs::GGMLType) -> Option<ztensor::DType> {
     }
 }
 
-fn convert_safetensor_to_ztensor(input: &str, output: &str, compress: bool) -> Result<(), Box<dyn std::error::Error>> {
+fn convert_safetensor_to_ztensor(
+    input: &str,
+    output: &str,
+    compress: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     let file = File::open(input)?;
     let mmap = unsafe { memmap2::Mmap::map(&file)? };
     let st = SafeTensors::deserialize(&mmap)?;
@@ -165,7 +206,11 @@ fn convert_safetensor_to_ztensor(input: &str, output: &str, compress: bool) -> R
             shape,
             dtype,
             Layout::Dense,
-            if compress { Encoding::Zstd } else { Encoding::Raw },
+            if compress {
+                Encoding::Zstd
+            } else {
+                Encoding::Raw
+            },
             data,
             Some(DataEndianness::Little),
             ChecksumAlgorithm::None,
@@ -176,7 +221,11 @@ fn convert_safetensor_to_ztensor(input: &str, output: &str, compress: bool) -> R
     Ok(())
 }
 
-fn convert_gguf_to_ztensor(input: &str, output: &str, compress: bool) -> Result<(), Box<dyn std::error::Error>> {
+fn convert_gguf_to_ztensor(
+    input: &str,
+    output: &str,
+    compress: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut container = gguf_rs::get_gguf_container(input)?;
     let model = container.decode()?;
     let mut writer = ZTensorWriter::create(output)?;
@@ -184,18 +233,34 @@ fn convert_gguf_to_ztensor(input: &str, output: &str, compress: bool) -> Result<
     let mut f = File::open(input)?;
 
     for tensor_info in model.tensors() {
-        let ggml_dtype: gguf_rs::GGMLType = tensor_info.kind.try_into()
+        let ggml_dtype: gguf_rs::GGMLType = tensor_info
+            .kind
+            .try_into()
             .map_err(|e| format!("Unsupported GGUF dtype: {}", e))?;
 
         if let Some(dtype) = gguf_dtype_to_ztensor(&ggml_dtype) {
-            let shape: Vec<u64> = tensor_info.shape.iter().map(|&d| d as u64).filter(|&d| d > 0).collect();
+            let shape: Vec<u64> = tensor_info
+                .shape
+                .iter()
+                .map(|&d| d as u64)
+                .filter(|&d| d > 0)
+                .collect();
             let numel: u64 = shape.iter().product();
             let type_size = match dtype {
                 ztensor::DType::Float64 | ztensor::DType::Int64 | ztensor::DType::Uint64 => 8,
                 ztensor::DType::Float32 | ztensor::DType::Int32 | ztensor::DType::Uint32 => 4,
-                ztensor::DType::BFloat16 | ztensor::DType::Float16  | ztensor::DType::Int16 | ztensor::DType::Uint16 => 2,
+                ztensor::DType::BFloat16
+                | ztensor::DType::Float16
+                | ztensor::DType::Int16
+                | ztensor::DType::Uint16 => 2,
                 ztensor::DType::Int8 | ztensor::DType::Uint8 | ztensor::DType::Bool => 1,
-                _ => return Err(format!("Unsupported ztensor dtype for size calculation: {:?}", dtype).into()),
+                _ => {
+                    return Err(format!(
+                        "Unsupported ztensor dtype for size calculation: {:?}",
+                        dtype
+                    )
+                    .into());
+                }
             };
             let data_size = numel * type_size;
             let mut data = vec![0u8; data_size as usize];
@@ -208,14 +273,21 @@ fn convert_gguf_to_ztensor(input: &str, output: &str, compress: bool) -> Result<
                 shape,
                 dtype,
                 Layout::Dense,
-                if compress { Encoding::Zstd } else { Encoding::Raw },
+                if compress {
+                    Encoding::Zstd
+                } else {
+                    Encoding::Raw
+                },
                 data,
                 Some(DataEndianness::Little), // GGUF is typically little endian, adjust if needed
                 ChecksumAlgorithm::None,
                 Some(BTreeMap::new()),
             )?;
         } else {
-            eprintln!("Warning: Skipping tensor '{}' with unsupported GGUF dtype: {:?}", tensor_info.name, ggml_dtype);
+            eprintln!(
+                "Warning: Skipping tensor '{}' with unsupported GGUF dtype: {:?}",
+                tensor_info.name, ggml_dtype
+            );
         }
     }
     writer.finalize()?;
@@ -231,23 +303,30 @@ fn key_to_string(key_val: &serde_pickle::HashableValue) -> String {
         HashableValue::I64(i) => i.to_string(),
         HashableValue::F64(f) => f.to_string(),
         HashableValue::Bool(b) => b.to_string(),
-        HashableValue::Tuple(items) => {
-            items.iter().map(key_to_string).collect::<Vec<_>>().join("_")
-        }
+        HashableValue::Tuple(items) => items
+            .iter()
+            .map(key_to_string)
+            .collect::<Vec<_>>()
+            .join("_"),
         // Add more specific cases if other key types are common and need specific formatting
         _ => format!("key_{:?}", key_val).replace(|c: char| !c.is_alphanumeric() && c != '_', "_"),
     }
 }
 
 // Helper to parse a PickleValue as a potential tensor
-fn try_parse_pickle_tensor(value: &PickleValue) -> Result<Option<(Vec<u64>, ztensor::DType, Vec<u8>)>, String> {
+fn try_parse_pickle_tensor(
+    value: &PickleValue,
+) -> Result<Option<(Vec<u64>, ztensor::DType, Vec<u8>)>, String> {
     let mut data_bytes = Vec::new();
     let mut inferred_dtype: Option<ztensor::DType> = None;
     let mut shape = Vec::new();
 
     fn ensure_shape_depth(shape: &Vec<u64>, depth: usize) -> Result<(), String> {
         if shape.len() != depth {
-            Err(format!("Dimension mismatch: expected scalar at depth {}, but tensor shape is deeper. Shape: {:?}, Depth: {}", depth, shape, depth))
+            Err(format!(
+                "Dimension mismatch: expected scalar at depth {}, but tensor shape is deeper. Shape: {:?}, Depth: {}",
+                depth, shape, depth
+            ))
         } else {
             Ok(())
         }
@@ -262,10 +341,13 @@ fn try_parse_pickle_tensor(value: &PickleValue) -> Result<Option<(Vec<u64>, zten
     ) -> Result<(), String> {
         match current_value {
             PickleValue::List(items) | PickleValue::Tuple(items) => {
-                if current_depth == 0 && items.is_empty() { // Top-level empty list
+                if current_depth == 0 && items.is_empty() {
+                    // Top-level empty list
                     shape.push(0); // Represents an empty tensor
                     // Default to Float32 for empty tensor if no other type info
-                    if dtype.is_none() { *dtype = Some(ztensor::DType::Float32); }
+                    if dtype.is_none() {
+                        *dtype = Some(ztensor::DType::Float32);
+                    }
                     return Ok(());
                 }
                 // Disallow empty lists/tuples within a tensor structure for now, or define behavior.
@@ -278,7 +360,10 @@ fn try_parse_pickle_tensor(value: &PickleValue) -> Result<Option<(Vec<u64>, zten
                 } else if shape[current_depth] != items.len() as u64 {
                     return Err(format!(
                         "Jagged tensor: dimension mismatch at depth {}. Expected {}, got {}. Shape: {:?}",
-                        current_depth, shape[current_depth], items.len(), shape
+                        current_depth,
+                        shape[current_depth],
+                        items.len(),
+                        shape
                     ));
                 }
 
@@ -288,27 +373,43 @@ fn try_parse_pickle_tensor(value: &PickleValue) -> Result<Option<(Vec<u64>, zten
                 Ok(())
             }
             PickleValue::F64(f) => {
-                if dtype.is_none() { *dtype = Some(ztensor::DType::Float64); }
-                if *dtype != Some(ztensor::DType::Float64) { return Err("Mixed data types: expected Float64".to_string()); }
+                if dtype.is_none() {
+                    *dtype = Some(ztensor::DType::Float64);
+                }
+                if *dtype != Some(ztensor::DType::Float64) {
+                    return Err("Mixed data types: expected Float64".to_string());
+                }
                 ensure_shape_depth(shape, current_depth)?;
                 data_bytes.extend_from_slice(&f.to_le_bytes());
                 Ok(())
             }
-            PickleValue::I64(i) => { // serde_pickle reads Python int as I64
-                if dtype.is_none() { *dtype = Some(ztensor::DType::Int64); } // Default to Int64
-                if *dtype != Some(ztensor::DType::Int64) { return Err("Mixed data types: expected Int64".to_string());}
+            PickleValue::I64(i) => {
+                // serde_pickle reads Python int as I64
+                if dtype.is_none() {
+                    *dtype = Some(ztensor::DType::Int64);
+                } // Default to Int64
+                if *dtype != Some(ztensor::DType::Int64) {
+                    return Err("Mixed data types: expected Int64".to_string());
+                }
                 ensure_shape_depth(shape, current_depth)?;
                 data_bytes.extend_from_slice(&i.to_le_bytes());
                 Ok(())
             }
             PickleValue::Bool(b) => {
-                if dtype.is_none() { *dtype = Some(ztensor::DType::Bool); }
-                if *dtype != Some(ztensor::DType::Bool) { return Err("Mixed data types: expected Bool".to_string()); }
+                if dtype.is_none() {
+                    *dtype = Some(ztensor::DType::Bool);
+                }
+                if *dtype != Some(ztensor::DType::Bool) {
+                    return Err("Mixed data types: expected Bool".to_string());
+                }
                 ensure_shape_depth(shape, current_depth)?;
                 data_bytes.push(if *b { 1 } else { 0 });
                 Ok(())
             }
-            _ => Err(format!("Unsupported data type in tensor: {:?}", current_value)),
+            _ => Err(format!(
+                "Unsupported data type in tensor: {:?}",
+                current_value
+            )),
         }
     }
 
@@ -319,8 +420,8 @@ fn try_parse_pickle_tensor(value: &PickleValue) -> Result<Option<(Vec<u64>, zten
                 // If shape is [0], it was an empty list [], also a valid tensor.
                 Ok(Some((shape, dt, data_bytes)))
             } else {
-                 // This case should ideally not be reached if collect_elements succeeds and infers a dtype.
-                 // If value was an empty list, shape would be [0] and dtype set.
+                // This case should ideally not be reached if collect_elements succeeds and infers a dtype.
+                // If value was an empty list, shape would be [0] and dtype set.
                 Ok(None)
             }
         }
@@ -341,17 +442,26 @@ fn pickle_value_to_ztensor_components(
         PickleValue::Dict(items) => {
             for (key_val, sub_value) in items {
                 let key_str = key_to_string(key_val);
-                let new_prefix = if prefix.is_empty() { key_str } else { format!("{}.{}", prefix, key_str) };
+                let new_prefix = if prefix.is_empty() {
+                    key_str
+                } else {
+                    format!("{}.{}", prefix, key_str)
+                };
                 pickle_value_to_ztensor_components(&new_prefix, sub_value, tensors)?;
             }
         }
-        _ => { // Attempt to parse any other value as a tensor (includes lists, tuples, scalars)
+        _ => {
+            // Attempt to parse any other value as a tensor (includes lists, tuples, scalars)
             if let Some((shape, dtype, data)) = try_parse_pickle_tensor(value)? {
                 // Add if data is present, or if it\'s an explicitly empty tensor (shape [0])
                 if !data.is_empty() || shape == vec![0] {
-                     // Use current prefix as the name if it\'s a direct tensor,
-                     // or if it\'s a scalar found not inside a dict.
-                    let tensor_name = if prefix.is_empty() { "tensor".to_string() } else { prefix.to_string() };
+                    // Use current prefix as the name if it\'s a direct tensor,
+                    // or if it\'s a scalar found not inside a dict.
+                    let tensor_name = if prefix.is_empty() {
+                        "tensor".to_string()
+                    } else {
+                        prefix.to_string()
+                    };
                     tensors.push((tensor_name, shape, dtype, data));
                 }
                 // If it was parsed as a tensor, we don\'t recurse further into its structure.
@@ -378,10 +488,15 @@ fn pickle_value_to_ztensor_components(
     Ok(())
 }
 
-fn convert_pickle_to_ztensor(input: &str, output: &str, compress: bool) -> Result<(), Box<dyn std::error::Error>> {
-    let file = File::open(input).map_err(|e| format!("Failed to open input file '{}': {}", input, e))?;
+fn convert_pickle_to_ztensor(
+    input: &str,
+    output: &str,
+    compress: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let file =
+        File::open(input).map_err(|e| format!("Failed to open input file '{}': {}", input, e))?;
     let reader = BufReader::new(file);
-    
+
     let pkl_value: PickleValue = match serde_pickle::value_from_reader(reader, Default::default()) {
         Ok(val) => val,
         Err(e) => {
@@ -396,26 +511,42 @@ Then use this tool on 'model_simple.pkl'.",
         }
     };
 
-    let mut writer = ZTensorWriter::create(output)
-        .map_err(|e| format!("Failed to create ZTensorWriter for output '{}': {}", output, e))?;
-    
+    let mut writer = ZTensorWriter::create(output).map_err(|e| {
+        format!(
+            "Failed to create ZTensorWriter for output '{}': {}",
+            output, e
+        )
+    })?;
+
     let mut found_tensors: Vec<(String, Vec<u64>, ztensor::DType, Vec<u8>)> = Vec::new();
 
     pickle_value_to_ztensor_components("", &pkl_value, &mut found_tensors)
         .map_err(|e| format!("Error processing pickle structure from '{}': {}", input, e))?;
 
     if found_tensors.is_empty() {
-        return Err(format!("No compatible (numpy/pytorch-like) tensors found in '{}'.", input).into());
+        return Err(format!(
+            "No compatible (numpy/pytorch-like) tensors found in '{}'.",
+            input
+        )
+        .into());
     }
 
     for (name, shape, dtype, data) in found_tensors {
-        let cleaned_name = if name.is_empty() { "unnamed_tensor".to_string() } else { name };
+        let cleaned_name = if name.is_empty() {
+            "unnamed_tensor".to_string()
+        } else {
+            name
+        };
         writer.add_tensor(
             &cleaned_name,
             shape,
             dtype,
             Layout::Dense, // Assuming dense layout
-            if compress { Encoding::Zstd } else { Encoding::Raw },
+            if compress {
+                Encoding::Zstd
+            } else {
+                Encoding::Raw
+            },
             data,
             Some(DataEndianness::Little), // Common default; NumPy/PyTorch use native.
             ChecksumAlgorithm::None,
@@ -476,7 +607,7 @@ fn dtype_size(dtype: &ztensor::DType) -> Option<usize> {
     Some(match dtype {
         Float64 | Int64 | Uint64 => 8,
         Float32 | Int32 | Uint32 => 4,
-        BFloat16 | Float16  | Int16 | Uint16 => 2,
+        BFloat16 | Float16 | Int16 | Uint16 => 2,
         Int8 | Uint8 | Bool => 1,
         _ => return None,
     })
@@ -488,16 +619,32 @@ fn shape_numel(shape: &[u64]) -> u64 {
 
 fn print_tensors_table(tensors: &[ztensor::TensorMetadata]) {
     let mut table = Table::new();
-    table.load_preset(comfy_table::presets::UTF8_HORIZONTAL_ONLY)
+    table
+        .load_preset(comfy_table::presets::UTF8_HORIZONTAL_ONLY)
         .set_content_arrangement(ContentArrangement::Dynamic);
     table.set_header(vec![
-        "#", "Name", "Shape", "DType", "Encoding", "Layout", "Offset", "Size", "On-disk Size"
+        "#",
+        "Name",
+        "Shape",
+        "DType",
+        "Encoding",
+        "Layout",
+        "Offset",
+        "Size",
+        "On-disk Size",
     ]);
     for (i, meta) in tensors.iter().enumerate() {
         let shape_str = if meta.shape.is_empty() {
             "(scalar)".to_string()
         } else {
-            format!("[{}]", meta.shape.iter().map(|d| d.to_string()).collect::<Vec<_>>().join(", "))
+            format!(
+                "[{}]",
+                meta.shape
+                    .iter()
+                    .map(|d| d.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
         };
         let dtype_str = format!("{:?}", meta.dtype);
         let encoding_str = format!("{:?}", meta.encoding);
@@ -505,7 +652,9 @@ fn print_tensors_table(tensors: &[ztensor::TensorMetadata]) {
         let offset_str = meta.offset.to_string();
         let numel = shape_numel(&meta.shape);
         let size = dtype_size(&meta.dtype).map(|s| s as u64 * numel);
-        let size_str = size.map(|s| format_size(s, DECIMAL)).unwrap_or("?".to_string());
+        let size_str = size
+            .map(|s| format_size(s, DECIMAL))
+            .unwrap_or("?".to_string());
         let on_disk_str = format_size(meta.size, DECIMAL);
         table.add_row(Row::from(vec![
             Cell::new(i),
@@ -538,7 +687,12 @@ fn detect_format_from_extension(input: &str) -> Option<&'static str> {
 fn main() {
     let cli = Cli::parse();
     match &cli.command {
-        Some(Commands::Convert { input, output, compress, format }) => {
+        Some(Commands::Convert {
+            input,
+            output,
+            compress,
+            format,
+        }) => {
             let format = format.to_ascii_lowercase();
             let detected_format = if format == "auto" {
                 detect_format_from_extension(input)
@@ -555,48 +709,49 @@ fn main() {
                         }
                     }
                 }
-                Some("gguf") => {
-                    match convert_gguf_to_ztensor(input, output, *compress) {
-                        Ok(()) => println!("Successfully converted GGUF {} to zTensor {}", input, output),
-                        Err(e) => {
-                            eprintln!("GGUF to zTensor conversion failed: {}", e);
-                            process::exit(1);
-                        }
+                Some("gguf") => match convert_gguf_to_ztensor(input, output, *compress) {
+                    Ok(()) => println!(
+                        "Successfully converted GGUF {} to zTensor {}",
+                        input, output
+                    ),
+                    Err(e) => {
+                        eprintln!("GGUF to zTensor conversion failed: {}", e);
+                        process::exit(1);
                     }
-                }
-                Some("pickle") => {
-                    match convert_pickle_to_ztensor(input, output, *compress) {
-                        Ok(()) => println!("Successfully converted Pickle {} to zTensor {}", input, output),
-                        Err(e) => {
-                            eprintln!("Pickle to zTensor conversion failed: {}", e);
-                            process::exit(1);
-                        }
+                },
+                Some("pickle") => match convert_pickle_to_ztensor(input, output, *compress) {
+                    Ok(()) => println!(
+                        "Successfully converted Pickle {} to zTensor {}",
+                        input, output
+                    ),
+                    Err(e) => {
+                        eprintln!("Pickle to zTensor conversion failed: {}", e);
+                        process::exit(1);
                     }
-                }
+                },
                 _ => {
-                    eprintln!("Could not auto-detect input format for '{}'. Please specify --format [safetensor|gguf|pickle]", input);
+                    eprintln!(
+                        "Could not auto-detect input format for '{}'. Please specify --format [safetensor|gguf|pickle]",
+                        input
+                    );
                     process::exit(1);
                 }
             }
         }
-        Some(Commands::Compress { input, output }) => {
-            match compress_ztensor(input, output) {
-                Ok(()) => println!("Successfully compressed {} to {}", input, output),
-                Err(e) => {
-                    eprintln!("Compression failed: {}", e);
-                    process::exit(1);
-                }
+        Some(Commands::Compress { input, output }) => match compress_ztensor(input, output) {
+            Ok(()) => println!("Successfully compressed {} to {}", input, output),
+            Err(e) => {
+                eprintln!("Compression failed: {}", e);
+                process::exit(1);
             }
-        }
-        Some(Commands::Decompress { input, output }) => {
-            match decompress_ztensor(input, output) {
-                Ok(()) => println!("Successfully decompressed {} to {}", input, output),
-                Err(e) => {
-                    eprintln!("Decompression failed: {}", e);
-                    process::exit(1);
-                }
+        },
+        Some(Commands::Decompress { input, output }) => match decompress_ztensor(input, output) {
+            Ok(()) => println!("Successfully decompressed {} to {}", input, output),
+            Err(e) => {
+                eprintln!("Decompression failed: {}", e);
+                process::exit(1);
             }
-        }
+        },
         Some(Commands::Info { file }) => {
             if !Path::new(file).exists() {
                 eprintln!("File not found: {}", file);

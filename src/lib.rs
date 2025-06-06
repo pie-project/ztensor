@@ -1,12 +1,12 @@
 pub mod error;
+pub mod ffi;
 pub mod models;
 pub mod reader;
 pub mod utils;
 pub mod writer;
-pub mod ffi;
 
 pub use error::ZTensorError;
-pub use models::{ChecksumAlgorithm, DType, Layout, DataEndianness, Encoding, TensorMetadata};
+pub use models::{ChecksumAlgorithm, DType, DataEndianness, Encoding, Layout, TensorMetadata};
 pub use reader::{Pod, ZTensorReader};
 pub use writer::ZTensorWriter;
 
@@ -14,7 +14,7 @@ pub use writer::ZTensorWriter;
 mod tests {
     use super::*;
     // SeekFrom is used by buffer.seek(std::io::SeekFrom::Start(0)) etc.
-    use crate::models::{MAGIC_NUMBER}; // `models::ALIGNMENT` is fine for tests needing it directly.
+    use crate::models::MAGIC_NUMBER; // `models::ALIGNMENT` is fine for tests needing it directly.
     use byteorder::{LittleEndian, ReadBytesExt};
     use std::io::{Cursor, Read, Seek}; // SeekFrom IS used.
 

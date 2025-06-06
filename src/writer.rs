@@ -7,7 +7,7 @@ use std::path::Path;
 // Updated models import
 use crate::error::ZTensorError;
 use crate::models::{
-    ChecksumAlgorithm, DType, Layout, DataEndianness, Encoding, MAGIC_NUMBER, TensorMetadata,
+    ChecksumAlgorithm, DType, DataEndianness, Encoding, Layout, MAGIC_NUMBER, TensorMetadata,
 };
 use crate::utils::{NATIVE_ENDIANNESS, calculate_padding, swap_endianness_in_place};
 use serde_cbor::Value as CborValue;
