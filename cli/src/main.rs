@@ -8,24 +8,64 @@ use safetensors::tensor::SafeTensors;
 use std::fs::File;
 use std::io::{BufWriter, Write, Seek, SeekFrom};
 use ztensor::{ZTensorWriter, DType, Layout, Encoding, DataEndianness};
+use clap::{Parser, Subcommand};
+use clap::CommandFactory;
+use comfy_table::{Table, Row, Cell, presets::UTF8_FULL, ContentArrangement};
+use humansize::{format_size, DECIMAL};
+
+#[derive(Parser)]
+#[command(name = "ztensor", version, about = "zTensor CLI: inspect and convert tensor files", author)]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Commands>,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Show metadata and stats for a zTensor file
+    Info {
+        /// Path to the .zt file
+        file: String,
+    },
+    /// Convert a SafeTensor file to zTensor format
+    Convert {
+        /// Input .safetensor file
+        input: String,
+        /// Output .zt file
+        output: String,
+        /// Compress tensor data with zstd
+        #[arg(long)]
+        compress: bool,
+    },
+}
 
 fn print_tensor_metadata(meta: &ztensor::TensorMetadata) {
-    println!("  Name: {}", meta.name);
-    println!("  DType: {:?}", meta.dtype);
-    println!("  Encoding: {:?}", meta.encoding);
-    println!("  Layout: {:?}", meta.layout);
-    println!("  Shape: {:?}", meta.shape);
-    println!("  Offset: {}", meta.offset);
-    println!("  Size (on-disk): {} bytes", meta.size);
+    let mut table = Table::new();
+    table.load_preset(UTF8_FULL)
+        .set_content_arrangement(ContentArrangement::Dynamic);
+    table.set_header(vec!["Field", "Value"]);
+    table.add_row(Row::from(vec![Cell::new("Name"), Cell::new(&meta.name)]));
+    table.add_row(Row::from(vec![Cell::new("DType"), Cell::new(format!("{:?}", meta.dtype))]));
+    table.add_row(Row::from(vec![Cell::new("Encoding"), Cell::new(format!("{:?}", meta.encoding))]));
+    table.add_row(Row::from(vec![Cell::new("Layout"), Cell::new(format!("{:?}", meta.layout))]));
+    let shape_str = if meta.shape.len() == 0 {
+        "(scalar)".to_string()
+    } else {
+        format!("[{}]", meta.shape.iter().map(|d| d.to_string()).collect::<Vec<_>>().join(", "))
+    };
+    table.add_row(Row::from(vec![Cell::new("Shape"), Cell::new(shape_str)]));
+    table.add_row(Row::from(vec![Cell::new("Offset"), Cell::new(meta.offset.to_string())]));
+    table.add_row(Row::from(vec![Cell::new("Size (on-disk)"), Cell::new(format_size(meta.size, DECIMAL))]));
     if let Some(endian) = &meta.data_endianness {
-        println!("  Data Endianness: {:?}", endian);
+        table.add_row(Row::from(vec![Cell::new("Data Endianness"), Cell::new(format!("{:?}", endian))]));
     }
     if let Some(cs) = &meta.checksum {
-        println!("  Checksum: {}", cs);
+        table.add_row(Row::from(vec![Cell::new("Checksum"), Cell::new(cs)]));
     }
     if !meta.custom_fields.is_empty() {
-        println!("  Custom fields: {:?}", meta.custom_fields);
+        table.add_row(Row::from(vec![Cell::new("Custom fields"), Cell::new(format!("{:?}", meta.custom_fields))]));
     }
+    println!("{}", table);
 }
 
 fn safetensor_dtype_to_ztensor(dtype: &safetensors::tensor::Dtype) -> Option<ztensor::DType> {
@@ -47,7 +87,7 @@ fn safetensor_dtype_to_ztensor(dtype: &safetensors::tensor::Dtype) -> Option<zte
     }
 }
 
-fn convert_safetensor_to_ztensor(input: &str, output: &str) -> Result<(), Box<dyn std::error::Error>> {
+fn convert_safetensor_to_ztensor(input: &str, output: &str, compress: bool) -> Result<(), Box<dyn std::error::Error>> {
     let file = File::open(input)?;
     let mmap = unsafe { memmap2::Mmap::map(&file)? };
     let st = SafeTensors::deserialize(&mmap)?;
@@ -62,7 +102,7 @@ fn convert_safetensor_to_ztensor(input: &str, output: &str) -> Result<(), Box<dy
             shape,
             dtype,
             Layout::Dense,
-            Encoding::Raw,
+            if compress { Encoding::Zstd } else { Encoding::Raw },
             data,
             Some(DataEndianness::Little),
             ChecksumAlgorithm::None,
@@ -73,41 +113,90 @@ fn convert_safetensor_to_ztensor(input: &str, output: &str) -> Result<(), Box<dy
     Ok(())
 }
 
+fn dtype_size(dtype: &ztensor::DType) -> Option<usize> {
+    use ztensor::DType::*;
+    Some(match dtype {
+        Float64 | Int64 | Uint64 => 8,
+        Float32 | Int32 | Uint32 | BFloat16 | Float16 => 4,
+        Int16 | Uint16 => 2,
+        Int8 | Uint8 | Bool => 1,
+        _ => return None,
+    })
+}
+
+fn shape_numel(shape: &[u64]) -> u64 {
+    shape.iter().product()
+}
+
+fn print_tensors_table(tensors: &[ztensor::TensorMetadata]) {
+    let mut table = Table::new();
+    table.load_preset(UTF8_FULL)
+        .set_content_arrangement(ContentArrangement::Dynamic);
+    table.set_header(vec![
+        "#", "Name", "Shape", "DType", "Encoding", "Layout", "Offset", "Size", "On-disk Size"
+    ]);
+    for (i, meta) in tensors.iter().enumerate() {
+        let shape_str = if meta.shape.is_empty() {
+            "(scalar)".to_string()
+        } else {
+            format!("[{}]", meta.shape.iter().map(|d| d.to_string()).collect::<Vec<_>>().join(", "))
+        };
+        let dtype_str = format!("{:?}", meta.dtype);
+        let encoding_str = format!("{:?}", meta.encoding);
+        let layout_str = format!("{:?}", meta.layout);
+        let offset_str = meta.offset.to_string();
+        let numel = shape_numel(&meta.shape);
+        let size = dtype_size(&meta.dtype).map(|s| s as u64 * numel);
+        let size_str = size.map(|s| format_size(s, DECIMAL)).unwrap_or("?".to_string());
+        let on_disk_str = format_size(meta.size, DECIMAL);
+        table.add_row(Row::from(vec![
+            Cell::new(i),
+            Cell::new(&meta.name),
+            Cell::new(shape_str),
+            Cell::new(dtype_str),
+            Cell::new(encoding_str),
+            Cell::new(layout_str),
+            Cell::new(offset_str),
+            Cell::new(size_str),
+            Cell::new(on_disk_str),
+        ]));
+    }
+    println!("{}", table);
+}
+
 fn main() {
-    let args: Vec<String> = env::args().collect();
-    if args.len() >= 4 && args[1] == "convert" && args[2].ends_with(".safetensor") && args[3].ends_with(".zt") {
-        match convert_safetensor_to_ztensor(&args[2], &args[3]) {
-            Ok(()) => {
-                println!("Successfully converted {} to {}", args[2], args[3]);
+    let cli = Cli::parse();
+    match &cli.command {
+        Some(Commands::Convert { input, output, compress }) => {
+            match convert_safetensor_to_ztensor(input, output, *compress) {
+                Ok(()) => println!("Successfully converted {} to {}", input, output),
+                Err(e) => {
+                    eprintln!("Conversion failed: {}", e);
+                    process::exit(1);
+                }
             }
-            Err(e) => {
-                eprintln!("Conversion failed: {}", e);
+        }
+        Some(Commands::Info { file }) => {
+            if !Path::new(file).exists() {
+                eprintln!("File not found: {}", file);
                 process::exit(1);
             }
-        }
-        return;
-    }
-    if args.len() < 2 {
-        eprintln!("Usage: {} <ztensor-file>", args[0]);
-        process::exit(1);
-    }
-    let file_path = &args[1];
-    if !Path::new(file_path).exists() {
-        eprintln!("File not found: {}", file_path);
-        process::exit(1);
-    }
-    match ZTensorReader::open(file_path) {
-        Ok(reader) => {
-            let tensors = reader.list_tensors();
-            println!("zTensor file: {}", file_path);
-            println!("Number of tensors: {}", tensors.len());
-            for (i, meta) in tensors.iter().enumerate() {
-                println!("\n--- Tensor {} ---", i);
-                print_tensor_metadata(meta);
+            match ZTensorReader::open(file) {
+                Ok(reader) => {
+                    let tensors = reader.list_tensors();
+                    println!("zTensor file: {}", file);
+                    println!("Number of tensors: {}", tensors.len());
+                    print_tensors_table(&tensors);
+                }
+                Err(e) => {
+                    eprintln!("Failed to open zTensor file: {}", e);
+                    process::exit(1);
+                }
             }
         }
-        Err(e) => {
-            eprintln!("Failed to open zTensor file: {}", e);
+        None => {
+            Cli::command().print_help().unwrap();
+            println!();
             process::exit(1);
         }
     }

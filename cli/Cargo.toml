@@ -7,3 +7,6 @@ edition = "2024"
 ztensor = { path = ".."}
 safetensors = "0.4"
 memmap2 = "0.9"
+clap = { version = "4", features = ["derive"] }
+comfy-table = "7"
+humansize = "2"
