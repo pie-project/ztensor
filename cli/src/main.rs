@@ -93,6 +93,22 @@ enum Commands {
         #[arg(help = "Path to the .zt file to inspect")]
         file: String,
     },
+    /// Merge multiple zTensor files into a single file
+    #[command(
+        about = "Merge multiple zTensor files into a single file.",
+        long_about = "Merge multiple zTensor files into a single file. Optionally delete the originals after merging for storage savings.\n\nExample:\n  ztensor merge --preserve-original false merged.zt file1.zt file2.zt file3.zt\n"
+    )]
+    Merge {
+        /// Output .zt file (merged)
+        #[arg(help = "Path to the output merged .zt file")]
+        output: String,
+        /// Input .zt files to merge
+        #[arg(help = "Paths to the input .zt files to merge", required = true)]
+        inputs: Vec<String>,
+        /// Preserve original files after merging
+        #[arg(long, default_value_t = true, help = "Preserve original files after merging (default: true)")]
+        preserve_original: bool,
+    },
 }
 
 fn print_tensor_metadata(meta: &ztensor::TensorMetadata) {
@@ -389,7 +405,7 @@ fn try_parse_pickle_tensor(
                     *dtype = Some(ztensor::DType::Int64);
                 } // Default to Int64
                 if *dtype != Some(ztensor::DType::Int64) {
-                    return Err("Mixed data types: expected Int64".to_string());
+                    return Err("Mixed data types: expected Int64". to_string());
                 }
                 ensure_shape_depth(shape, current_depth)?;
                 data_bytes.extend_from_slice(&i.to_le_bytes());
@@ -684,6 +700,45 @@ fn detect_format_from_extension(input: &str) -> Option<&'static str> {
     }
 }
 
+fn merge_ztensor_files(
+    inputs: &[String],
+    output: &str,
+    preserve_original: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use std::fs;
+    use std::collections::HashSet;
+    let mut writer = ZTensorWriter::create(output)?;
+    let mut seen_names = HashSet::new();
+    for input in inputs {
+        let mut reader = ZTensorReader::open(input)?;
+        let metas = reader.list_tensors().clone();
+        for meta in metas {
+            if seen_names.contains(&meta.name) {
+                return Err(format!("Duplicate tensor name '{}' found in file '{}'. Aborting merge.", meta.name, input).into());
+            }
+            let data = reader.read_raw_tensor_data(&meta)?;
+            writer.add_tensor(
+                &meta.name,
+                meta.shape.clone(),
+                meta.dtype.clone(),
+                meta.layout.clone(),
+                meta.encoding.clone(),
+                data,
+                meta.data_endianness.clone(),
+                ChecksumAlgorithm::None,
+                Some(meta.custom_fields.clone()),
+            )?;
+            seen_names.insert(meta.name.clone());
+        }
+        if !preserve_original {
+            // Remove the file after processing
+            fs::remove_file(input)?;
+        }
+    }
+    writer.finalize()?;
+    Ok(())
+}
+
 fn main() {
     let cli = Cli::parse();
     match &cli.command {
@@ -766,6 +821,23 @@ fn main() {
                 }
                 Err(e) => {
                     eprintln!("Failed to open zTensor file: {}", e);
+                    process::exit(1);
+                }
+            }
+        }
+        Some(Commands::Merge { output, inputs, preserve_original }) => {
+            if inputs.is_empty() {
+                eprintln!("No input files provided for merge.");
+                process::exit(1);
+            }
+            if Path::new(output).exists() {
+                eprintln!("Output file '{}' already exists. Please remove it or choose a different name.", output);
+                process::exit(1);
+            }
+            match merge_ztensor_files(inputs, output, *preserve_original) {
+                Ok(()) => println!("Successfully merged {} files into {}", inputs.len(), output),
+                Err(e) => {
+                    eprintln!("Merge failed: {}", e);
                     process::exit(1);
                 }
             }
