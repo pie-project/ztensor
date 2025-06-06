@@ -33,3 +33,6 @@ target/
 
 *.safetensors
 *.gguf
+*.bin
+
+__pycache__/

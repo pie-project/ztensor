@@ -6,12 +6,13 @@ use ztensor::{ChecksumAlgorithm, ZTensorReader, ZTensorError};
 use safetensors::SafeTensorError;
 use safetensors::tensor::SafeTensors;
 use std::fs::File;
-use std::io::{BufWriter, Write, Seek, SeekFrom, Read};
+use std::io::{BufWriter, Write, Seek, SeekFrom, Read, BufReader};
 use ztensor::{ZTensorWriter, DType, Layout, Encoding, DataEndianness};
 use clap::{Parser, Subcommand};
 use clap::CommandFactory;
 use comfy_table::{Table, Row, Cell, presets::UTF8_FULL, ContentArrangement};
 use humansize::{format_size, DECIMAL};
+use serde_pickle::Value as PickleValue;
 
 #[derive(Parser)]
 #[command(name = "ztensor", version, about = "zTensor CLI: inspect and convert tensor files", author, propagate_version = true)]
@@ -22,30 +23,18 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Show metadata and stats for a zTensor file
-    Info {
-        /// Path to the .zt file
-        file: String,
-    },
-    /// Convert a SafeTensor file to zTensor format
+    /// Convert a tensor file (SafeTensor, GGUF, Pickle) to zTensor format
     Convert {
-        /// Input .safetensor file
+        /// Input file (.safetensor, .gguf, .pkl, etc)
         input: String,
         /// Output .zt file
         output: String,
         /// Compress tensor data with zstd
         #[arg(long)]
         compress: bool,
-    },
-    /// Convert a GGUF file to zTensor format
-    ConvertGGUF {
-        /// Input .gguf file
-        input: String,
-        /// Output .zt file
-        output: String,
-        /// Compress tensor data with zstd
-        #[arg(long)]
-        compress: bool,
+        /// Input format: auto, safetensor, gguf, pickle
+        #[arg(long, value_name = "FORMAT", default_value = "auto")]
+        format: String,
     },
     /// Compress an uncompressed zTensor file (raw encoding) to zstd encoding
     Compress {
@@ -60,6 +49,11 @@ enum Commands {
         input: String,
         /// Output .zt file (uncompressed)
         output: String,
+    },
+    /// Show metadata and stats for a zTensor file
+    Info {
+        /// Path to the .zt file
+        file: String,
     },
 }
 
@@ -198,6 +192,211 @@ fn convert_gguf_to_ztensor(input: &str, output: &str, compress: bool) -> Result<
     Ok(())
 }
 
+// Helper function to convert PickleValue keys to strings for tensor naming
+fn key_to_string(key_val: &serde_pickle::HashableValue) -> String {
+    use serde_pickle::HashableValue;
+    match key_val {
+        HashableValue::String(s) => s.clone(),
+        HashableValue::Bytes(b) => String::from_utf8_lossy(b).into_owned(),
+        HashableValue::I64(i) => i.to_string(),
+        HashableValue::F64(f) => f.to_string(),
+        HashableValue::Bool(b) => b.to_string(),
+        HashableValue::Tuple(items) => {
+            items.iter().map(key_to_string).collect::<Vec<_>>().join("_")
+        }
+        // Add more specific cases if other key types are common and need specific formatting
+        _ => format!("key_{:?}", key_val).replace(|c: char| !c.is_alphanumeric() && c != '_', "_"),
+    }
+}
+
+// Helper to parse a PickleValue as a potential tensor
+fn try_parse_pickle_tensor(value: &PickleValue) -> Result<Option<(Vec<u64>, ztensor::DType, Vec<u8>)>, String> {
+    let mut data_bytes = Vec::new();
+    let mut inferred_dtype: Option<ztensor::DType> = None;
+    let mut shape = Vec::new();
+
+    fn ensure_shape_depth(shape: &Vec<u64>, depth: usize) -> Result<(), String> {
+        if shape.len() != depth {
+            Err(format!("Dimension mismatch: expected scalar at depth {}, but tensor shape is deeper. Shape: {:?}, Depth: {}", depth, shape, depth))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn collect_elements(
+        current_value: &PickleValue,
+        current_depth: usize,
+        shape: &mut Vec<u64>,
+        data_bytes: &mut Vec<u8>,
+        dtype: &mut Option<ztensor::DType>,
+    ) -> Result<(), String> {
+        match current_value {
+            PickleValue::List(items) | PickleValue::Tuple(items) => {
+                if current_depth == 0 && items.is_empty() { // Top-level empty list
+                    shape.push(0); // Represents an empty tensor
+                    // Default to Float32 for empty tensor if no other type info
+                    if dtype.is_none() { *dtype = Some(ztensor::DType::Float32); }
+                    return Ok(());
+                }
+                // Disallow empty lists/tuples within a tensor structure for now, or define behavior.
+                if items.is_empty() {
+                    return Err("Empty list/tuple found within tensor structure.".to_string());
+                }
+
+                if shape.len() == current_depth {
+                    shape.push(items.len() as u64);
+                } else if shape[current_depth] != items.len() as u64 {
+                    return Err(format!(
+                        "Jagged tensor: dimension mismatch at depth {}. Expected {}, got {}. Shape: {:?}",
+                        current_depth, shape[current_depth], items.len(), shape
+                    ));
+                }
+
+                for item in items {
+                    collect_elements(item, current_depth + 1, shape, data_bytes, dtype)?;
+                }
+                Ok(())
+            }
+            PickleValue::F64(f) => {
+                if dtype.is_none() { *dtype = Some(ztensor::DType::Float64); }
+                if *dtype != Some(ztensor::DType::Float64) { return Err("Mixed data types: expected Float64".to_string()); }
+                ensure_shape_depth(shape, current_depth)?;
+                data_bytes.extend_from_slice(&f.to_le_bytes());
+                Ok(())
+            }
+            PickleValue::I64(i) => { // serde_pickle reads Python int as I64
+                if dtype.is_none() { *dtype = Some(ztensor::DType::Int64); } // Default to Int64
+                if *dtype != Some(ztensor::DType::Int64) { return Err("Mixed data types: expected Int64".to_string());}
+                ensure_shape_depth(shape, current_depth)?;
+                data_bytes.extend_from_slice(&i.to_le_bytes());
+                Ok(())
+            }
+            PickleValue::Bool(b) => {
+                if dtype.is_none() { *dtype = Some(ztensor::DType::Bool); }
+                if *dtype != Some(ztensor::DType::Bool) { return Err("Mixed data types: expected Bool".to_string()); }
+                ensure_shape_depth(shape, current_depth)?;
+                data_bytes.push(if *b { 1 } else { 0 });
+                Ok(())
+            }
+            _ => Err(format!("Unsupported data type in tensor: {:?}", current_value)),
+        }
+    }
+
+    match collect_elements(value, 0, &mut shape, &mut data_bytes, &mut inferred_dtype) {
+        Ok(()) => {
+            if let Some(dt) = inferred_dtype {
+                // If shape is empty AND data_bytes is not empty, it was a scalar. zTensor uses empty shape vec for scalars.
+                // If shape is [0], it was an empty list [], also a valid tensor.
+                Ok(Some((shape, dt, data_bytes)))
+            } else {
+                 // This case should ideally not be reached if collect_elements succeeds and infers a dtype.
+                 // If value was an empty list, shape would be [0] and dtype set.
+                Ok(None)
+            }
+        }
+        Err(_ /*e*/) => {
+            // eprintln!("Tensor parsing error for value {:?}: {}", value.variant_name(), e); // Debugging
+            Ok(None) // Treat parsing errors as "not a tensor" for this path
+        }
+    }
+}
+
+// Recursively traverses PickleValue, identifies tensors, and flattens names.
+fn pickle_value_to_ztensor_components(
+    prefix: &str,
+    value: &PickleValue,
+    tensors: &mut Vec<(String, Vec<u64>, ztensor::DType, Vec<u8>)>,
+) -> Result<(), String> {
+    match value {
+        PickleValue::Dict(items) => {
+            for (key_val, sub_value) in items {
+                let key_str = key_to_string(key_val);
+                let new_prefix = if prefix.is_empty() { key_str } else { format!("{}.{}", prefix, key_str) };
+                pickle_value_to_ztensor_components(&new_prefix, sub_value, tensors)?;
+            }
+        }
+        _ => { // Attempt to parse any other value as a tensor (includes lists, tuples, scalars)
+            if let Some((shape, dtype, data)) = try_parse_pickle_tensor(value)? {
+                // Add if data is present, or if it\'s an explicitly empty tensor (shape [0])
+                if !data.is_empty() || shape == vec![0] {
+                     // Use current prefix as the name if it\'s a direct tensor,
+                     // or if it\'s a scalar found not inside a dict.
+                    let tensor_name = if prefix.is_empty() { "tensor".to_string() } else { prefix.to_string() };
+                    tensors.push((tensor_name, shape, dtype, data));
+                }
+                // If it was parsed as a tensor, we don\'t recurse further into its structure.
+            } else {
+                // If not a dict and not a parseable tensor, it might be a list of other things.
+                // The prompt says "discard other metadata".
+                // If `value` was a List/Tuple and `try_parse_pickle_tensor` returned None,
+                // it means it wasn\'t a uniform tensor. We could recurse into its elements
+                // if they could be dicts leading to more tensors, using index-based names.
+                if let PickleValue::List(sub_items) | PickleValue::Tuple(sub_items) = value {
+                    for (idx, item) in sub_items.iter().enumerate() {
+                        let new_prefix = if prefix.is_empty() {
+                            format!("item_{}", idx)
+                        } else {
+                            format!("{}.{}", prefix, idx)
+                        };
+                        pickle_value_to_ztensor_components(&new_prefix, item, tensors)?;
+                    }
+                }
+                // Otherwise (e.g. a standalone string, None not part of a dict), ignore.
+            }
+        }
+    }
+    Ok(())
+}
+
+fn convert_pickle_to_ztensor(input: &str, output: &str, compress: bool) -> Result<(), Box<dyn std::error::Error>> {
+    let file = File::open(input).map_err(|e| format!("Failed to open input file '{}': {}", input, e))?;
+    let reader = BufReader::new(file);
+    
+    let pkl_value: PickleValue = match serde_pickle::value_from_reader(reader, Default::default()) {
+        Ok(val) => val,
+        Err(e) => {
+            return Err(format!(
+                "Failed to deserialize Pickle file '{}': {}\n\
+This often happens with PyTorch .pt/.bin files containing custom objects or large tensors.\n\
+For best results, save your tensors in Python as a dict of numpy arrays or lists, e.g.:\n\
+    import torch, pickle\n    tensors = {{k: v.cpu().numpy() for k, v in torch.load('pytorch_model.bin', map_location='cpu').items()}}\n    with open('model_simple.pkl', 'wb') as f: pickle.dump(tensors, f)\n\
+Then use this tool on 'model_simple.pkl'.",
+                input, e
+            ).into());
+        }
+    };
+
+    let mut writer = ZTensorWriter::create(output)
+        .map_err(|e| format!("Failed to create ZTensorWriter for output '{}': {}", output, e))?;
+    
+    let mut found_tensors: Vec<(String, Vec<u64>, ztensor::DType, Vec<u8>)> = Vec::new();
+
+    pickle_value_to_ztensor_components("", &pkl_value, &mut found_tensors)
+        .map_err(|e| format!("Error processing pickle structure from '{}': {}", input, e))?;
+
+    if found_tensors.is_empty() {
+        return Err(format!("No compatible (numpy/pytorch-like) tensors found in '{}'.", input).into());
+    }
+
+    for (name, shape, dtype, data) in found_tensors {
+        let cleaned_name = if name.is_empty() { "unnamed_tensor".to_string() } else { name };
+        writer.add_tensor(
+            &cleaned_name,
+            shape,
+            dtype,
+            Layout::Dense, // Assuming dense layout
+            if compress { Encoding::Zstd } else { Encoding::Raw },
+            data,
+            Some(DataEndianness::Little), // Common default; NumPy/PyTorch use native.
+            ChecksumAlgorithm::None,
+            Some(BTreeMap::new()), // No custom fields extracted
+        )?;
+    }
+
+    writer.finalize()?;
+    Ok(())
+}
+
 fn compress_ztensor(input: &str, output: &str) -> Result<(), Box<dyn std::error::Error>> {
     let mut reader = ZTensorReader::open(input)?;
     let mut writer = ZTensorWriter::create(output)?;
@@ -293,23 +492,59 @@ fn print_tensors_table(tensors: &[ztensor::TensorMetadata]) {
     println!("{}", table);
 }
 
+fn detect_format_from_extension(input: &str) -> Option<&'static str> {
+    let input = input.to_ascii_lowercase();
+    if input.ends_with(".safetensor") || input.ends_with(".safetensors") {
+        Some("safetensor")
+    } else if input.ends_with(".gguf") {
+        Some("gguf")
+    } else if input.ends_with(".pkl") || input.ends_with(".pickle") {
+        Some("pickle")
+    } else {
+        None
+    }
+}
+
 fn main() {
     let cli = Cli::parse();
     match &cli.command {
-        Some(Commands::Convert { input, output, compress }) => {
-            match convert_safetensor_to_ztensor(input, output, *compress) {
-                Ok(()) => println!("Successfully converted {} to {}", input, output),
-                Err(e) => {
-                    eprintln!("Conversion failed: {}", e);
-                    process::exit(1);
+        Some(Commands::Convert { input, output, compress, format }) => {
+            let format = format.to_ascii_lowercase();
+            let detected_format = if format == "auto" {
+                detect_format_from_extension(input)
+            } else {
+                Some(format.as_str())
+            };
+            match detected_format {
+                Some("safetensor") => {
+                    match convert_safetensor_to_ztensor(input, output, *compress) {
+                        Ok(()) => println!("Successfully converted {} to {}", input, output),
+                        Err(e) => {
+                            eprintln!("Conversion failed: {}", e);
+                            process::exit(1);
+                        }
+                    }
                 }
-            }
-        }
-        Some(Commands::ConvertGGUF { input, output, compress }) => {
-            match convert_gguf_to_ztensor(input, output, *compress) {
-                Ok(()) => println!("Successfully converted GGUF {} to zTensor {}", input, output),
-                Err(e) => {
-                    eprintln!("GGUF to zTensor conversion failed: {}", e);
+                Some("gguf") => {
+                    match convert_gguf_to_ztensor(input, output, *compress) {
+                        Ok(()) => println!("Successfully converted GGUF {} to zTensor {}", input, output),
+                        Err(e) => {
+                            eprintln!("GGUF to zTensor conversion failed: {}", e);
+                            process::exit(1);
+                        }
+                    }
+                }
+                Some("pickle") => {
+                    match convert_pickle_to_ztensor(input, output, *compress) {
+                        Ok(()) => println!("Successfully converted Pickle {} to zTensor {}", input, output),
+                        Err(e) => {
+                            eprintln!("Pickle to zTensor conversion failed: {}", e);
+                            process::exit(1);
+                        }
+                    }
+                }
+                _ => {
+                    eprintln!("Could not auto-detect input format for '{}'. Please specify --format [safetensor|gguf|pickle]", input);
                     process::exit(1);
                 }
             }
