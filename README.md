@@ -64,6 +64,7 @@ Optional fields:
 To read the index:
 1. Read the last 8 bytes for the CBOR array size.
 2. Seek backwards by that amount to read the CBOR metadata array.
+3. 
 As a result, the start offset of the metadata is: (file size) - (size of the metadata) - (8 byte).
 
 ## Zero-Tensor Files
