@@ -32,13 +32,13 @@ struct Cli {
 enum Commands {
     /// Convert a tensor file (SafeTensor, GGUF, Pickle) to zTensor format
     #[command(
-        about = "Convert a tensor file (SafeTensor, GGUF, Pickle) to zTensor format.",
-        long_about = "Convert a tensor file to zTensor format.\n\nSupported input formats: SafeTensor (.safetensor), GGUF (.gguf), Pickle (.pkl, .pickle).\n\nExamples:\n  ztensor convert model.safetensor model.zt\n  ztensor convert --format gguf model.gguf model.zt --compress\n  ztensor convert --format pickle model.pkl model.zt\n"
+        about = "Convert one or more tensor files (SafeTensor, GGUF, Pickle) to a single zTensor file.",
+        long_about = "Convert one or more tensor files to a single zTensor file.\n\nSupported input formats: SafeTensor (.safetensor), GGUF (.gguf), Pickle (.pkl, .pickle).\n\nExamples:\n  ztensor convert model.safetensor model.zt\n  ztensor convert --format gguf model1.gguf model2.gguf model.zt --preserve-original false\n  ztensor convert --format pickle model1.pkl model2.pkl model.zt\n"
     )]
     Convert {
-        /// Input file (.safetensor, .gguf, .pkl, etc)
-        #[arg(help = "Path to the input tensor file (SafeTensor, GGUF, Pickle)")]
-        input: String,
+        /// Input files (.safetensor, .gguf, .pkl, etc)
+        #[arg(help = "Paths to the input tensor files (SafeTensor, GGUF, Pickle)", required = true)]
+        inputs: Vec<String>,
         /// Output .zt file
         #[arg(help = "Path to the output .zt file")]
         output: String,
@@ -56,6 +56,9 @@ enum Commands {
             help = "Input format: auto, safetensor, gguf, pickle. Default: auto-detect from extension."
         )]
         format: String,
+        /// Preserve original files after converting
+        #[arg(long, default_value_t = true, help = "Preserve original files after converting (default: true)")]
+        preserve_original: bool,
     },
     /// Compress an uncompressed zTensor file (raw encoding) to zstd encoding
     #[command(
@@ -687,16 +690,51 @@ fn print_tensors_table(tensors: &[ztensor::TensorMetadata]) {
     println!("{}", table);
 }
 
-fn detect_format_from_extension(input: &str) -> Option<&'static str> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InputFormat {
+    SafeTensor,
+    GGUF,
+    Pickle,
+}
+
+fn detect_format_from_extension(input: &str) -> Option<InputFormat> {
     let input = input.to_ascii_lowercase();
     if input.ends_with(".safetensor") || input.ends_with(".safetensors") {
-        Some("safetensor")
+        Some(InputFormat::SafeTensor)
     } else if input.ends_with(".gguf") {
-        Some("gguf")
+        Some(InputFormat::GGUF)
     } else if input.ends_with(".pkl") || input.ends_with(".pickle") {
-        Some("pickle")
+        Some(InputFormat::Pickle)
     } else {
         None
+    }
+}
+
+fn detect_format_for_inputs(inputs: &[String], format: &str) -> Option<InputFormat> {
+    if format == "auto" {
+        let mut detected: Option<InputFormat> = None;
+        for input in inputs {
+            let this_format = detect_format_from_extension(input);
+            if let Some(fmt) = this_format {
+                if let Some(prev) = detected {
+                    if prev != fmt {
+                        return None; // Mixed formats
+                    }
+                } else {
+                    detected = Some(fmt);
+                }
+            } else {
+                return None;
+            }
+        }
+        detected
+    } else {
+        match format {
+            "safetensor" => Some(InputFormat::SafeTensor),
+            "gguf" => Some(InputFormat::GGUF),
+            "pickle" => Some(InputFormat::Pickle),
+            _ => None,
+        }
     }
 }
 
@@ -739,55 +777,243 @@ fn merge_ztensor_files(
     Ok(())
 }
 
+fn convert_safetensors_to_ztensor(
+    inputs: &[String],
+    output: &str,
+    compress: bool,
+    preserve_original: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use std::fs;
+    use std::collections::HashSet;
+    let mut writer = ZTensorWriter::create(output)?;
+    let mut seen_names = HashSet::new();
+    for input in inputs {
+        let file = File::open(input)?;
+        let mmap = unsafe { memmap2::Mmap::map(&file)? };
+        let st = SafeTensors::deserialize(&mmap)?;
+        for (name, tensor) in st.tensors() {
+            if seen_names.contains(&name) {
+                return Err(format!("Duplicate tensor name '{}' found in file '{}'. Aborting merge.", name, input).into());
+            }
+            let dtype = safetensor_dtype_to_ztensor(&tensor.dtype())
+                .ok_or_else(|| format!("Unsupported dtype: {:?}", tensor.dtype()))?;
+            let shape: Vec<u64> = tensor.shape().iter().map(|&d| d as u64).collect();
+            let data = tensor.data().to_vec();
+            writer.add_tensor(
+                &name,
+                shape,
+                dtype,
+                Layout::Dense,
+                if compress { Encoding::Zstd } else { Encoding::Raw },
+                data,
+                Some(DataEndianness::Little),
+                ChecksumAlgorithm::None,
+                Some(BTreeMap::new()),
+            )?;
+            seen_names.insert(name.to_string());
+        }
+        if !preserve_original {
+            fs::remove_file(input)?;
+        }
+    }
+    writer.finalize()?;
+    Ok(())
+}
+
+fn convert_ggufs_to_ztensor(
+    inputs: &[String],
+    output: &str,
+    compress: bool,
+    preserve_original: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use std::fs;
+    use std::collections::HashSet;
+    let mut writer = ZTensorWriter::create(output)?;
+    let mut seen_names = HashSet::new();
+    for input in inputs {
+        let mut container = gguf_rs::get_gguf_container(input)?;
+        let model = container.decode()?;
+        let mut f = File::open(input)?;
+        for tensor_info in model.tensors() {
+            let ggml_dtype: gguf_rs::GGMLType = tensor_info
+                .kind
+                .try_into()
+                .map_err(|e| format!("Unsupported GGUF dtype: {}", e))?;
+            if let Some(dtype) = gguf_dtype_to_ztensor(&ggml_dtype) {
+                if seen_names.contains(&tensor_info.name) {
+                    return Err(format!("Duplicate tensor name '{}' found in file '{}'. Aborting merge.", tensor_info.name, input).into());
+                }
+                let shape: Vec<u64> = tensor_info
+                    .shape
+                    .iter()
+                    .map(|&d| d as u64)
+                    .filter(|&d| d > 0)
+                    .collect();
+                let numel: u64 = shape.iter().product();
+                let type_size = match dtype {
+                    ztensor::DType::Float64 | ztensor::DType::Int64 | ztensor::DType::Uint64 => 8,
+                    ztensor::DType::Float32 | ztensor::DType::Int32 | ztensor::DType::Uint32 => 4,
+                    ztensor::DType::BFloat16
+                    | ztensor::DType::Float16
+                    | ztensor::DType::Int16
+                    | ztensor::DType::Uint16 => 2,
+                    ztensor::DType::Int8 | ztensor::DType::Uint8 | ztensor::DType::Bool => 1,
+                    _ => {
+                        return Err(format!(
+                            "Unsupported ztensor dtype for size calculation: {:?}",
+                            dtype
+                        )
+                        .into());
+                    }
+                };
+                let data_size = numel * type_size;
+                let mut data = vec![0u8; data_size as usize];
+                f.seek(SeekFrom::Start(tensor_info.offset))?;
+                f.read_exact(&mut data)?;
+                writer.add_tensor(
+                    &tensor_info.name,
+                    shape,
+                    dtype,
+                    Layout::Dense,
+                    if compress { Encoding::Zstd } else { Encoding::Raw },
+                    data,
+                    Some(DataEndianness::Little),
+                    ChecksumAlgorithm::None,
+                    Some(BTreeMap::new()),
+                )?;
+                seen_names.insert(tensor_info.name.clone());
+            } else {
+                eprintln!(
+                    "Warning: Skipping tensor '{}' with unsupported GGUF dtype: {:?}",
+                    tensor_info.name, ggml_dtype
+                );
+            }
+        }
+        if !preserve_original {
+            fs::remove_file(input)?;
+        }
+    }
+    writer.finalize()?;
+    Ok(())
+}
+
+fn convert_pickles_to_ztensor(
+    inputs: &[String],
+    output: &str,
+    compress: bool,
+    preserve_original: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use std::fs;
+    use std::collections::HashSet;
+    let mut writer = ZTensorWriter::create(output)?;
+    let mut seen_names = HashSet::new();
+    for input in inputs {
+        let file = File::open(input).map_err(|e| format!("Failed to open input file '{}': {}", input, e))?;
+        let reader = BufReader::new(file);
+        let pkl_value: PickleValue = match serde_pickle::value_from_reader(reader, Default::default()) {
+            Ok(val) => val,
+            Err(e) => {
+                return Err(format!(
+                    "Failed to deserialize Pickle file '{}': {}\n\
+This often happens with PyTorch .pt/.bin files containing custom objects or large tensors.\n\
+For best results, save your tensors in Python as a dict of numpy arrays or lists, e.g.:\n\
+    import torch, pickle\n    tensors = {{k: v.cpu().numpy() for k, v in torch.load('pytorch_model.bin', map_location='cpu').items()}}\n    with open('model_simple.pkl', 'wb') as f: pickle.dump(tensors, f)\n\
+Then use this tool on 'model_simple.pkl'.",
+                    input, e
+                ).into());
+            }
+        };
+        let mut found_tensors: Vec<(String, Vec<u64>, ztensor::DType, Vec<u8>)> = Vec::new();
+        pickle_value_to_ztensor_components("", &pkl_value, &mut found_tensors)
+            .map_err(|e| format!("Error processing pickle structure from '{}': {}", input, e))?;
+        if found_tensors.is_empty() {
+            return Err(format!(
+                "No compatible (numpy/pytorch-like) tensors found in '{}'.",
+                input
+            )
+            .into());
+        }
+        for (name, shape, dtype, data) in found_tensors {
+            if seen_names.contains(&name) {
+                return Err(format!("Duplicate tensor name '{}' found in file '{}'. Aborting merge.", name, input).into());
+            }
+            let cleaned_name = if name.is_empty() {
+                "unnamed_tensor".to_string()
+            } else {
+                name
+            };
+            writer.add_tensor(
+                &cleaned_name,
+                shape,
+                dtype,
+                Layout::Dense,
+                if compress { Encoding::Zstd } else { Encoding::Raw },
+                data,
+                Some(DataEndianness::Little),
+                ChecksumAlgorithm::None,
+                Some(BTreeMap::new()),
+            )?;
+            seen_names.insert(cleaned_name);
+        }
+        if !preserve_original {
+            fs::remove_file(input)?;
+        }
+    }
+    writer.finalize()?;
+    Ok(())
+}
+
 fn main() {
     let cli = Cli::parse();
     match &cli.command {
         Some(Commands::Convert {
-            input,
+            inputs,
             output,
             compress,
             format,
+            preserve_original,
         }) => {
+            if inputs.is_empty() {
+                eprintln!("No input files provided for convert.");
+                process::exit(1);
+            }
+            if Path::new(output).exists() {
+                eprintln!("Output file '{}' already exists. Please remove it or choose a different name.", output);
+                process::exit(1);
+            }
             let format = format.to_ascii_lowercase();
-            let detected_format = if format == "auto" {
-                detect_format_from_extension(input)
-            } else {
-                Some(format.as_str())
-            };
+            let detected_format = detect_format_for_inputs(inputs, &format);
             match detected_format {
-                Some("safetensor") => {
-                    match convert_safetensor_to_ztensor(input, output, *compress) {
-                        Ok(()) => println!("Successfully converted {} to {}", input, output),
+                Some(InputFormat::SafeTensor) => {
+                    match convert_safetensors_to_ztensor(inputs, output, *compress, *preserve_original) {
+                        Ok(()) => println!("Successfully converted and merged {} safetensor files into {}", inputs.len(), output),
                         Err(e) => {
                             eprintln!("Conversion failed: {}", e);
                             process::exit(1);
                         }
                     }
                 }
-                Some("gguf") => match convert_gguf_to_ztensor(input, output, *compress) {
-                    Ok(()) => println!(
-                        "Successfully converted GGUF {} to zTensor {}",
-                        input, output
-                    ),
-                    Err(e) => {
-                        eprintln!("GGUF to zTensor conversion failed: {}", e);
-                        process::exit(1);
+                Some(InputFormat::GGUF) => {
+                    match convert_ggufs_to_ztensor(inputs, output, *compress, *preserve_original) {
+                        Ok(()) => println!("Successfully converted and merged {} GGUF files into {}", inputs.len(), output),
+                        Err(e) => {
+                            eprintln!("Conversion failed: {}", e);
+                            process::exit(1);
+                        }
                     }
-                },
-                Some("pickle") => match convert_pickle_to_ztensor(input, output, *compress) {
-                    Ok(()) => println!(
-                        "Successfully converted Pickle {} to zTensor {}",
-                        input, output
-                    ),
-                    Err(e) => {
-                        eprintln!("Pickle to zTensor conversion failed: {}", e);
-                        process::exit(1);
+                }
+                Some(InputFormat::Pickle) => {
+                    match convert_pickles_to_ztensor(inputs, output, *compress, *preserve_original) {
+                        Ok(()) => println!("Successfully converted and merged {} pickle files into {}", inputs.len(), output),
+                        Err(e) => {
+                            eprintln!("Conversion failed: {}", e);
+                            process::exit(1);
+                        }
                     }
-                },
+                }
                 _ => {
                     eprintln!(
-                        "Could not auto-detect input format for '{}'. Please specify --format [safetensor|gguf|pickle]",
-                        input
+                        "Could not auto-detect input format for the provided files or mixed/unsupported formats. Please specify --format [safetensor|gguf|pickle] and ensure all inputs are of the same type."
                     );
                     process::exit(1);
                 }

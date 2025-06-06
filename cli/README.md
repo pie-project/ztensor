@@ -4,7 +4,8 @@ A command-line tool for inspecting, converting, and compressing tensor files in 
 
 ## Features
 - Display metadata and stats for `.zt` (zTensor) files
-- Convert `.safetensor`, `.gguf`, and `.pkl`/`.pickle` files to `.zt` (zTensor) files
+- Convert one or more `.safetensor`, `.gguf`, and `.pkl`/`.pickle` files to a single `.zt` (zTensor) file
+- Merge multiple `.zt` files into one
 - Compress and decompress zTensor files (zstd encoding)
 
 ## Supported Formats
@@ -21,15 +22,26 @@ A command-line tool for inspecting, converting, and compressing tensor files in 
 ztensor info <file.zt>
 ```
 
-### Convert SafeTensor, GGUF, or Pickle to zTensor
+### Convert one or more SafeTensor, GGUF, or Pickle files to zTensor
 
 ```sh
-ztensor convert <input> <output.zt>
+ztensor convert <input1> [<input2> ...] <output.zt>
 # Auto-detects format from extension
 
-ztensor convert --format safetensor model.safetensor model.zt
-ztensor convert --format gguf model.gguf model.zt --compress
-ztensor convert --format pickle model.pkl model.zt
+ztensor convert --format safetensor model1.safetensor model2.safetensor model.zt
+ztensor convert --format gguf model1.gguf model2.gguf model.zt --compress
+ztensor convert --format pickle model1.pkl model2.pkl model.zt
+
+# By default, input files are preserved. To delete them after conversion:
+ztensor convert --format safetensor model1.safetensor model2.safetensor model.zt --preserve-original false
+```
+
+### Merge multiple zTensor files
+
+```sh
+ztensor merge merged.zt file1.zt file2.zt file3.zt
+# To delete the originals after merging:
+ztensor merge --preserve-original false merged.zt file1.zt file2.zt
 ```
 
 ### Compress or Decompress zTensor files
