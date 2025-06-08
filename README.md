@@ -65,6 +65,8 @@ To read the index:
 1. Read the last 8 bytes for the CBOR array size.
 2. Seek backwards by that amount to read the CBOR metadata array.
 
+As a result, the start offset of the metadata is: (file size) - (size of the metadata) - (8 byte).
+
 ## Zero-Tensor Files
 A valid zTensor file may contain zero tensors:
 - 8 bytes magic, 1 byte empty CBOR array (`0x80`), 8 bytes size (`0x01...00`).
