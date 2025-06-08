@@ -872,6 +872,8 @@ dependencies = [
 [[package]]
 name = "ztensor"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4b543e996620037eb19e5ec680125aa0b1fe11b8f766294c090a88b31bf14773"
 dependencies = [
  "byteorder",
  "crc32c",
