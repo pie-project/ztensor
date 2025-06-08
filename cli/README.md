@@ -2,6 +2,14 @@
 
 A command-line tool for inspecting, converting, and compressing tensor files in the [zTensor](../README.md) format.
 
+## Installation
+
+You can install `ztensor-cli` from cargo:
+
+```sh
+cargo install ztensor-cli
+```
+
 ## Features
 - Display metadata and stats for `.zt` (zTensor) files
 - Convert one or more `.safetensor`, `.gguf`, and `.pkl`/`.pickle` files to a single `.zt` (zTensor) file
