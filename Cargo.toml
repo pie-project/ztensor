@@ -2,6 +2,10 @@
 name = "ztensor"
 version = "0.1.0"
 edition = "2024"
+authors = ["In Gim <in.gim@yale.edu>"]
+description = "zTensor file library"
+license = "MIT"
+repository = "https://github.com/pie-project/ztensor"
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
