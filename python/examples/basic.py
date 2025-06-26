@@ -3,8 +3,7 @@ import os
 import numpy as np
 from ztensor import Writer, Reader, ZTensorError
 
-
-file_path = "test_tensors.zt"
+file_path = "../test_tensors.zt"
 
 # --- Write Tensors ---
 print(f"--- Writing to {file_path} ---")

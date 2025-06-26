@@ -1,5 +1,6 @@
 import numpy as np
 from .ztensor import ffi, lib
+from ml_dtypes import bfloat16
 
 
 # --- Pythonic Wrapper ---
@@ -52,7 +53,10 @@ DTYPE_NP_TO_ZT = {
     np.dtype('uint64'): 'uint64', np.dtype('uint32'): 'uint32',
     np.dtype('uint16'): 'uint16', np.dtype('uint8'): 'uint8',
     np.dtype('bool'): 'bool',
+    # ADDED: Mapping for bfloat16 to handle writing
+    np.dtype(bfloat16): 'bfloat16',
 }
+# MODIFIED: Re-construct the reverse mapping
 DTYPE_ZT_TO_NP = {v: k for k, v in DTYPE_NP_TO_ZT.items()}
 
 
@@ -90,6 +94,7 @@ class TensorMetadata:
     @property
     def dtype(self):
         """Returns the numpy dtype for this tensor."""
+        # This will now correctly return a bfloat16 dtype object when dtype_str is 'bfloat16'
         return DTYPE_ZT_TO_NP.get(self.dtype_str)
 
     # RE-ENABLED: This property now works because the underlying FFI functions are available.
@@ -137,6 +142,12 @@ class Reader:
     def read_tensor(self, name: str) -> np.ndarray:
         """Reads a tensor by name and returns it as a NumPy array (zero-copy)."""
         metadata = self.get_metadata(name)
+
+        # This check is now more robust.
+        dtype = metadata.dtype
+        if dtype is None:
+            raise ZTensorError(f"Unsupported ztensor dtype: '{metadata.dtype_str}'")
+
         view_ptr = lib.ztensor_reader_read_tensor_view(self._ptr, metadata._ptr)
         _check_ptr(view_ptr, f"read_tensor: {name}")
 
@@ -144,9 +155,11 @@ class Reader:
         view_ptr = ffi.gc(view_ptr, lib.ztensor_free_tensor_view)
 
         # CORRECTED: Create array using the subclass, which handles reshaping and memory.
+        # With the correct bfloat16 dtype, np.frombuffer will now correctly interpret
+        # the buffer, creating an array with the right number of elements (2048).
         array = _ZTensorView(
             buffer=ffi.buffer(view_ptr.data, view_ptr.len),
-            dtype=metadata.dtype,
+            dtype=dtype,
             shape=metadata.shape,
             view_ptr=view_ptr
         )
@@ -189,6 +202,7 @@ class Writer:
         shape_array = np.array(tensor.shape, dtype=np.uint64)
         shape_ptr = ffi.cast("uint64_t*", shape_array.ctypes.data)
 
+        # The updated DTYPE_NP_TO_ZT will now correctly handle bfloat16 tensors.
         dtype_str = DTYPE_NP_TO_ZT.get(tensor.dtype)
         if not dtype_str:
             raise ZTensorError(f"Unsupported NumPy dtype: {tensor.dtype}")
