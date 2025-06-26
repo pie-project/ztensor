@@ -9,7 +9,7 @@ use std::sync::Mutex;
 
 use crate::ZTensorError;
 use crate::models::{ChecksumAlgorithm, DType, DataEndianness, Encoding, Layout, TensorMetadata};
-use crate::reader::{Pod, ZTensorReader};
+use crate::reader::ZTensorReader;
 use crate::writer::ZTensorWriter;
 
 // --- Error Handling ---
@@ -85,7 +85,9 @@ pub extern "C" fn ztensor_reader_open(path_str: *const c_char) -> *mut CZTensorR
 #[unsafe(no_mangle)]
 pub extern "C" fn ztensor_reader_free(reader_ptr: *mut CZTensorReader) {
     if !reader_ptr.is_null() {
-        unsafe { Box::from_raw(reader_ptr) };
+        unsafe {
+            let _ = Box::from_raw(reader_ptr);
+        };
     }
 }
 
@@ -166,7 +168,7 @@ pub extern "C" fn ztensor_free_tensor_view(view_ptr: *mut CTensorDataView) {
         unsafe {
             let view = Box::from_raw(view_ptr);
             // This will drop the Vec<u8> that `_owner` points to
-            Box::from_raw(view._owner as *mut Vec<u8>);
+            let _ = Box::from_raw(view._owner as *mut Vec<u8>);
         }
     }
 }
@@ -177,7 +179,9 @@ pub extern "C" fn ztensor_free_tensor_view(view_ptr: *mut CTensorDataView) {
 #[unsafe(no_mangle)]
 pub extern "C" fn ztensor_metadata_free(metadata_ptr: *mut CTensorMetadata) {
     if !metadata_ptr.is_null() {
-        unsafe { Box::from_raw(metadata_ptr) };
+        unsafe {
+            let _ = Box::from_raw(metadata_ptr);
+        };
     }
 }
 
@@ -211,7 +215,9 @@ pub extern "C" fn ztensor_metadata_get_shape_len(metadata_ptr: *const CTensorMet
 /// Returns a pointer to the shape data (an array of u64).
 /// The caller owns this memory and must free it with `ztensor_free_u64_array`.
 #[unsafe(no_mangle)]
-pub extern "C" fn ztensor_metadata_get_shape_data(metadata_ptr: *const CTensorMetadata) -> *mut u64 {
+pub extern "C" fn ztensor_metadata_get_shape_data(
+    metadata_ptr: *const CTensorMetadata,
+) -> *mut u64 {
     let metadata = unsafe { metadata_ptr.as_ref().expect("Null metadata pointer") };
     // Clone the shape into a new Vec, get its raw pointer, and forget it
     // so Rust doesn't deallocate it. The C side is now responsible.
@@ -231,7 +237,6 @@ pub extern "C" fn ztensor_free_u64_array(ptr: *mut u64, len: size_t) {
         }
     }
 }
-
 
 // --- Writer Functions ---
 
@@ -336,6 +341,8 @@ pub extern "C" fn ztensor_writer_finalize(writer_ptr: *mut CZTensorWriter) -> c_
 #[unsafe(no_mangle)]
 pub extern "C" fn ztensor_free_string(s: *mut c_char) {
     if !s.is_null() {
-        unsafe { CString::from_raw(s) };
+        unsafe {
+            let _ = CString::from_raw(s);
+        };
     }
 }
