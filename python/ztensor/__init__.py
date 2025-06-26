@@ -92,12 +92,23 @@ class TensorMetadata:
     def __init__(self, meta_ptr):
         self._ptr = ffi.gc(meta_ptr, lib.ztensor_metadata_free)
         _check_ptr(self._ptr, "TensorMetadata constructor")
+        # Cache for properties to avoid repeated FFI calls
         self._name = None
         self._dtype_str = None
         self._shape = None
+        self._offset = None
+        self._size = None
+        self._layout = None
+        self._encoding = None
+        self._endianness = "not_checked"
+        self._checksum = "not_checked"
+
+    def __repr__(self):
+        return f"<TensorMetadata name='{self.name}' shape={self.shape} dtype='{self.dtype_str}'>"
 
     @property
     def name(self):
+        """The name of the tensor."""
         if self._name is None:
             name_ptr = lib.ztensor_metadata_get_name(self._ptr)
             _check_ptr(name_ptr, "get_name")
@@ -107,6 +118,7 @@ class TensorMetadata:
 
     @property
     def dtype_str(self):
+        """The zTensor dtype string (e.g., 'float32')."""
         if self._dtype_str is None:
             dtype_ptr = lib.ztensor_metadata_get_dtype_str(self._ptr)
             _check_ptr(dtype_ptr, "get_dtype_str")
@@ -116,7 +128,7 @@ class TensorMetadata:
 
     @property
     def dtype(self):
-        """Returns the numpy dtype for this tensor."""
+        """The numpy dtype for this tensor."""
         dtype_str = self.dtype_str
         dt = DTYPE_ZT_TO_NP.get(dtype_str)
         if dt is None:
@@ -130,6 +142,7 @@ class TensorMetadata:
 
     @property
     def shape(self):
+        """The shape of the tensor as a tuple."""
         if self._shape is None:
             shape_len = lib.ztensor_metadata_get_shape_len(self._ptr)
             if shape_len > 0:
@@ -140,6 +153,64 @@ class TensorMetadata:
             else:
                 self._shape = tuple()
         return self._shape
+
+    @property
+    def offset(self):
+        """The on-disk offset of the tensor data in bytes."""
+        if self._offset is None:
+            self._offset = lib.ztensor_metadata_get_offset(self._ptr)
+        return self._offset
+
+    @property
+    def size(self):
+        """The on-disk size of the tensor data in bytes (can be compressed size)."""
+        if self._size is None:
+            self._size = lib.ztensor_metadata_get_size(self._ptr)
+        return self._size
+
+    @property
+    def layout(self):
+        """The tensor layout as a string (e.g., 'dense')."""
+        if self._layout is None:
+            layout_ptr = lib.ztensor_metadata_get_layout_str(self._ptr)
+            _check_ptr(layout_ptr, "get_layout_str")
+            self._layout = ffi.string(layout_ptr).decode('utf-8')
+            lib.ztensor_free_string(layout_ptr)
+        return self._layout
+
+    @property
+    def encoding(self):
+        """The tensor encoding as a string (e.g., 'raw', 'zstd')."""
+        if self._encoding is None:
+            encoding_ptr = lib.ztensor_metadata_get_encoding_str(self._ptr)
+            _check_ptr(encoding_ptr, "get_encoding_str")
+            self._encoding = ffi.string(encoding_ptr).decode('utf-8')
+            lib.ztensor_free_string(encoding_ptr)
+        return self._encoding
+
+    @property
+    def endianness(self):
+        """The data endianness ('little', 'big') if applicable, else None."""
+        if self._endianness == "not_checked":
+            endian_ptr = lib.ztensor_metadata_get_data_endianness_str(self._ptr)
+            if endian_ptr == ffi.NULL:
+                self._endianness = None
+            else:
+                self._endianness = ffi.string(endian_ptr).decode('utf-8')
+                lib.ztensor_free_string(endian_ptr)
+        return self._endianness
+
+    @property
+    def checksum(self):
+        """The checksum string if present, else None."""
+        if self._checksum == "not_checked":
+            checksum_ptr = lib.ztensor_metadata_get_checksum_str(self._ptr)
+            if checksum_ptr == ffi.NULL:
+                self._checksum = None
+            else:
+                self._checksum = ffi.string(checksum_ptr).decode('utf-8')
+                lib.ztensor_free_string(checksum_ptr)
+        return self._checksum
 
 
 class Reader:
@@ -156,6 +227,39 @@ class Reader:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self._ptr = None
+
+    def __len__(self):
+        """Returns the number of tensors in the file."""
+        if self._ptr is None: raise ZTensorError("Reader is closed.")
+        return lib.ztensor_reader_get_metadata_count(self._ptr)
+
+    def __iter__(self):
+        """Iterates over the metadata of all tensors in the file."""
+        if self._ptr is None: raise ZTensorError("Reader is closed.")
+        for i in range(len(self)):
+            yield self[i]
+
+    def __getitem__(self, index: int) -> TensorMetadata:
+        """Retrieves metadata for a tensor by its index."""
+        if self._ptr is None: raise ZTensorError("Reader is closed.")
+        if index >= len(self):
+            raise IndexError("Tensor index out of range")
+        meta_ptr = lib.ztensor_reader_get_metadata_by_index(self._ptr, index)
+        _check_ptr(meta_ptr, f"get_metadata_by_index: {index}")
+        return TensorMetadata(meta_ptr)
+
+    def list_tensors(self) -> list[TensorMetadata]:
+        """Returns a list of all TensorMetadata objects in the file."""
+        return list(self)
+
+    def get_tensor_names(self) -> list[str]:
+        """Returns a list of all tensor names in the file."""
+        if self._ptr is None: raise ZTensorError("Reader is closed.")
+        c_array_ptr = lib.ztensor_reader_get_all_tensor_names(self._ptr)
+        _check_ptr(c_array_ptr, "get_all_tensor_names")
+        c_array_ptr = ffi.gc(c_array_ptr, lib.ztensor_free_string_array)
+
+        return [ffi.string(c_array_ptr.strings[i]).decode('utf-8') for i in range(c_array_ptr.len)]
 
     def get_metadata(self, name: str) -> TensorMetadata:
         """Retrieves metadata for a tensor by its name."""
@@ -177,6 +281,7 @@ class Reader:
         Returns:
             np.ndarray or torch.Tensor: The tensor data.
         """
+        if self._ptr is None: raise ZTensorError("Reader is closed.")
         if to not in ['numpy', 'torch']:
             raise ValueError(f"Unsupported format: '{to}'. Choose 'numpy' or 'torch'.")
 
@@ -238,6 +343,7 @@ class Writer:
             if exc_type is None:
                 self.finalize()
             else:
+                # If an error occurred, just free the handle without finalizing
                 lib.ztensor_writer_free(self._ptr)
                 self._ptr = None
 
@@ -294,7 +400,7 @@ class Writer:
         """Finalizes the zTensor file, writing the metadata index."""
         if not self._ptr: raise ZTensorError("Writer is already closed or finalized.")
         status = lib.ztensor_writer_finalize(self._ptr)
-        self._ptr = None
+        self._ptr = None  # The writer is consumed in Rust
         self._finalized = True
         _check_status(status, "finalize")
 
