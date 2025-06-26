@@ -1,6 +1,6 @@
 # ztensor-cli
 
-A command-line tool for inspecting, converting, and compressing tensor files in the [zTensor](../README.md) format.
+A command-line tool for inspecting, converting, and compressing tensor files in the [zTensor](ttps://github.com/pie-project/ztensor) format.
 
 ## Installation
 
