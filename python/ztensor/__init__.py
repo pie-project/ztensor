@@ -1,6 +1,22 @@
 import numpy as np
 from .ztensor import ffi, lib
-from ml_dtypes import bfloat16
+
+# --- Optional PyTorch Import ---
+try:
+    import torch
+
+    TORCH_AVAILABLE = True
+except ImportError:
+    TORCH_AVAILABLE = False
+
+# --- Optional ml_dtypes for bfloat16 in NumPy ---
+try:
+    from ml_dtypes import bfloat16 as np_bfloat16
+
+    ML_DTYPES_AVAILABLE = True
+except ImportError:
+    np_bfloat16 = None
+    ML_DTYPES_AVAILABLE = False
 
 
 # --- Pythonic Wrapper ---
@@ -12,7 +28,6 @@ class ZTensorError(Exception):
 # A custom ndarray subclass to safely manage the lifetime of the CFFI pointer.
 class _ZTensorView(np.ndarray):
     def __new__(cls, buffer, dtype, shape, view_ptr):
-        # Create an array from the buffer, reshape it, and cast it to our custom type.
         obj = np.frombuffer(buffer, dtype=dtype).reshape(shape).view(cls)
         # Attach the object that owns the memory to an attribute.
         obj._owner = view_ptr
@@ -45,26 +60,36 @@ def _check_status(status, func_name=""):
         raise ZTensorError(f"Error in {func_name}: {_get_last_error()}")
 
 
-# Type Mappings between NumPy and ztensor
+# --- Type Mappings ---
+# NumPy Mappings
 DTYPE_NP_TO_ZT = {
-    np.dtype('float64'): 'float64', np.dtype('float32'): 'float32',
+    np.dtype('float64'): 'float64', np.dtype('float32'): 'float32', np.dtype('float16'): 'float16',
     np.dtype('int64'): 'int64', np.dtype('int32'): 'int32',
     np.dtype('int16'): 'int16', np.dtype('int8'): 'int8',
     np.dtype('uint64'): 'uint64', np.dtype('uint32'): 'uint32',
     np.dtype('uint16'): 'uint16', np.dtype('uint8'): 'uint8',
     np.dtype('bool'): 'bool',
-    # ADDED: Mapping for bfloat16 to handle writing
-    np.dtype(bfloat16): 'bfloat16',
 }
-# MODIFIED: Re-construct the reverse mapping
+if ML_DTYPES_AVAILABLE:
+    DTYPE_NP_TO_ZT[np.dtype(np_bfloat16)] = 'bfloat16'
 DTYPE_ZT_TO_NP = {v: k for k, v in DTYPE_NP_TO_ZT.items()}
+
+# PyTorch Mappings (if available)
+if TORCH_AVAILABLE:
+    DTYPE_TORCH_TO_ZT = {
+        torch.float64: 'float64', torch.float32: 'float32', torch.float16: 'float16',
+        torch.bfloat16: 'bfloat16',
+        torch.int64: 'int64', torch.int32: 'int32',
+        torch.int16: 'int16', torch.int8: 'int8',
+        torch.uint8: 'uint8', torch.bool: 'bool',
+    }
+    DTYPE_ZT_TO_TORCH = {v: k for k, v in DTYPE_TORCH_TO_ZT.items()}
 
 
 class TensorMetadata:
     """A Pythonic wrapper around the CTensorMetadata pointer."""
 
     def __init__(self, meta_ptr):
-        # The pointer is now automatically garbage collected by CFFI when this object dies.
         self._ptr = ffi.gc(meta_ptr, lib.ztensor_metadata_free)
         _check_ptr(self._ptr, "TensorMetadata constructor")
         self._name = None
@@ -76,7 +101,6 @@ class TensorMetadata:
         if self._name is None:
             name_ptr = lib.ztensor_metadata_get_name(self._ptr)
             _check_ptr(name_ptr, "get_name")
-            # ffi.string creates a copy, so we must free the Rust-allocated original.
             self._name = ffi.string(name_ptr).decode('utf-8')
             lib.ztensor_free_string(name_ptr)
         return self._name
@@ -86,7 +110,6 @@ class TensorMetadata:
         if self._dtype_str is None:
             dtype_ptr = lib.ztensor_metadata_get_dtype_str(self._ptr)
             _check_ptr(dtype_ptr, "get_dtype_str")
-            # ffi.string creates a copy, so we must free the Rust-allocated original.
             self._dtype_str = ffi.string(dtype_ptr).decode('utf-8')
             lib.ztensor_free_string(dtype_ptr)
         return self._dtype_str
@@ -94,10 +117,17 @@ class TensorMetadata:
     @property
     def dtype(self):
         """Returns the numpy dtype for this tensor."""
-        # This will now correctly return a bfloat16 dtype object when dtype_str is 'bfloat16'
-        return DTYPE_ZT_TO_NP.get(self.dtype_str)
+        dtype_str = self.dtype_str
+        dt = DTYPE_ZT_TO_NP.get(dtype_str)
+        if dt is None:
+            if dtype_str == 'bfloat16':
+                raise ZTensorError(
+                    "Cannot read 'bfloat16' tensor as NumPy array because the 'ml_dtypes' "
+                    "package is not installed. Please install it to proceed."
+                )
+            raise ZTensorError(f"Unsupported or unknown dtype string '{dtype_str}' found in tensor metadata.")
+        return dt
 
-    # RE-ENABLED: This property now works because the underlying FFI functions are available.
     @property
     def shape(self):
         if self._shape is None:
@@ -106,7 +136,6 @@ class TensorMetadata:
                 shape_data_ptr = lib.ztensor_metadata_get_shape_data(self._ptr)
                 _check_ptr(shape_data_ptr, "get_shape_data")
                 self._shape = tuple(shape_data_ptr[i] for i in range(shape_len))
-                # Free the array that was allocated on the Rust side.
                 lib.ztensor_free_u64_array(shape_data_ptr, shape_len)
             else:
                 self._shape = tuple()
@@ -120,15 +149,12 @@ class Reader:
         path_bytes = file_path.encode('utf-8')
         ptr = lib.ztensor_reader_open(path_bytes)
         _check_ptr(ptr, f"Reader open: {file_path}")
-        # The pointer is automatically garbage collected by CFFI.
         self._ptr = ffi.gc(ptr, lib.ztensor_reader_free)
 
     def __enter__(self):
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        # CFFI's garbage collector handles freeing the reader pointer automatically.
-        # No explicit free is needed here, simplifying the context manager.
         self._ptr = None
 
     def get_metadata(self, name: str) -> TensorMetadata:
@@ -139,32 +165,59 @@ class Reader:
         _check_ptr(meta_ptr, f"get_metadata: {name}")
         return TensorMetadata(meta_ptr)
 
-    def read_tensor(self, name: str) -> np.ndarray:
-        """Reads a tensor by name and returns it as a NumPy array (zero-copy)."""
+    def read_tensor(self, name: str, to: str = 'numpy'):
+        """
+        Reads a tensor by name and returns it as a NumPy array or PyTorch tensor.
+        This is a zero-copy operation for both formats (for CPU tensors).
+
+        Args:
+            name (str): The name of the tensor to read.
+            to (str): The desired output format. Either 'numpy' (default) or 'torch'.
+
+        Returns:
+            np.ndarray or torch.Tensor: The tensor data.
+        """
+        if to not in ['numpy', 'torch']:
+            raise ValueError(f"Unsupported format: '{to}'. Choose 'numpy' or 'torch'.")
+
         metadata = self.get_metadata(name)
-
-        # This check is now more robust.
-        dtype = metadata.dtype
-        if dtype is None:
-            raise ZTensorError(f"Unsupported ztensor dtype: '{metadata.dtype_str}'")
-
         view_ptr = lib.ztensor_reader_read_tensor_view(self._ptr, metadata._ptr)
         _check_ptr(view_ptr, f"read_tensor: {name}")
 
         # Let CFFI manage the lifetime of the view pointer.
         view_ptr = ffi.gc(view_ptr, lib.ztensor_free_tensor_view)
 
-        # CORRECTED: Create array using the subclass, which handles reshaping and memory.
-        # With the correct bfloat16 dtype, np.frombuffer will now correctly interpret
-        # the buffer, creating an array with the right number of elements (2048).
-        array = _ZTensorView(
-            buffer=ffi.buffer(view_ptr.data, view_ptr.len),
-            dtype=dtype,
-            shape=metadata.shape,
-            view_ptr=view_ptr
-        )
+        if to == 'numpy':
+            # Use the custom _ZTensorView to safely manage the FFI pointer lifetime.
+            return _ZTensorView(
+                buffer=ffi.buffer(view_ptr.data, view_ptr.len),
+                dtype=metadata.dtype,  # This property raises on unsupported dtypes
+                shape=metadata.shape,
+                view_ptr=view_ptr
+            )
 
-        return array
+        elif to == 'torch':
+            if not TORCH_AVAILABLE:
+                raise ZTensorError("PyTorch is not installed. Cannot return a torch tensor.")
+
+            # Get the corresponding torch dtype, raising if not supported.
+            torch_dtype = DTYPE_ZT_TO_TORCH.get(metadata.dtype_str)
+            if torch_dtype is None:
+                raise ZTensorError(
+                    f"Cannot read tensor '{name}' as a PyTorch tensor. "
+                    f"The dtype '{metadata.dtype_str}' is not supported by PyTorch."
+                )
+
+            # Create a tensor directly from the buffer to avoid numpy conversion issues.
+            buffer = ffi.buffer(view_ptr.data, view_ptr.len)
+            torch_tensor = torch.frombuffer(buffer, dtype=torch_dtype).reshape(metadata.shape)
+
+            # CRITICAL: Attach the memory owner to the tensor to manage its lifetime.
+            # This ensures the Rust memory (held by view_ptr) is not freed while the
+            # torch tensor is still in use.
+            torch_tensor._owner = view_ptr
+
+            return torch_tensor
 
 
 class Writer:
@@ -174,8 +227,6 @@ class Writer:
         path_bytes = file_path.encode('utf-8')
         ptr = lib.ztensor_writer_create(path_bytes)
         _check_ptr(ptr, f"Writer create: {file_path}")
-        # The pointer is consumed by finalize, so we don't use ffi.gc here.
-        # The writer should be freed via finalize or ztensor_writer_free if finalize fails.
         self._ptr = ptr
         self._finalized = False
 
@@ -183,46 +234,67 @@ class Writer:
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        # Automatically finalize on exit if not already done and no error occurred.
         if self._ptr and not self._finalized:
             if exc_type is None:
                 self.finalize()
             else:
-                # If an error occurred, don't finalize, just free the writer to prevent leaks.
                 lib.ztensor_writer_free(self._ptr)
                 self._ptr = None
 
-    def add_tensor(self, name: str, tensor: np.ndarray):
-        """Adds a NumPy array as a tensor to the file."""
+    def add_tensor(self, name: str, tensor):
+        """
+        Adds a NumPy or PyTorch tensor to the file (zero-copy).
+        Supports float16 and bfloat16 types.
+
+        Args:
+            name (str): The name of the tensor to add.
+            tensor (np.ndarray or torch.Tensor): The tensor data to write.
+        """
         if not self._ptr: raise ZTensorError("Writer is closed or finalized.")
 
-        name_bytes = name.encode('utf-8')
-        tensor = np.ascontiguousarray(tensor)  # Ensure data is contiguous.
+        # --- Polymorphic tensor handling ---
+        if isinstance(tensor, np.ndarray):
+            tensor = np.ascontiguousarray(tensor)
+            shape = tensor.shape
+            dtype_str = DTYPE_NP_TO_ZT.get(tensor.dtype)
+            data_ptr = ffi.cast("unsigned char*", tensor.ctypes.data)
+            nbytes = tensor.nbytes
 
-        shape_array = np.array(tensor.shape, dtype=np.uint64)
-        shape_ptr = ffi.cast("uint64_t*", shape_array.ctypes.data)
+        elif TORCH_AVAILABLE and isinstance(tensor, torch.Tensor):
+            if tensor.is_cuda:
+                raise ZTensorError("Cannot write directly from a CUDA tensor. Copy to CPU first using .cpu().")
+            tensor = tensor.contiguous()
+            shape = tuple(tensor.shape)
+            dtype_str = DTYPE_TORCH_TO_ZT.get(tensor.dtype)
+            data_ptr = ffi.cast("unsigned char*", tensor.data_ptr())
+            nbytes = tensor.numel() * tensor.element_size()
 
-        # The updated DTYPE_NP_TO_ZT will now correctly handle bfloat16 tensors.
-        dtype_str = DTYPE_NP_TO_ZT.get(tensor.dtype)
+        else:
+            supported = "np.ndarray" + (" or torch.Tensor" if TORCH_AVAILABLE else "")
+            raise TypeError(f"Unsupported tensor type: {type(tensor)}. Must be {supported}.")
+
         if not dtype_str:
-            raise ZTensorError(f"Unsupported NumPy dtype: {tensor.dtype}")
+            msg = f"Unsupported dtype: {tensor.dtype}."
+            if 'bfloat16' in str(tensor.dtype) and not ML_DTYPES_AVAILABLE:
+                msg += " For NumPy bfloat16 support, please install the 'ml_dtypes' package."
+            raise ZTensorError(msg)
+
+        name_bytes = name.encode('utf-8')
+        shape_array = np.array(shape, dtype=np.uint64)
+        shape_ptr = ffi.cast("uint64_t*", shape_array.ctypes.data)
         dtype_bytes = dtype_str.encode('utf-8')
 
-        # CORRECTED: Cast to `unsigned char*` to match the CFFI definition and Rust FFI.
-        data_ptr = ffi.cast("unsigned char*", tensor.ctypes.data)
-
         status = lib.ztensor_writer_add_tensor(
-            self._ptr, name_bytes, shape_ptr, len(tensor.shape),
-            dtype_bytes, data_ptr, tensor.nbytes
+            self._ptr, name_bytes, shape_ptr, len(shape),
+            dtype_bytes, data_ptr, nbytes
         )
         _check_status(status, f"add_tensor: {name}")
 
     def finalize(self):
         """Finalizes the zTensor file, writing the metadata index."""
         if not self._ptr: raise ZTensorError("Writer is already closed or finalized.")
-
         status = lib.ztensor_writer_finalize(self._ptr)
-        self._ptr = None  # The writer pointer is consumed and invalidated by the Rust call.
+        self._ptr = None
         self._finalized = True
         _check_status(status, "finalize")
 

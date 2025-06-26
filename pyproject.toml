@@ -10,7 +10,7 @@ build-backend = "maturin"
 [project]
 # The name of your package on PyPI.
 name = "ztensor"
-version = "0.1.1"
+version = "0.1.2"
 description = "Python bindings for the zTensor library."
 readme = "README.md" # It's good practice to have a README.
 authors = [

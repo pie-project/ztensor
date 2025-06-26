@@ -2,6 +2,15 @@ import os
 
 import numpy as np
 from ztensor import Writer, Reader, ZTensorError
+import torch
+
+model_path = "llama1b.zt"
+
+with Reader(model_path) as reader:
+    tensor_data_np = reader.read_tensor("model.layers.1.self_attn.k_proj.weight", to="torch")
+    print(tensor_data_np.dtype)
+
+
 
 file_path = "../test_tensors.zt"
 
