@@ -1,18 +1,33 @@
-# zTensor
+# ztensor
 
-A fast, memory-efficient tensor serialization format optimized for machine learning workloads.
+Simple tensor serialization format
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-## Features
+## Key Features
 
-- **Zero-copy reads** via memory mapping (mmap)
-- **64-byte alignment** for SIMD/AVX-512 compatibility
-- **Sparse tensor support** (CSR and COO formats)
-- **Optional zstd compression**
-- **Integrity verification** with CRC32C checksums
-- **Cross-platform** — Little-endian, portable format
-- **PyTorch & NumPy Interoperability**
+- **🛡️ Simple Spec** — Minimalist [format spec](SPEC.md) for easy parsing.
+- **🚀 Zero-Copy Access** — Instant memory-mapping (mmap) with no RAM overhead.
+- **🔄 Efficient Writes** — Supports streaming and append-only operations (ideal for fine-tuning) without rewriting files.
+- **🔮 Future-Proof** — Decouples physical storage from logical representation for long-term compatibility.
+
+## Ecosystem
+
+- **Rust Core** — High-performance, SIMD-aligned implementation.
+- **Python API** — First-class bindings for **NumPy** and **PyTorch**.
+- **Universal Converters** — CLI tools to easily convert **Pickle**, **SafeTensors**, and **GGUF** files.
+
+## Comparison
+
+| Feature | **zTensor** | SafeTensors | GGUF | Pickle | HDF5 |
+| :--- | :---: | :---: | :---: | :---: | :---: |
+| **Zero-Copy Read** | ✅ | ✅ | ✅ | ❌ | ⚠️ |
+| **Safe (No Exec)** | ✅ | ✅ | ✅ | ❌ | ✅ |
+| **Streaming / Append** | ✅ | ❌ | ❌ | ❌ | ✅ |
+| **Sparse Support** | ✅ | ❌ | ❌ | ✅ | ✅ |
+| **Compression** | ✅ | ❌ | ❌ | ❌ | ✅ |
+| **Quantization** | ✅ | ✅ | ✅ | ✅ | ✅ |
+| **Parser Complexity** | 🟢 Low | 🟢 Low | 🟡 Med | 🔴 High | 🔴 High |
 
 ## Installation
 
