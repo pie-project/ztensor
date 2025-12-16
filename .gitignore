@@ -38,3 +38,8 @@ target/
 __pycache__/
 
 .venv
+
+# Maturin/CFFI generated files
+python/ztensor/ztensor/
+*.so
+*.dylib
