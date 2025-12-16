@@ -11,9 +11,9 @@ pub fn calculate_padding(current_offset: u64) -> (u64, u64) {
 }
 
 #[cfg(target_endian = "little")]
-pub const NATIVE_ENDIANNESS: crate::models::DataEndianness = crate::models::DataEndianness::Little;
+pub const IS_NATIVE_LITTLE_ENDIAN: u8 = 1;
 #[cfg(target_endian = "big")]
-pub const NATIVE_ENDIANNESS: crate::models::DataEndianness = crate::models::DataEndianness::Big;
+pub const IS_NATIVE_LITTLE_ENDIAN: u8 = 0;
 
 /// Swaps byte order of a buffer of multi-byte elements in place.
 /// Assumes all elements in the buffer are of the same type (element_size bytes).

@@ -114,9 +114,8 @@ class TestZTensorBindings(unittest.TestCase):
             self.assertGreater(meta_scalar.offset, 0)
             self.assertGreater(meta_scalar.size, 0)
             self.assertEqual(meta_scalar.layout, "dense")
-            self.assertEqual(meta_scalar.encoding, "raw")
-            self.assertIn(meta_scalar.endianness, ["little", "big"])
-            self.assertIsNone(meta_scalar.checksum)
+            # In v1.0, raw encoding is represented as "none" (no encoding applied)
+            self.assertIn(meta_scalar.encoding, ["raw", "none"])
 
     def test_04_error_handling(self):
         """Test expected failure modes."""

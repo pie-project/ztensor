@@ -1,84 +1,110 @@
-# zTensor File Format
+# zTensor
 
-**Version 0.1.0**
+A fast, memory-efficient tensor serialization format optimized for machine learning workloads.
 
-zTensor is a binary format for storing large multi-dimensional arrays (tensors), designed for efficient, safe, and flexible access. It supports raw and compressed (zstd) encodings, quantized and sparse layouts, and is extensible.
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-For dense tensors stored with encoding: "raw" and matching endianness, zTensor enables zero-copy access to tensor data.
+## Features
 
-## File Layout
+- **Zero-copy reads** via memory mapping (mmap)
+- **64-byte alignment** for SIMD/AVX-512 compatibility
+- **Sparse tensor support** (CSR and COO formats)
+- **Optional zstd compression**
+- **Integrity verification** with CRC32C checksums
+- **Cross-platform** — Little-endian, portable format
 
-```
-+-------------------------------+
-| Magic Number (8 bytes)        |
-+-------------------------------+
-| Tensor Blob 0 (aligned)       |
-+-------------------------------+
-| Padding (if needed)           |
-+-------------------------------+
-| Tensor Blob 1 (aligned)       |
-+-------------------------------+
-| ...                           |
-+-------------------------------+
-| CBOR Metadata Array           |
-+-------------------------------+
-| CBOR Array Size (8 bytes)     |
-+-------------------------------+
+## Installation
+
+### Python
+
+```bash
+pip install ztensor
 ```
 
-- **Magic Number:** ASCII "ZTEN0001" at offset 0.
-- **Tensor Blobs:** Each tensor's data, starting at a 64-byte aligned offset. No per-blob headers. Padding (undefined value, usually zero) is inserted as needed.
-- **CBOR Metadata Array:** At the end of the file, a CBOR-encoded array of metadata maps (one per tensor).
-- **CBOR Array Size:** Last 8 bytes, little-endian uint64, gives the size of the CBOR array.
+### Rust
 
-## Tensor Metadata (CBOR Map)
-Each tensor's metadata is a CBOR map with these required fields:
-- `name` (string): Tensor name.
-- `offset` (uint64): Absolute file offset to tensor data (multiple of 64).
-- `size` (uint64): On-disk size in bytes (compressed if applicable).
-- `dtype` (string): Data type (see below).
-- `shape` (array): Array of dimensions (empty for scalar).
-- `encoding` (string): Data encoding (see below).
-- `layout` (string): "dense" (default) or "sparse". For sparse, see below.
+```toml
+[dependencies]
+ztensor = "0.1"
+```
 
-Optional fields:
-- `data_endianness` (string): "little" or "big" (default: little, for raw multi-byte types).
-- `checksum` (string): e.g., "crc32c:0x1234ABCD" or "sha256:...".
-- Custom fields are allowed; unknown keys are ignored by readers.
+## Quick Start
 
-## Supported Data Types (`dtype`)
-- `float64`, `float32`, `float16`, `bfloat16`
-- `int64`, `int32`, `int16`, `int8`
-- `uint64`, `uint32`, `uint16`, `uint8`
-- `bool`
+### Python
 
-## Supported Encodings (`encoding`)
-- `raw`: Direct binary dump of tensor elements (with `data_endianness` if multi-byte).
-- `zstd`: Zstandard-compressed data. `size` is compressed size.
+```python
+import numpy as np
+from ztensor import Writer, Reader
 
-## Layouts
-- `dense` (default): Standard contiguous tensor data.
-- `sparse`: Data is stored in a sparse format. The metadata map must include a `sparse_format` field (e.g., "csr", "coo") and any additional fields required to describe the sparse structure (such as index arrays, indptr, etc.).
+# Write tensors
+with Writer("model.zt") as w:
+    w.add_tensor("weights", np.random.randn(1024, 768).astype(np.float32))
+    w.add_tensor("bias", np.zeros(768, dtype=np.float32))
 
-## Index Reading
-To read the index:
-1. Read the last 8 bytes for the CBOR array size.
-2. Seek backwards by that amount to read the CBOR metadata array.
+# Write with compression
+with Writer("model_compressed.zt") as w:
+    w.add_tensor("weights", weights, compress=True)  # zstd compression
 
-As a result, the start offset of the metadata is: (file size) - (size of the metadata) - (8 byte).
+# Read tensors (auto-decompresses if needed)
+with Reader("model.zt") as r:
+    weights = r.read_tensor("weights")
+    bias = r.read_tensor("bias")
+```
 
-## Zero-Tensor Files
-A valid zTensor file may contain zero tensors:
-- 8 bytes magic, 1 byte empty CBOR array (`0x80`), 8 bytes size (`0x01...00`).
-- Total: 17 bytes.
+### Rust
 
-## Extensibility
-- New `dtype`, `encoding`, and `layout` values may be added in future versions.
-- Custom metadata fields are allowed; unknown fields are ignored.
+```rust
+use ztensor::{ZTensorWriter, ZTensorReader, DType, Encoding, ChecksumAlgorithm};
 
-## Notes
-- All offsets are absolute and account for the 8-byte magic number.
-- All tensor data blobs are 64-byte aligned.
-- No per-blob headers; all metadata is in the CBOR array at the end of the file.
-- For `encoding: "raw"` and multi-byte `dtype`, data is little-endian unless `data_endianness` is specified.
-- For sparse tensors, the metadata must fully describe the sparse structure.
+// Write
+let mut writer = ZTensorWriter::create("model.zt")?;
+writer.add_tensor("weights", vec![1024, 768], DType::Float32, 
+                  Encoding::Raw, data_bytes, ChecksumAlgorithm::None)?;
+writer.finalize()?;
+
+// Write with compression
+writer.add_tensor("weights", vec![1024, 768], DType::Float32,
+                  Encoding::Zstd, data_bytes, ChecksumAlgorithm::None)?;
+
+// Read (auto-decompresses)
+let mut reader = ZTensorReader::open("model.zt")?;
+let data = reader.read_tensor("weights")?;
+```
+
+## CLI
+
+Inspect zTensor files:
+
+```bash
+ztensor info model.zt
+ztensor list model.zt
+```
+
+## File Format
+
+See [SPEC_NEW.md](SPEC_NEW.md) for the complete specification.
+
+```
++---------------------------+
+| Magic: ZTEN1000 (8B)      |
++---------------------------+
+| Component blobs (64B aligned) |
++---------------------------+
+| CBOR Manifest             |
++---------------------------+
+| Manifest size (8B)        |
++---------------------------+
+```
+
+## Supported Data Types
+
+| Type | Description |
+|------|-------------|
+| `float32`, `float16`, `float64`, `bfloat16` | Floating point |
+| `int8`, `int16`, `int32`, `int64` | Signed integers |
+| `uint8`, `uint16`, `uint32`, `uint64` | Unsigned integers |
+| `bool` | Boolean |
+
+## License
+
+MIT

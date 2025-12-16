@@ -12,7 +12,7 @@ name = "ztensor"            # This is the command users will run
 path = "src/main.rs"
 
 [dependencies]
-ztensor = "0.1"
+ztensor = { path = "../" }
 safetensors = "0.4"
 memmap2 = "0.9"
 clap = { version = "4", features = ["derive"] }

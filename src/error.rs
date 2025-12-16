@@ -49,7 +49,7 @@ impl fmt::Display for ZTensorError {
             ZTensorError::ZstdDecompression(err) => write!(f, "Zstd decompression error: {}", err),
             ZTensorError::InvalidMagicNumber { found } => write!(
                 f,
-                "Invalid magic number. Expected 'ZTEN0001', found {:?}",
+                "Invalid magic number. Expected 'ZTEN1000', found {:?}",
                 String::from_utf8_lossy(found)
             ),
             ZTensorError::InvalidAlignment {

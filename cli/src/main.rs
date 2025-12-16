@@ -1,18 +1,15 @@
 use clap::CommandFactory;
 use clap::{Parser, Subcommand};
 use comfy_table::{Cell, ContentArrangement, Row, Table, presets::UTF8_FULL};
-use humansize::{DECIMAL, format_size};
-use safetensors::SafeTensorError;
 use safetensors::tensor::SafeTensors;
 use serde_pickle::Value as PickleValue;
 use std::collections::BTreeMap;
-use std::env;
 use std::fs::File;
-use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
+use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 use std::process;
-use ztensor::{ChecksumAlgorithm, ZTensorError, ZTensorReader};
-use ztensor::{DType, DataEndianness, Encoding, Layout, ZTensorWriter};
+use ztensor::{ChecksumAlgorithm, ZTensorReader};
+use ztensor::{Encoding, ZTensorWriter};
 
 #[derive(Parser)]
 #[command(
@@ -114,31 +111,30 @@ enum Commands {
     },
 }
 
-fn print_tensor_metadata(meta: &ztensor::TensorMetadata) {
+fn print_tensor_metadata(name: &str, tensor: &ztensor::Tensor) {
     let mut table = Table::new();
     table
         .load_preset(UTF8_FULL)
         .set_content_arrangement(ContentArrangement::Dynamic);
     table.set_header(vec!["Field", "Value"]);
-    table.add_row(Row::from(vec![Cell::new("Name"), Cell::new(&meta.name)]));
+    table.add_row(Row::from(vec![Cell::new("Name"), Cell::new(name)]));
     table.add_row(Row::from(vec![
         Cell::new("DType"),
-        Cell::new(format!("{:?}", meta.dtype)),
+        Cell::new(format!("{:?}", tensor.dtype)),
     ]));
+    // Encoding is per-component now. We can show it for "data" or "values" if present.
+    // For summary, maybe just show format.
     table.add_row(Row::from(vec![
-        Cell::new("Encoding"),
-        Cell::new(format!("{:?}", meta.encoding)),
+        Cell::new("Format"),
+        Cell::new(&tensor.format),
     ]));
-    table.add_row(Row::from(vec![
-        Cell::new("Layout"),
-        Cell::new(format!("{:?}", meta.layout)),
-    ]));
-    let shape_str = if meta.shape.len() == 0 {
+    
+    let shape_str = if tensor.shape.is_empty() {
         "(scalar)".to_string()
     } else {
         format!(
             "[{}]",
-            meta.shape
+            tensor.shape
                 .iter()
                 .map(|d| d.to_string())
                 .collect::<Vec<_>>()
@@ -146,29 +142,24 @@ fn print_tensor_metadata(meta: &ztensor::TensorMetadata) {
         )
     };
     table.add_row(Row::from(vec![Cell::new("Shape"), Cell::new(shape_str)]));
+    
+    // Components info
+    let mut components_str = String::new();
+    for (key, comp) in &tensor.components {
+        components_str.push_str(&format!("{}: [offset={}, len={}", key, comp.offset, comp.length));
+        if let Some(enc) = &comp.encoding {
+             components_str.push_str(&format!(", enc={:?}", enc));
+        }
+         if let Some(dig) = &comp.digest {
+             components_str.push_str(&format!(", digest={}", dig));
+        }
+        components_str.push_str("]\n");
+    }
     table.add_row(Row::from(vec![
-        Cell::new("Offset"),
-        Cell::new(meta.offset.to_string()),
+        Cell::new("Components"),
+        Cell::new(components_str.trim()),
     ]));
-    table.add_row(Row::from(vec![
-        Cell::new("Size (on-disk)"),
-        Cell::new(format_size(meta.size, DECIMAL)),
-    ]));
-    if let Some(endian) = &meta.data_endianness {
-        table.add_row(Row::from(vec![
-            Cell::new("Data Endianness"),
-            Cell::new(format!("{:?}", endian)),
-        ]));
-    }
-    if let Some(cs) = &meta.checksum {
-        table.add_row(Row::from(vec![Cell::new("Checksum"), Cell::new(cs)]));
-    }
-    if !meta.custom_fields.is_empty() {
-        table.add_row(Row::from(vec![
-            Cell::new("Custom fields"),
-            Cell::new(format!("{:?}", meta.custom_fields)),
-        ]));
-    }
+    
     println!("{}", table);
 }
 
@@ -206,112 +197,7 @@ fn gguf_dtype_to_ztensor(dtype: &gguf_rs::GGMLType) -> Option<ztensor::DType> {
     }
 }
 
-fn convert_safetensor_to_ztensor(
-    input: &str,
-    output: &str,
-    compress: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let file = File::open(input)?;
-    let mmap = unsafe { memmap2::Mmap::map(&file)? };
-    let st = SafeTensors::deserialize(&mmap)?;
-    let mut writer = ZTensorWriter::create(output)?;
-    for (name, tensor) in st.tensors() {
-        let dtype = safetensor_dtype_to_ztensor(&tensor.dtype())
-            .ok_or_else(|| format!("Unsupported dtype: {:?}", tensor.dtype()))?;
-        let shape: Vec<u64> = tensor.shape().iter().map(|&d| d as u64).collect();
-        let data = tensor.data().to_vec();
-        writer.add_tensor(
-            &name,
-            shape,
-            dtype,
-            Layout::Dense,
-            if compress {
-                Encoding::Zstd
-            } else {
-                Encoding::Raw
-            },
-            data,
-            Some(DataEndianness::Little),
-            ChecksumAlgorithm::None,
-            Some(BTreeMap::new()),
-        )?;
-    }
-    writer.finalize()?;
-    Ok(())
-}
 
-fn convert_gguf_to_ztensor(
-    input: &str,
-    output: &str,
-    compress: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let mut container = gguf_rs::get_gguf_container(input)?;
-    let model = container.decode()?;
-    let mut writer = ZTensorWriter::create(output)?;
-
-    let mut f = File::open(input)?;
-
-    for tensor_info in model.tensors() {
-        let ggml_dtype: gguf_rs::GGMLType = tensor_info
-            .kind
-            .try_into()
-            .map_err(|e| format!("Unsupported GGUF dtype: {}", e))?;
-
-        if let Some(dtype) = gguf_dtype_to_ztensor(&ggml_dtype) {
-            let shape: Vec<u64> = tensor_info
-                .shape
-                .iter()
-                .map(|&d| d as u64)
-                .filter(|&d| d > 0)
-                .collect();
-            let numel: u64 = shape.iter().product();
-            let type_size = match dtype {
-                ztensor::DType::Float64 | ztensor::DType::Int64 | ztensor::DType::Uint64 => 8,
-                ztensor::DType::Float32 | ztensor::DType::Int32 | ztensor::DType::Uint32 => 4,
-                ztensor::DType::BFloat16
-                | ztensor::DType::Float16
-                | ztensor::DType::Int16
-                | ztensor::DType::Uint16 => 2,
-                ztensor::DType::Int8 | ztensor::DType::Uint8 | ztensor::DType::Bool => 1,
-                _ => {
-                    return Err(format!(
-                        "Unsupported ztensor dtype for size calculation: {:?}",
-                        dtype
-                    )
-                    .into());
-                }
-            };
-            let data_size = numel * type_size;
-            let mut data = vec![0u8; data_size as usize];
-
-            f.seek(SeekFrom::Start(tensor_info.offset))?;
-            f.read_exact(&mut data)?;
-
-            writer.add_tensor(
-                &tensor_info.name,
-                shape,
-                dtype,
-                Layout::Dense,
-                if compress {
-                    Encoding::Zstd
-                } else {
-                    Encoding::Raw
-                },
-                data,
-                Some(DataEndianness::Little), // GGUF is typically little endian, adjust if needed
-                ChecksumAlgorithm::None,
-                Some(BTreeMap::new()),
-            )?;
-        } else {
-            eprintln!(
-                "Warning: Skipping tensor '{}' with unsupported GGUF dtype: {:?}",
-                tensor_info.name, ggml_dtype
-            );
-        }
-    }
-    writer.finalize()?;
-    Ok(())
-}
 
 // Helper function to convert PickleValue keys to strings for tensor naming
 fn key_to_string(key_val: &serde_pickle::HashableValue) -> String {
@@ -507,92 +393,24 @@ fn pickle_value_to_ztensor_components(
     Ok(())
 }
 
-fn convert_pickle_to_ztensor(
-    input: &str,
-    output: &str,
-    compress: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let file =
-        File::open(input).map_err(|e| format!("Failed to open input file '{}': {}", input, e))?;
-    let reader = BufReader::new(file);
-
-    let pkl_value: PickleValue = match serde_pickle::value_from_reader(reader, Default::default()) {
-        Ok(val) => val,
-        Err(e) => {
-            return Err(format!(
-                "Failed to deserialize Pickle file '{}': {}\n\
-This often happens with PyTorch .pt/.bin files containing custom objects or large tensors.\n\
-For best results, save your tensors in Python as a dict of numpy arrays or lists, e.g.:\n\
-    import torch, pickle\n    tensors = {{k: v.cpu().numpy() for k, v in torch.load('pytorch_model.bin', map_location='cpu').items()}}\n    with open('model_simple.pkl', 'wb') as f: pickle.dump(tensors, f)\n\
-Then use this tool on 'model_simple.pkl'.",
-                input, e
-            ).into());
-        }
-    };
-
-    let mut writer = ZTensorWriter::create(output).map_err(|e| {
-        format!(
-            "Failed to create ZTensorWriter for output '{}': {}",
-            output, e
-        )
-    })?;
-
-    let mut found_tensors: Vec<(String, Vec<u64>, ztensor::DType, Vec<u8>)> = Vec::new();
-
-    pickle_value_to_ztensor_components("", &pkl_value, &mut found_tensors)
-        .map_err(|e| format!("Error processing pickle structure from '{}': {}", input, e))?;
-
-    if found_tensors.is_empty() {
-        return Err(format!(
-            "No compatible (numpy/pytorch-like) tensors found in '{}'.",
-            input
-        )
-        .into());
-    }
-
-    for (name, shape, dtype, data) in found_tensors {
-        let cleaned_name = if name.is_empty() {
-            "unnamed_tensor".to_string()
-        } else {
-            name
-        };
-        writer.add_tensor(
-            &cleaned_name,
-            shape,
-            dtype,
-            Layout::Dense, // Assuming dense layout
-            if compress {
-                Encoding::Zstd
-            } else {
-                Encoding::Raw
-            },
-            data,
-            Some(DataEndianness::Little), // Common default; NumPy/PyTorch use native.
-            ChecksumAlgorithm::None,
-            Some(BTreeMap::new()), // No custom fields extracted
-        )?;
-    }
-
-    writer.finalize()?;
-    Ok(())
-}
 
 fn compress_ztensor(input: &str, output: &str) -> Result<(), Box<dyn std::error::Error>> {
     let mut reader = ZTensorReader::open(input)?;
     let mut writer = ZTensorWriter::create(output)?;
-    let metas = reader.list_tensors().clone();
-    for meta in metas {
-        let data = reader.read_raw_tensor_data(&meta)?;
+    let tensors = reader.list_tensors().clone(); // Iterate over metadata
+    for (name, tensor) in tensors {
+        if tensor.format != "dense" {
+            eprintln!("Skipping non-dense tensor '{}' during compression (sparse compression not yet implemented in CLI)", name);
+            continue;
+        }
+        let data = reader.read_tensor(&name)?;
         writer.add_tensor(
-            &meta.name,
-            meta.shape.clone(),
-            meta.dtype.clone(),
-            meta.layout.clone(),
+            &name,
+            tensor.shape,
+            tensor.dtype,
             Encoding::Zstd,
             data,
-            meta.data_endianness.clone(),
             ChecksumAlgorithm::None,
-            Some(meta.custom_fields.clone()),
         )?;
     }
     writer.finalize()?;
@@ -602,41 +420,28 @@ fn compress_ztensor(input: &str, output: &str) -> Result<(), Box<dyn std::error:
 fn decompress_ztensor(input: &str, output: &str) -> Result<(), Box<dyn std::error::Error>> {
     let mut reader = ZTensorReader::open(input)?;
     let mut writer = ZTensorWriter::create(output)?;
-    let metas = reader.list_tensors().clone();
-    for meta in metas {
-        let data = reader.read_raw_tensor_data(&meta)?;
+    let tensors = reader.list_tensors().clone();
+    for (name, tensor) in tensors {
+        if tensor.format != "dense" {
+            eprintln!("Skipping non-dense tensor '{}' during decompression (sparse support minimal)", name);
+            continue;
+        }
+        let data = reader.read_tensor(&name)?;
         writer.add_tensor(
-            &meta.name,
-            meta.shape.clone(),
-            meta.dtype.clone(),
-            meta.layout.clone(),
+            &name,
+            tensor.shape,
+            tensor.dtype,
             Encoding::Raw,
             data,
-            meta.data_endianness.clone(),
             ChecksumAlgorithm::None,
-            Some(meta.custom_fields.clone()),
         )?;
     }
     writer.finalize()?;
     Ok(())
 }
 
-fn dtype_size(dtype: &ztensor::DType) -> Option<usize> {
-    use ztensor::DType::*;
-    Some(match dtype {
-        Float64 | Int64 | Uint64 => 8,
-        Float32 | Int32 | Uint32 => 4,
-        BFloat16 | Float16 | Int16 | Uint16 => 2,
-        Int8 | Uint8 | Bool => 1,
-        _ => return None,
-    })
-}
 
-fn shape_numel(shape: &[u64]) -> u64 {
-    shape.iter().product()
-}
-
-fn print_tensors_table(tensors: &[ztensor::TensorMetadata]) {
+fn print_tensors_table(tensors: &BTreeMap<String, ztensor::Tensor>) {
     let mut table = Table::new();
     table
         .load_preset(comfy_table::presets::UTF8_HORIZONTAL_ONLY)
@@ -646,45 +451,33 @@ fn print_tensors_table(tensors: &[ztensor::TensorMetadata]) {
         "Name",
         "Shape",
         "DType",
-        "Encoding",
-        "Layout",
-        "Offset",
-        "Size",
-        "On-disk Size",
+        "Format",
+        "Components", // Summarize count?
     ]);
-    for (i, meta) in tensors.iter().enumerate() {
-        let shape_str = if meta.shape.is_empty() {
+    for (i, (name, tensor)) in tensors.iter().enumerate() {
+        let shape_str = if tensor.shape.is_empty() {
             "(scalar)".to_string()
         } else {
             format!(
                 "[{}]",
-                meta.shape
+                tensor.shape
                     .iter()
                     .map(|d| d.to_string())
                     .collect::<Vec<_>>()
                     .join(", ")
             )
         };
-        let dtype_str = format!("{:?}", meta.dtype);
-        let encoding_str = format!("{:?}", meta.encoding);
-        let layout_str = format!("{:?}", meta.layout);
-        let offset_str = meta.offset.to_string();
-        let numel = shape_numel(&meta.shape);
-        let size = dtype_size(&meta.dtype).map(|s| s as u64 * numel);
-        let size_str = size
-            .map(|s| format_size(s, DECIMAL))
-            .unwrap_or("?".to_string());
-        let on_disk_str = format_size(meta.size, DECIMAL);
+        let dtype_str = format!("{:?}", tensor.dtype);
+        let format_str = &tensor.format;
+        let components_count = tensor.components.len().to_string();
+        
         table.add_row(Row::from(vec![
             Cell::new(i),
-            Cell::new(&meta.name),
+            Cell::new(name),
             Cell::new(shape_str),
             Cell::new(dtype_str),
-            Cell::new(encoding_str),
-            Cell::new(layout_str),
-            Cell::new(offset_str),
-            Cell::new(size_str),
-            Cell::new(on_disk_str),
+            Cell::new(format_str),
+            Cell::new(components_count),
         ]));
     }
     println!("{}", table);
@@ -749,24 +542,25 @@ fn merge_ztensor_files(
     let mut seen_names = HashSet::new();
     for input in inputs {
         let mut reader = ZTensorReader::open(input)?;
-        let metas = reader.list_tensors().clone();
-        for meta in metas {
-            if seen_names.contains(&meta.name) {
-                return Err(format!("Duplicate tensor name '{}' found in file '{}'. Aborting merge.", meta.name, input).into());
+        let tensors = reader.list_tensors().clone();
+        for (name, tensor) in tensors {
+            if seen_names.contains(&name) {
+                return Err(format!("Duplicate tensor name '{}' found in file '{}'. Aborting merge.", name, input).into());
             }
-            let data = reader.read_raw_tensor_data(&meta)?;
+             if tensor.format != "dense" {
+                 eprintln!("Skipping non-dense tensor '{}' during merge", name);
+                 continue;
+            }
+            let data = reader.read_tensor(&name)?;
             writer.add_tensor(
-                &meta.name,
-                meta.shape.clone(),
-                meta.dtype.clone(),
-                meta.layout.clone(),
-                meta.encoding.clone(),
+                &name,
+                tensor.shape,
+                tensor.dtype,
+                Encoding::Raw, // Default to raw if merged, or could preserve? Reading decompresses.
                 data,
-                meta.data_endianness.clone(),
                 ChecksumAlgorithm::None,
-                Some(meta.custom_fields.clone()),
             )?;
-            seen_names.insert(meta.name.clone());
+            seen_names.insert(name);
         }
         if !preserve_original {
             // Remove the file after processing
@@ -799,21 +593,19 @@ fn convert_safetensors_to_ztensor(
                 .ok_or_else(|| format!("Unsupported dtype: {:?}", tensor.dtype()))?;
             let shape: Vec<u64> = tensor.shape().iter().map(|&d| d as u64).collect();
             let data = tensor.data().to_vec();
+            
             writer.add_tensor(
                 &name,
                 shape,
                 dtype,
-                Layout::Dense,
                 if compress { Encoding::Zstd } else { Encoding::Raw },
                 data,
-                Some(DataEndianness::Little),
                 ChecksumAlgorithm::None,
-                Some(BTreeMap::new()),
             )?;
-            seen_names.insert(name.to_string());
+            seen_names.insert(name);
         }
         if !preserve_original {
-            fs::remove_file(input)?;
+             fs::remove_file(input)?;
         }
     }
     writer.finalize()?;
@@ -858,13 +650,6 @@ fn convert_ggufs_to_ztensor(
                     | ztensor::DType::Int16
                     | ztensor::DType::Uint16 => 2,
                     ztensor::DType::Int8 | ztensor::DType::Uint8 | ztensor::DType::Bool => 1,
-                    _ => {
-                        return Err(format!(
-                            "Unsupported ztensor dtype for size calculation: {:?}",
-                            dtype
-                        )
-                        .into());
-                    }
                 };
                 let data_size = numel * type_size;
                 let mut data = vec![0u8; data_size as usize];
@@ -874,12 +659,9 @@ fn convert_ggufs_to_ztensor(
                     &tensor_info.name,
                     shape,
                     dtype,
-                    Layout::Dense,
                     if compress { Encoding::Zstd } else { Encoding::Raw },
                     data,
-                    Some(DataEndianness::Little),
                     ChecksumAlgorithm::None,
-                    Some(BTreeMap::new()),
                 )?;
                 seen_names.insert(tensor_info.name.clone());
             } else {
@@ -946,12 +728,9 @@ Then use this tool on 'model_simple.pkl'.",
                 &cleaned_name,
                 shape,
                 dtype,
-                Layout::Dense,
                 if compress { Encoding::Zstd } else { Encoding::Raw },
                 data,
-                Some(DataEndianness::Little),
                 ChecksumAlgorithm::None,
-                Some(BTreeMap::new()),
             )?;
             seen_names.insert(cleaned_name);
         }
@@ -1034,21 +813,26 @@ fn main() {
             }
         },
         Some(Commands::Info { file }) => {
-            if !Path::new(file).exists() {
-                eprintln!("File not found: {}", file);
+            let reader = ZTensorReader::open(&file).unwrap_or_else(|e| {
+                eprintln!("Error opening file: {}", e);
                 process::exit(1);
-            }
-            match ZTensorReader::open(file) {
-                Ok(reader) => {
-                    let tensors = reader.list_tensors();
-                    println!("zTensor file: {}", file);
-                    println!("Number of tensors: {}", tensors.len());
-                    print_tensors_table(&tensors);
+            });
+            let tensors = reader.list_tensors();
+            println!("File: {}", file);
+            println!("Version: {}", reader.manifest.version);
+            println!("Generator: {}", reader.manifest.generator);
+            println!("Attributes: {:?}", reader.manifest.attributes);
+            println!("Total Tensors: {}", tensors.len());
+            println!();
+
+            if tensors.len() < 20 {
+                for (name, tensor) in tensors {
+                   println!("--- Tensor: {} ---", name);
+                   print_tensor_metadata(name, tensor);
+                   println!();
                 }
-                Err(e) => {
-                    eprintln!("Failed to open zTensor file: {}", e);
-                    process::exit(1);
-                }
+            } else {
+                 print_tensors_table(tensors);
             }
         }
         Some(Commands::Merge { output, inputs, preserve_original }) => {

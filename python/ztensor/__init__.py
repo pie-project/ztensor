@@ -269,60 +269,118 @@ class Reader:
         _check_ptr(meta_ptr, f"get_metadata: {name}")
         return TensorMetadata(meta_ptr)
 
+    def _read_component(self, tensor_name: str, component_name: str, dtype_func):
+        """Reads a specific component as a numpy array."""
+        t_name_bytes = tensor_name.encode('utf-8')
+        c_name_bytes = component_name.encode('utf-8')
+        
+        view_ptr = lib.ztensor_reader_read_tensor_component(self._ptr, t_name_bytes, c_name_bytes)
+        _check_ptr(view_ptr, f"read_component: {tensor_name}.{component_name}")
+        view_ptr = ffi.gc(view_ptr, lib.ztensor_free_tensor_view)
+        
+        buffer = ffi.buffer(view_ptr.data, view_ptr.len)
+        # Interpret bytes specific to the component type
+        arr = np.frombuffer(buffer, dtype=dtype_func())
+        return arr, view_ptr
+
     def read_tensor(self, name: str, to: str = 'numpy'):
         """
         Reads a tensor by name and returns it as a NumPy array or PyTorch tensor.
-        This is a zero-copy operation for both formats (for CPU tensors).
+        Supports 'dense' (returns array/tensor) and 'sparse_csr'/'sparse_coo' (returns Scipy/Torch sparse).
 
         Args:
             name (str): The name of the tensor to read.
-            to (str): The desired output format. Either 'numpy' (default) or 'torch'.
+            to (str): The desired output format. 'numpy' (returns scipy.sparse for sparse) or 'torch'.
 
         Returns:
-            np.ndarray or torch.Tensor: The tensor data.
+            np.ndarray, torch.Tensor, scipy.sparse.spmatrix, or torch.sparse_coo_tensor
         """
         if self._ptr is None: raise ZTensorError("Reader is closed.")
         if to not in ['numpy', 'torch']:
-            raise ValueError(f"Unsupported format: '{to}'. Choose 'numpy' or 'torch'.")
+             raise ValueError(f"Unsupported format: '{to}'.")
 
         metadata = self.get_metadata(name)
-        view_ptr = lib.ztensor_reader_read_tensor_view(self._ptr, metadata._ptr)
-        _check_ptr(view_ptr, f"read_tensor: {name}")
+        layout = metadata.layout
 
-        # Let CFFI manage the lifetime of the view pointer.
-        view_ptr = ffi.gc(view_ptr, lib.ztensor_free_tensor_view)
+        if layout == "dense":
+            view_ptr = lib.ztensor_reader_read_tensor_view(self._ptr, metadata._ptr)
+            _check_ptr(view_ptr, f"read_tensor: {name}")
+            view_ptr = ffi.gc(view_ptr, lib.ztensor_free_tensor_view)
 
-        if to == 'numpy':
-            # Use the custom _ZTensorView to safely manage the FFI pointer lifetime.
-            return _ZTensorView(
-                buffer=ffi.buffer(view_ptr.data, view_ptr.len),
-                dtype=metadata.dtype,  # This property raises on unsupported dtypes
-                shape=metadata.shape,
-                view_ptr=view_ptr
-            )
-
-        elif to == 'torch':
-            if not TORCH_AVAILABLE:
-                raise ZTensorError("PyTorch is not installed. Cannot return a torch tensor.")
-
-            # Get the corresponding torch dtype, raising if not supported.
-            torch_dtype = DTYPE_ZT_TO_TORCH.get(metadata.dtype_str)
-            if torch_dtype is None:
-                raise ZTensorError(
-                    f"Cannot read tensor '{name}' as a PyTorch tensor. "
-                    f"The dtype '{metadata.dtype_str}' is not supported by PyTorch."
+            if to == 'numpy':
+                return _ZTensorView(
+                    buffer=ffi.buffer(view_ptr.data, view_ptr.len),
+                    dtype=metadata.dtype,
+                    shape=metadata.shape,
+                    view_ptr=view_ptr
                 )
+            elif to == 'torch':
+                 if not TORCH_AVAILABLE: raise ZTensorError("PyTorch not installed.")
+                 torch_dtype = DTYPE_ZT_TO_TORCH.get(metadata.dtype_str)
+                 buffer = ffi.buffer(view_ptr.data, view_ptr.len)
+                 torch_tensor = torch.frombuffer(buffer, dtype=torch_dtype).reshape(metadata.shape)
+                 torch_tensor._owner = view_ptr
+                 return torch_tensor
 
-            # Create a tensor directly from the buffer to avoid numpy conversion issues.
-            buffer = ffi.buffer(view_ptr.data, view_ptr.len)
-            torch_tensor = torch.frombuffer(buffer, dtype=torch_dtype).reshape(metadata.shape)
+        elif layout == "sparse_csr":
+            # Components: values (T), indices (u64), indptr (u64)
+            vals, v_ref = self._read_component(name, "values", lambda: metadata.dtype)
+            idxs, i_ref = self._read_component(name, "indices", lambda: np.uint64)
+            ptrs, p_ref = self._read_component(name, "indptr", lambda: np.uint64)
+            
+            # Since FFI returns raw bytes swapped to native, we can trust np.frombuffer behavior.
+            # Sparse indices in scipy/torch are usually int32 or int64.
+            
+            if to == 'numpy':
+                # Return scipy.sparse.csr_matrix
+                try:
+                    from scipy.sparse import csr_matrix
+                except ImportError:
+                    raise ZTensorError("exclude scipy? scipy is required for numpy sparse.")
+                
+                # Scipy needs appropriate index types (int32/int64).
+                return csr_matrix((vals, idxs.astype(np.int32), ptrs.astype(np.int32)), shape=metadata.shape)
+            
+            elif to == 'torch':
+                if not TORCH_AVAILABLE: raise ZTensorError("No Torch.")
+                # Torch CSR: torch.sparse_csr_tensor(crow_indices, col_indices, values, size=None)
+                # crowd_indices = indptr.
+                t_vals = torch.from_numpy(vals).clone() # Copied from buffer?
+                # We need to copy because ZTensorView might expire? 
+                # Actually _read_component returns numpy wrapper on buffer.
+                # If we construct torch tensor from it, we need to keep reference.
+                # But sparse tensors in torch usually own their indices/values.
+                # Let's clone to be safe and simple.
+                t_indptr = torch.from_numpy(ptrs.astype(np.int64)).clone() 
+                t_indices = torch.from_numpy(idxs.astype(np.int64)).clone()
+                
+                return torch.sparse_csr_tensor(t_indptr, t_indices, t_vals, size=metadata.shape)
 
-            # CRITICAL: Attach the memory owner to the tensor to manage its lifetime.
-            # This ensures the Rust memory (held by view_ptr) is not freed while the
-            # torch tensor is still in use.
-            torch_tensor._owner = view_ptr
+        elif layout == "sparse_coo":
+            # Components: values (T), coords (u64, shape=(ndim*nnz))
+            vals, v_ref = self._read_component(name, "values", lambda: metadata.dtype)
+            coords, c_ref = self._read_component(name, "coords", lambda: np.uint64)
+            
+            nnz = vals.shape[0]
+            ndim = len(metadata.shape)
+            # coords is flat [dim0... dim1...].
+            # Reshape to (ndim, nnz)
+            coords = coords.reshape((ndim, nnz))
+            
+            if to == 'numpy':
+                 # Scipy coo_matrix: (data, (row, col))
+                 if ndim != 2: raise ZTensorError("Scipy COO only supports 2D.")
+                 from scipy.sparse import coo_matrix
+                 return coo_matrix((vals, (coords[0], coords[1])), shape=metadata.shape)
+            
+            elif to == 'torch':
+                 if not TORCH_AVAILABLE: raise ZTensorError("No Torch.")
+                 t_vals = torch.from_numpy(vals).clone()
+                 t_indices = torch.from_numpy(coords.astype(np.int64)).clone()
+                 return torch.sparse_coo_tensor(t_indices, t_vals, size=metadata.shape)
 
-            return torch_tensor
+        else:
+            raise ZTensorError(f"Unsupported layout: {layout}")
 
 
 class Writer:
@@ -347,7 +405,7 @@ class Writer:
                 lib.ztensor_writer_free(self._ptr)
                 self._ptr = None
 
-    def add_tensor(self, name: str, tensor):
+    def add_tensor(self, name: str, tensor, compress: bool = False):
         """
         Adds a NumPy or PyTorch tensor to the file (zero-copy).
         Supports float16 and bfloat16 types.
@@ -355,6 +413,7 @@ class Writer:
         Args:
             name (str): The name of the tensor to add.
             tensor (np.ndarray or torch.Tensor): The tensor data to write.
+            compress (bool): If True, compress the tensor data using zstd. Default: False.
         """
         if not self._ptr: raise ZTensorError("Writer is closed or finalized.")
 
@@ -392,9 +451,159 @@ class Writer:
 
         status = lib.ztensor_writer_add_tensor(
             self._ptr, name_bytes, shape_ptr, len(shape),
-            dtype_bytes, data_ptr, nbytes
+            dtype_bytes, data_ptr, nbytes, 1 if compress else 0
         )
         _check_status(status, f"add_tensor: {name}")
+
+    def add_sparse_csr(self, name: str, values, indices, indptr, shape):
+        """
+        Adds a sparse CSR tensor.
+        Args:
+            name: Tensor name.
+            values: Numpy/Torch array of values.
+            indices: Numpy/Torch array of column indices.
+            indptr: Numpy/Torch array of index pointers.
+            shape: Tuple of (rows, cols).
+        """
+        if not self._ptr: raise ZTensorError("Writer is closed.")
+
+        # Helper to get ptr and len for generic array
+        def get_buffer_info(arr):
+            if isinstance(arr, np.ndarray):
+                arr = np.ascontiguousarray(arr)
+                ptr = ffi.cast("unsigned char*", arr.ctypes.data)
+                length = arr.nbytes
+                count = arr.size
+                dtype_str = DTYPE_NP_TO_ZT.get(arr.dtype)
+                return arr, ptr, length, count, dtype_str
+            elif TORCH_AVAILABLE and isinstance(arr, torch.Tensor):
+                if arr.is_cuda: raise ZTensorError("CUDA tensors not supported. Move to CPU.")
+                arr = arr.contiguous()
+                ptr = ffi.cast("unsigned char*", arr.data_ptr())
+                length = arr.numel() * arr.element_size()
+                count = arr.numel()
+                dtype_str = DTYPE_TORCH_TO_ZT.get(arr.dtype)
+                return arr, ptr, length, count, dtype_str
+            else:
+                raise TypeError(f"Unsupported array type: {type(arr)}")
+
+        # Process inputs
+        v_arr, v_ptr, v_len, _, v_dtype = get_buffer_info(values)
+        i_arr, i_ptr, i_len, i_cnt, _ = get_buffer_info(indices)
+        p_arr, p_ptr, p_len, p_cnt, _ = get_buffer_info(indptr)
+
+        # Cast indices/indptr to uint64* (assuming they are compatible types, or we might need conversion)
+        # The FFI expects uint64*. If inputs are int32/int64, we might need to verify or copy?
+        # Rust `add_sparse_csr` expects `indices` and `indptr` as `Vec<u64>`.
+        # The FFI accepts `*const u64`. This means the input buffer MUST be u64 (or i64 with risk).
+        # We should enforce u64 or conversion.
+        # For simplicity/performance, let's assume user provides correct types or we cast if numpy.
+
+        def ensure_u64_ptr(arr):
+             # If numpy, cast to uint64 if not already
+            if isinstance(arr, np.ndarray):
+                 if arr.dtype != np.uint64:
+                     arr = arr.astype(np.uint64, copy=False) # Helper copy
+                     arr = np.ascontiguousarray(arr)
+                 return ffi.cast("uint64_t*", arr.ctypes.data), arr
+            elif TORCH_AVAILABLE and isinstance(arr, torch.Tensor):
+                 # Torch doesn't strictly have uint64 (it has int64). Reinterpret cast is risky if negative.
+                 # Indices shouldn't be negative.
+                 # cffi cast int64* to uint64* is okay bitwise.
+                 if arr.dtype != torch.int64 and arr.dtype != torch.int32: # what if int32?
+                     raise TypeError("Indices must be integer type.")
+                 # If int32, we MUST convert to int64/uint64 because FFI reads 64-bit strides.
+                 if arr.dtype == torch.int32:
+                      arr = arr.to(torch.int64)
+                 arr = arr.contiguous()
+                 return ffi.cast("uint64_t*", arr.data_ptr()), arr
+            else:
+                 raise TypeError("Unsupported type")
+
+        i_ptr_u64, _i_keep = ensure_u64_ptr(indices)
+        p_ptr_u64, _p_keep = ensure_u64_ptr(indptr)
+        
+        # Prepare metadata
+        name_bytes = name.encode('utf-8')
+        shape_array = np.array(shape, dtype=np.uint64)
+        shape_ptr = ffi.cast("uint64_t*", shape_array.ctypes.data)
+        dtype_bytes = v_dtype.encode('utf-8')
+
+        status = lib.ztensor_writer_add_sparse_csr(
+            self._ptr,
+            name_bytes,
+            shape_ptr, len(shape),
+            dtype_bytes,
+            v_ptr, v_len,
+            i_ptr_u64, indices.shape[0] if hasattr(indices, 'shape') else len(indices),
+            p_ptr_u64, indptr.shape[0] if hasattr(indptr, 'shape') else len(indptr),
+        )
+        _check_status(status, f"add_sparse_csr: {name}")
+
+    def add_sparse_coo(self, name: str, values, indices, shape):
+        """
+        Adds a sparse COO tensor.
+        Args:
+            name: Tensor name
+            values: Values array
+            indices: Coords array (flattened or matrix?) 
+                     Spec says "Matrix of coordinates (ndim x nnz)".
+                     The Rust FFI `indices_ptr` expects a flat buffer of u64s.
+                     The Rust reader interprets it as `(d0_i0, d0_i1, ... d0_in, d1_i0...)` (Row-major if Flattened Matrix?)
+                     Wait, implementation details in reader.rs: 
+                     "Assumed row-major flattened... indices.push(idx)"
+                     Actually `reader.rs` implementation: 
+                     `all_coords` is flat u64.
+                     Inside loop `for d in 0..ndim { idx.push(all_coords[d * nnz + i]) }`
+                     This implies `all_coords` is stored as:
+                     [dim0_all_indices, dim1_all_indices, ...]
+                     i.e., blocked by dimension. 
+                     If input `indices` is shape (ndim, nnz), flattening it (C order) gives exactly that.
+                     So user should pass `indices` of shape (ndim, nnz).
+            shape: Tensor shape
+        """
+        if not self._ptr: raise ZTensorError("Writer is closed.")
+        
+        def get_buffer_info(arr):
+             if isinstance(arr, np.ndarray):
+                 arr = np.ascontiguousarray(arr)
+                 return arr, ffi.cast("unsigned char*", arr.ctypes.data), arr.nbytes, DTYPE_NP_TO_ZT.get(arr.dtype)
+             elif TORCH_AVAILABLE and isinstance(arr, torch.Tensor):
+                 if arr.is_cuda: raise ZTensorError("No CUDA")
+                 arr = arr.contiguous()
+                 return arr, ffi.cast("unsigned char*", arr.data_ptr()), arr.numel() * arr.element_size(), DTYPE_TORCH_TO_ZT.get(arr.dtype)
+             raise TypeError("Unsupported")
+
+        v_arr, v_ptr, v_len, v_dtype = get_buffer_info(values)
+        
+        # indices
+        def ensure_u64_ptr(arr):
+            if isinstance(arr, np.ndarray):
+                 if arr.dtype != np.uint64: arr = arr.astype(np.uint64, copy=False)
+                 arr = np.ascontiguousarray(arr)
+                 return ffi.cast("uint64_t*", arr.ctypes.data), arr, arr.size
+            elif TORCH_AVAILABLE and isinstance(arr, torch.Tensor):
+                 if arr.dtype != torch.int64: arr = arr.to(torch.int64)
+                 arr = arr.contiguous()
+                 return ffi.cast("uint64_t*", arr.data_ptr()), arr, arr.numel()
+            raise TypeError("Unsupported")
+
+        i_ptr_u64, _i_keep, i_count = ensure_u64_ptr(indices)
+
+        name_bytes = name.encode('utf-8')
+        shape_array = np.array(shape, dtype=np.uint64)
+        shape_ptr = ffi.cast("uint64_t*", shape_array.ctypes.data)
+        dtype_bytes = v_dtype.encode('utf-8')
+
+        status = lib.ztensor_writer_add_sparse_coo(
+            self._ptr,
+            name_bytes,
+            shape_ptr, len(shape),
+            dtype_bytes,
+            v_ptr, v_len,
+            i_ptr_u64, i_count
+        )
+        _check_status(status, f"add_sparse_coo: {name}")
 
     def finalize(self):
         """Finalizes the zTensor file, writing the metadata index."""
