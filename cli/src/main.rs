@@ -11,7 +11,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use std::path::Path;
 
 use commands::{
-    compress_ztensor, decompress_ztensor, merge_ztensor_files,
+    compress_ztensor, decompress_ztensor, download_hf, merge_ztensor_files,
     print_tensor_metadata, print_tensors_table, run_conversion,
 };
 use extractors::{GgufExtractor, PickleExtractor, SafeTensorExtractor};
@@ -142,6 +142,38 @@ enum Commands {
         #[arg(long)]
         delete_original: bool,
     },
+
+    /// Download safetensors from HuggingFace and convert to zTensor format
+    #[command(
+        about = "Download safetensors from a HuggingFace repository and convert to zTensor.",
+        long_about = "Download all *.safetensors files from a HuggingFace repository, \
+            convert each to .zt format immediately after download, and save to the output directory.\n\n\
+            The original safetensors files are not saved to disk (only cached by hf-hub).\n\n\
+            Examples:\n  \
+            ztensor download-hf mlx-community/Meta-Llama-3-8B-Instruct-8bit\n  \
+            ztensor download-hf openai-community/gpt2 -o ./models\n  \
+            ztensor download-hf private/model --token hf_xxxxx\n"
+    )]
+    DownloadHf {
+        /// HuggingFace repository ID (e.g., mlx-community/Meta-Llama-3-8B-Instruct-8bit)
+        repo: String,
+
+        /// Output directory for .zt files
+        #[arg(short = 'o', long, default_value = ".")]
+        output_dir: String,
+
+        /// HuggingFace API token for private repositories
+        #[arg(long)]
+        token: Option<String>,
+
+        /// Repository revision (branch, tag, or commit)
+        #[arg(long, default_value = "main")]
+        revision: String,
+
+        /// Compress tensor data with zstd
+        #[arg(short = 'c', long)]
+        compress: bool,
+    },
 }
 
 fn main() -> Result<()> {
@@ -239,6 +271,15 @@ fn main() -> Result<()> {
             let preserve = !delete_original;
             merge_ztensor_files(inputs, output, preserve)?;
             println!("Successfully merged {} files into {}", inputs.len(), output);
+        }
+        Some(Commands::DownloadHf {
+            repo,
+            output_dir,
+            token,
+            revision,
+            compress,
+        }) => {
+            download_hf(repo, output_dir, token.as_deref(), revision, *compress)?;
         }
         None => {
             Cli::command().print_help()?;

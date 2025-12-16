@@ -12,6 +12,7 @@ cargo install ztensor-cli
 
 - Display metadata and stats for `.zt` (zTensor) files
 - Convert `.safetensor`, `.gguf`, and `.pkl` files to zTensor
+- **Download from HuggingFace** and convert to zTensor in one step
 - Merge multiple `.zt` files into one
 - Compress and decompress zTensor files (zstd encoding)
 
@@ -62,6 +63,27 @@ ztensor merge file1.zt file2.zt file3.zt -o merged.zt
 # Delete originals after merging
 ztensor merge --delete-original *.zt -o combined.zt
 ```
+
+### Download from HuggingFace
+
+Download safetensors from a HuggingFace repository and convert to zTensor:
+
+```sh
+# Download and convert all safetensors files from a repo
+ztensor download-hf microsoft/resnet-18 -o ./models
+
+# With compression
+ztensor download-hf openai-community/gpt2 -o ./models --compress
+
+# Specific revision with auth token
+ztensor download-hf meta-llama/Llama-2-7b --revision main --token hf_xxxxx -o ./
+```
+
+**Options:**
+- `-o, --output-dir` — Output directory (default: `.`)
+- `-c, --compress` — Compress with zstd
+- `--token` — HuggingFace API token for private repos
+- `--revision` — Branch, tag, or commit (default: `main`)
 
 ### Compress / Decompress
 

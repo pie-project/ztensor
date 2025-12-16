@@ -2,10 +2,13 @@
 
 use anyhow::{Context, Result, bail};
 use comfy_table::{Cell, ContentArrangement, Row, Table, presets::UTF8_FULL};
+use hf_hub::api::sync::ApiBuilder;
+use hf_hub::Repo;
 use std::collections::{BTreeMap, HashSet};
+use std::path::Path;
 use ztensor::{ChecksumAlgorithm, Encoding, ZTensorReader, ZTensorWriter};
 
-use crate::extractors::TensorExtractor;
+use crate::extractors::{SafeTensorExtractor, TensorExtractor};
 use crate::utils::create_progress_bar;
 
 // ============================================================================
@@ -272,6 +275,119 @@ pub fn merge_ztensor_files(
     
     pb.finish_with_message("Done");
     writer.finalize()?;
+    Ok(())
+}
+
+// ============================================================================
+// HuggingFace Download
+// ============================================================================
+
+/// Download safetensors from HuggingFace and convert to zTensor
+pub fn download_hf(
+    repo_id: &str,
+    output_dir: &str,
+    token: Option<&str>,
+    revision: &str,
+    compress: bool,
+) -> Result<()> {
+    // Create output directory if it doesn't exist
+    let output_path = Path::new(output_dir);
+    if !output_path.exists() {
+        std::fs::create_dir_all(output_path)
+            .with_context(|| format!("Failed to create output directory '{}'", output_dir))?;
+    }
+
+    // Build HuggingFace API client
+    let mut builder = ApiBuilder::new().with_progress(true);
+    if let Some(t) = token {
+        builder = builder.with_token(Some(t.to_string()));
+    }
+    let api = builder.build()
+        .map_err(|e| anyhow::anyhow!("Failed to build HuggingFace API client: {}", e))?;
+
+    // Create repo handle with revision
+    let repo = Repo::with_revision(repo_id.to_string(), hf_hub::RepoType::Model, revision.to_string());
+    let api_repo = api.repo(repo);
+
+    // Get repository info to list files
+    println!("Fetching repository info for '{}'...", repo_id);
+    let repo_info = api_repo.info()
+        .map_err(|e| anyhow::anyhow!("Failed to get repository info for '{}': {}", repo_id, e))?;
+
+    // Filter for *.safetensors files
+    let safetensor_files: Vec<_> = repo_info
+        .siblings
+        .iter()
+        .filter(|s| s.rfilename.ends_with(".safetensors"))
+        .collect();
+
+    if safetensor_files.is_empty() {
+        bail!("No .safetensors files found in repository '{}'", repo_id);
+    }
+
+    println!("Found {} safetensors file(s) to download and convert:", safetensor_files.len());
+    for f in &safetensor_files {
+        println!("  - {}", f.rfilename);
+    }
+    println!();
+
+    let encoding = if compress { Encoding::Zstd } else { Encoding::Raw };
+    let extractor = SafeTensorExtractor;
+    
+    let file_count = safetensor_files.len();
+    let pb = create_progress_bar(file_count as u64)?;
+
+    for sibling in &safetensor_files {
+        let filename = &sibling.rfilename;
+        pb.set_message(format!("Downloading {}", filename));
+
+        // Download file (returns path in HF cache)
+        let cached_path = api_repo.get(filename)
+            .map_err(|e| anyhow::anyhow!("Failed to download '{}': {}", filename, e))?;
+
+        pb.set_message(format!("Converting {}", filename));
+
+        // Determine output filename: replace .safetensors with .zt
+        let basename = Path::new(filename)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(filename);
+        let output_name = basename.replace(".safetensors", ".zt");
+        let output_file = output_path.join(&output_name);
+
+        if output_file.exists() {
+            eprintln!("Warning: Output file '{}' already exists, skipping...", output_file.display());
+            pb.inc(1);
+            continue;
+        }
+
+        // Extract tensors from the cached safetensors file
+        let tensors = extractor.extract_tensors(cached_path.to_str().unwrap_or_default())
+            .with_context(|| format!("Failed to extract tensors from '{}'", filename))?;
+
+        // Write to zTensor format
+        let mut writer = ZTensorWriter::create(&output_file)
+            .with_context(|| format!("Failed to create output file '{}'", output_file.display()))?;
+
+        for t in tensors {
+            writer.add_tensor(
+                &t.name,
+                t.shape,
+                t.dtype,
+                encoding.clone(),
+                t.data,
+                ChecksumAlgorithm::None,
+            )?;
+        }
+
+        writer.finalize()?;
+        println!("  Created: {}", output_file.display());
+        pb.inc(1);
+    }
+
+    pb.finish_with_message("Done");
+    println!("\nSuccessfully downloaded and converted {} file(s) to {}", 
+             file_count, output_dir);
     Ok(())
 }
 

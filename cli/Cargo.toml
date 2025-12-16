@@ -22,6 +22,7 @@ gguf-rs = "0.1.4"
 serde-pickle = "1.2"
 anyhow = "1.0"
 indicatif = "0.17"
+hf-hub = "0.4"
 
 [features]
 

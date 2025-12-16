@@ -212,6 +212,13 @@ Combine multiple zTensor files into one.
 ztensor merge part1.zt part2.zt -o merged.zt
 ```
 
+### Download from HuggingFace
+Download safetensors from HuggingFace and convert to zTensor:
+```bash
+ztensor download-hf microsoft/resnet-18 -o ./models
+ztensor download-hf openai-community/gpt2 -o ./models --compress
+```
+
 ## Supported Data Types
 
 | Type | Description |
