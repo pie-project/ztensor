@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "ztensor"
-version = "1.0.0"
+version = "1.0.1"
 description = "Python bindings for the zTensor library."
 readme = "README.md" 
 authors = [
