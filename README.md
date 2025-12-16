@@ -82,7 +82,7 @@ ztensor list model.zt
 
 ## File Format
 
-See [SPEC_NEW.md](SPEC_NEW.md) for the complete specification.
+See [SPEC.md](SPEC.md) for the complete specification.
 
 ```
 +---------------------------+

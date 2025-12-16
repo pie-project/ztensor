@@ -16,6 +16,8 @@ crc32c = "0.6.8"
 libc = "0.2"
 lazy_static = "1.4.0"
 memmap2 = "0.9"
+bytemuck = { version = "1.16", features = ["derive"] }
+half = { version = "2.4", features = ["bytemuck"] }
 
 
 [build-dependencies]

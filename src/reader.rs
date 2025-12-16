@@ -1,4 +1,5 @@
 use byteorder::{LittleEndian, ReadBytesExt};
+use half::{bf16, f16};
 use std::fs::File;
 use std::io::{BufReader, Cursor, Read, Seek, SeekFrom};
 use std::path::Path;
@@ -67,9 +68,29 @@ impl Pod for bool {
     }
 }
 
+// Half-precision floating point types (using the `half` crate)
+impl Pod for f16 {
+    fn from_le_bytes(bytes: &[u8]) -> Self {
+        f16::from_le_bytes(bytes.try_into().expect("f16 byte slice wrong size"))
+    }
+    fn dtype_matches(dtype: &DType) -> bool {
+        dtype == &DType::Float16
+    }
+}
+
+impl Pod for bf16 {
+    fn from_le_bytes(bytes: &[u8]) -> Self {
+        bf16::from_le_bytes(bytes.try_into().expect("bf16 byte slice wrong size"))
+    }
+    fn dtype_matches(dtype: &DType) -> bool {
+        dtype == &DType::BFloat16
+    }
+}
+
 /// Reads zTensor files (v1.0).
 pub struct ZTensorReader<R: Read + Seek> {
-    reader: R,
+    /// The underlying reader - public for advanced use cases like FFI
+    pub reader: R,
     pub manifest: Manifest,
 }
 
@@ -139,13 +160,17 @@ impl<R: Read + Seek> ZTensorReader<R> {
         self.manifest.tensors.get(name)
     }
 
-    /// Reads component data.
-    pub(crate) fn read_component(&mut self, component: &Component) -> Result<Vec<u8>, ZTensorError> {
+    /// Reads component data with context for error messages.
+    fn read_component_with_context(
+        &mut self, 
+        component: &Component, 
+        tensor_name: &str,
+        component_name: &str
+    ) -> Result<Vec<u8>, ZTensorError> {
          if component.offset % ALIGNMENT != 0 {
              return Err(ZTensorError::InvalidAlignment {
                 offset: component.offset,
-                required_alignment: ALIGNMENT,
-                actual_offset: component.offset,
+                alignment: ALIGNMENT,
             });
         }
 
@@ -166,7 +191,8 @@ impl<R: Read + Seek> ZTensorReader<R> {
                 let calculated_cs = crc32c::crc32c(&buffer);
                 if calculated_cs != expected_cs {
                      return Err(ZTensorError::ChecksumMismatch {
-                        tensor_name: "component".to_string(), // Can't easily pass name here
+                        tensor_name: tensor_name.to_string(),
+                        component_name: component_name.to_string(),
                         expected: format!("0x{:08X}", expected_cs),
                         calculated: format!("0x{:08X}", calculated_cs),
                     });
@@ -178,9 +204,6 @@ impl<R: Read + Seek> ZTensorReader<R> {
         match component.encoding {
             Some(Encoding::Zstd) => {
                 let mut decompressed: Vec<u8> = Vec::new(); 
-                 // zstd::stream::copy_decode is not ideal because we want into a Vec.
-                 // We don't track uncompressed size in Component (it's in Tensor metadata implicitly via shape/dtype, but not here).
-                 // zstd::decode_all will work.
                  let _ = zstd::stream::copy_decode(std::io::Cursor::new(buffer), &mut decompressed)
                     .map_err(ZTensorError::ZstdDecompression)?;
                  Ok(decompressed)
@@ -189,38 +212,46 @@ impl<R: Read + Seek> ZTensorReader<R> {
         }
     }
 
+    /// Reads raw component data (public for FFI access).
+    /// Note: Uses "unknown" for tensor context in error messages.
+    pub fn read_component(&mut self, component: &Component) -> Result<Vec<u8>, ZTensorError> {
+        self.read_component_with_context(component, "unknown", "unknown")
+    }
+
     /// Reads the raw, processed (decompressed, endian-swapped to native) byte data of a dense tensor.
     pub fn read_tensor(&mut self, name: &str) -> Result<Vec<u8>, ZTensorError> {
-        let tensor = self
-            .manifest
-            .tensors
-            .get(name)
-            .ok_or_else(|| ZTensorError::TensorNotFound(name.to_string()))?
-            .clone();
+        // Get tensor metadata, extracting only the data we need to avoid borrow issues
+        let (dtype, shape, data_component) = {
+            let tensor = self.manifest.tensors.get(name)
+                .ok_or_else(|| ZTensorError::TensorNotFound(name.to_string()))?;
+            
+            if tensor.format != "dense" {
+                return Err(ZTensorError::TypeMismatch {
+                    expected: "dense".to_string(),
+                    found: tensor.format.clone(),
+                    context: format!("tensor '{}'", name),
+                });
+            }
 
-        if tensor.format != "dense" {
-             return Err(ZTensorError::TypeMismatch {
-                expected: "dense".to_string(),
-                found: tensor.format,
-                context: format!("tensor '{}'", name),
-            });
-        }
+            let component = tensor.components.get("data").ok_or_else(|| {
+                ZTensorError::InvalidFileStructure(format!("Dense tensor '{}' missing 'data' component", name))
+            })?;
+            
+            (tensor.dtype, tensor.shape.clone(), component.clone())
+        };
 
-        let component = tensor.components.get("data").ok_or_else(|| {
-             ZTensorError::InvalidFileStructure(format!("Dense tensor '{}' missing 'data' component", name))
-        })?;
-
-        let mut data = self.read_component(component)?;
+        let mut data = self.read_component_with_context(&data_component, name, "data")?;
 
         // Endianness handling:
         // Spec: "All integers and multi-byte data types must be written in LE."
         // We read raw bytes. If we are on Big Endian system, we must swap.
-        if cfg!(target_endian = "big") && tensor.dtype.is_multi_byte() {
-            swap_endianness_in_place(&mut data, tensor.dtype.byte_size()?);
+        if cfg!(target_endian = "big") && dtype.is_multi_byte() {
+            swap_endianness_in_place(&mut data, dtype.byte_size()?);
         }
 
         // Validity check size
-        let expected_size = tensor.num_elements() * tensor.dtype.byte_size()? as u64;
+        let num_elements: u64 = if shape.is_empty() { 1 } else { shape.iter().product() };
+        let expected_size = num_elements * dtype.byte_size()? as u64;
         if data.len() as u64 != expected_size {
              return Err(ZTensorError::InconsistentDataSize {
                 expected: expected_size,
@@ -232,12 +263,26 @@ impl<R: Read + Seek> ZTensorReader<R> {
     }
 
     /// Reads tensor data into a typed vector.
-    pub fn read_typed_tensor_data<T: Pod>(&mut self, name: &str) -> Result<Vec<T>, ZTensorError> {
-        let tensor = self.get_tensor(name).ok_or_else(|| ZTensorError::TensorNotFound(name.to_string()))?.clone();
+    /// 
+    /// # Type Parameters
+    /// * `T` - The Pod type to read the tensor data as. Must match the tensor's dtype.
+    /// 
+    /// # Examples
+    /// ```ignore
+    /// let floats: Vec<f32> = reader.read_tensor_as("weights")?;
+    /// let halfs: Vec<half::f16> = reader.read_tensor_as("embeddings")?;
+    /// ```
+    pub fn read_tensor_as<T: Pod>(&mut self, name: &str) -> Result<Vec<T>, ZTensorError> {
+        // Get dtype for validation before reading
+        let dtype = {
+            let tensor = self.get_tensor(name)
+                .ok_or_else(|| ZTensorError::TensorNotFound(name.to_string()))?;
+            tensor.dtype
+        };
         
-        if !T::dtype_matches(&tensor.dtype) {
+        if !T::dtype_matches(&dtype) {
              return Err(ZTensorError::TypeMismatch {
-                expected: tensor.dtype.to_string_key(),
+                expected: dtype.to_string_key(),
                 found: std::any::type_name::<T>().to_string(),
                 context: format!("tensor '{}'", name),
             });
@@ -261,64 +306,64 @@ impl<R: Read + Seek> ZTensorReader<R> {
         Ok(typed_data)
     }
 
+    /// Backward compatibility alias for read_tensor_as
+    #[deprecated(since = "0.2.0", note = "use read_tensor_as instead")]
+    pub fn read_typed_tensor_data<T: Pod>(&mut self, name: &str) -> Result<Vec<T>, ZTensorError> {
+        self.read_tensor_as(name)
+    }
+
     // --- Sparse tensor reading ---
 
+    /// Reads a COO format sparse tensor.
     pub fn read_coo_tensor<T: Pod>(&mut self, name: &str) -> Result<crate::models::CooTensor<T>, ZTensorError> {
-        let tensor = self.get_tensor(name).ok_or_else(|| ZTensorError::TensorNotFound(name.to_string()))?.clone();
-        if tensor.format != "sparse_coo" {
-             return Err(ZTensorError::TypeMismatch {
-                expected: "sparse_coo".to_string(),
-                found: tensor.format,
-                context: format!("tensor '{}'", name),
-            });
-        }
+        // Extract tensor metadata
+        let (dtype, shape, val_comp, coords_comp) = {
+            let tensor = self.get_tensor(name)
+                .ok_or_else(|| ZTensorError::TensorNotFound(name.to_string()))?;
+            
+            if tensor.format != "sparse_coo" {
+                return Err(ZTensorError::TypeMismatch {
+                    expected: "sparse_coo".to_string(),
+                    found: tensor.format.clone(),
+                    context: format!("tensor '{}'", name),
+                });
+            }
+            
+            let val_comp = tensor.components.get("values")
+                .ok_or(ZTensorError::InvalidFileStructure("Missing 'values'".to_string()))?
+                .clone();
+            let coords_comp = tensor.components.get("coords")
+                .ok_or(ZTensorError::InvalidFileStructure("Missing 'coords'".to_string()))?
+                .clone();
+            
+            (tensor.dtype, tensor.shape.clone(), val_comp, coords_comp)
+        };
         
         // 1. values
-        let val_comp = tensor.components.get("values").ok_or(ZTensorError::InvalidFileStructure("Missing 'values'".to_string()))?;
-        let mut val_bytes = self.read_component(val_comp)?;
-        if cfg!(target_endian = "big") && tensor.dtype.is_multi_byte() {
-             swap_endianness_in_place(&mut val_bytes, tensor.dtype.byte_size()?);
+        let mut val_bytes = self.read_component_with_context(&val_comp, name, "values")?;
+        if cfg!(target_endian = "big") && dtype.is_multi_byte() {
+             swap_endianness_in_place(&mut val_bytes, dtype.byte_size()?);
         }
         // Convert to T
         let mut values = vec![T::default(); val_bytes.len() / T::SIZE];
         unsafe { std::slice::from_raw_parts_mut(values.as_mut_ptr() as *mut u8, val_bytes.len()).copy_from_slice(&val_bytes); }
 
         // 2. coords (Matrix ndim x nnz)
-        let coords_comp = tensor.components.get("coords").ok_or(ZTensorError::InvalidFileStructure("Missing 'coords'".to_string()))?;
-        let mut coords_bytes = self.read_component(coords_comp)?;
-        // coords are u64 usually? Spec says: "Matrix of coordinates (ndim x nnz)".
-        // Wait, spec 5.3 says "coords: Matrix of coordinates (ndim x nnz)". Implicitly integers. u64?
-        // Let's assume u64 for indices as per previous usage, or check if there is a separate dtype for indices?
-        // Models doesn't specify index type in Tensor struct, usually u64 or i64.
-        // v0.1 was u64. Let's assume u64.
+        let mut coords_bytes = self.read_component_with_context(&coords_comp, name, "coords")?;
         if cfg!(target_endian = "big") {
             swap_endianness_in_place(&mut coords_bytes, 8);
         }
         
-        // Parse coords into indices: Vec<Vec<u64>>.
-        // It's a flat list? "Matrix". Usually stored row-major or col-major?
-        // Usually [dim0_indices, dim1_indices, ...] or [ [d0, d1..], [d0, d1..] ]?
-        // "Matrix of coordinates (ndim x nnz)".
-        // Let's assume standard flattening: [dim0_i0, dim0_i1... dim1_i0, dim1_i1...] or interleaved?
-        // PyTorch sparse: (ndim, nnz).
-        // Let's assume it's stored as (ndim * nnz) u64s.
-        // We'll return Vec<Vec<u64>> where outer is nnz (one vec per element).
-        // Wait, `CooTensor` struct I defined in models calls for `indices: Vec<Vec<u64>>`.
-        // `indices[i][j]` : j-th index of i-th nonzero. (i is the nnz index, j is the dimension). => (nnz, ndim).
-        
         let u64_size = 8;
         let total_u64s = coords_bytes.len() / u64_size;
         let nnz = values.len();
-        let ndim = tensor.shape.len();
+        let ndim = shape.len();
         
         if total_u64s != nnz * ndim {
              return Err(ZTensorError::DataConversionError("COO coords size mismatch".to_string()));
         }
 
         let all_coords: Vec<u64> = coords_bytes.chunks_exact(8).map(|b| u64::from_le_bytes(b.try_into().unwrap())).collect();
-        // Assume row-major flattened: dim0_row, dim1_row? PyTorch style is (ndim, nnz).
-        // "coords": Matrix of coordinates $(ndim \times nnz)$.
-        // So first nnz elements are indices for dim0. Next nnz for dim1.
         
         let mut indices = Vec::with_capacity(nnz);
         for i in 0..nnz {
@@ -331,43 +376,60 @@ impl<R: Read + Seek> ZTensorReader<R> {
         }
 
         Ok(crate::models::CooTensor {
-            shape: tensor.shape.clone(),
+            shape,
             indices,
             values,
         })
     }
 
-     pub fn read_csr_tensor<T: Pod>(&mut self, name: &str) -> Result<crate::models::CsrTensor<T>, ZTensorError> {
-        let tensor = self.get_tensor(name).ok_or_else(|| ZTensorError::TensorNotFound(name.to_string()))?.clone();
-        if tensor.format != "sparse_csr" {
-             return Err(ZTensorError::TypeMismatch {
-                expected: "sparse_csr".to_string(),
-                found: tensor.format,
-                context: format!("tensor '{}'", name),
-            });
-        }
+    /// Reads a CSR format sparse tensor.
+    pub fn read_csr_tensor<T: Pod>(&mut self, name: &str) -> Result<crate::models::CsrTensor<T>, ZTensorError> {
+        // Extract tensor metadata
+        let (dtype, shape, val_comp, idx_comp, ptr_comp) = {
+            let tensor = self.get_tensor(name)
+                .ok_or_else(|| ZTensorError::TensorNotFound(name.to_string()))?;
+            
+            if tensor.format != "sparse_csr" {
+                return Err(ZTensorError::TypeMismatch {
+                    expected: "sparse_csr".to_string(),
+                    found: tensor.format.clone(),
+                    context: format!("tensor '{}'", name),
+                });
+            }
+            
+            let val_comp = tensor.components.get("values")
+                .ok_or(ZTensorError::InvalidFileStructure("Missing 'values'".to_string()))?
+                .clone();
+            let idx_comp = tensor.components.get("indices")
+                .ok_or(ZTensorError::InvalidFileStructure("Missing 'indices'".to_string()))?
+                .clone();
+            let ptr_comp = tensor.components.get("indptr")
+                .ok_or(ZTensorError::InvalidFileStructure("Missing 'indptr'".to_string()))?
+                .clone();
+            
+            (tensor.dtype, tensor.shape.clone(), val_comp, idx_comp, ptr_comp)
+        };
         
         // values
-        let val_comp = tensor.components.get("values").ok_or(ZTensorError::InvalidFileStructure("Missing 'values'".to_string()))?;
-        let mut val_bytes = self.read_component(val_comp)?;
-        if cfg!(target_endian = "big") && tensor.dtype.is_multi_byte() { swap_endianness_in_place(&mut val_bytes, tensor.dtype.byte_size()?); }
+        let mut val_bytes = self.read_component_with_context(&val_comp, name, "values")?;
+        if cfg!(target_endian = "big") && dtype.is_multi_byte() { 
+            swap_endianness_in_place(&mut val_bytes, dtype.byte_size()?); 
+        }
         let mut values = vec![T::default(); val_bytes.len() / T::SIZE];
         unsafe { std::slice::from_raw_parts_mut(values.as_mut_ptr() as *mut u8, val_bytes.len()).copy_from_slice(&val_bytes); }
 
          // indices
-        let idx_comp = tensor.components.get("indices").ok_or(ZTensorError::InvalidFileStructure("Missing 'indices'".to_string()))?;
-        let mut idx_bytes = self.read_component(idx_comp)?;
+        let mut idx_bytes = self.read_component_with_context(&idx_comp, name, "indices")?;
         if cfg!(target_endian = "big") { swap_endianness_in_place(&mut idx_bytes, 8); }
         let indices: Vec<u64> = idx_bytes.chunks_exact(8).map(|b| u64::from_le_bytes(b.try_into().unwrap())).collect();
         
         // indptr
-        let ptr_comp = tensor.components.get("indptr").ok_or(ZTensorError::InvalidFileStructure("Missing 'indptr'".to_string()))?;
-        let mut ptr_bytes = self.read_component(ptr_comp)?;
+        let mut ptr_bytes = self.read_component_with_context(&ptr_comp, name, "indptr")?;
         if cfg!(target_endian = "big") { swap_endianness_in_place(&mut ptr_bytes, 8); }
         let indptr: Vec<u64> = ptr_bytes.chunks_exact(8).map(|b| u64::from_le_bytes(b.try_into().unwrap())).collect();
 
         Ok(crate::models::CsrTensor {
-            shape: tensor.shape.clone(),
+            shape,
             indptr,
             indices,
             values,

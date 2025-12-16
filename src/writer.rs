@@ -1,19 +1,14 @@
 use byteorder::{LittleEndian, WriteBytesExt};
 use std::collections::BTreeMap;
 use std::fs::File;
-use std::io::{BufWriter, Seek, SeekFrom, Write};
+use std::io::{BufWriter, Seek, Write};
 use std::path::Path;
 
 use crate::error::ZTensorError;
 use crate::models::{
     ChecksumAlgorithm, Component, DType, Encoding, Manifest, Tensor, MAGIC_NUMBER,
 };
-use crate::utils::calculate_padding;
-use serde_cbor::Value as CborValue;
-
-struct PendingComponent {
-    data: Vec<u8>,
-}
+use crate::utils::align_offset;
 
 /// Writes zTensor files (v1.0).
 pub struct ZTensorWriter<W: Write + Seek> {
@@ -62,7 +57,7 @@ impl<W: Write + Seek> ZTensorWriter<W> {
         shape: Vec<u64>,
         dtype: DType,
         encoding: Encoding,
-        mut raw_native_data: Vec<u8>,
+        raw_native_data: Vec<u8>,
         checksum_algo: ChecksumAlgorithm,
     ) -> Result<(), ZTensorError> {
         // Validation: Check size
@@ -95,7 +90,7 @@ impl<W: Write + Seek> ZTensorWriter<W> {
 
     /// Adds a sparse CSR tensor to the zTensor file.
     #[allow(clippy::too_many_arguments)]
-    pub fn add_sparse_csr_tensor(
+    pub fn add_csr_tensor(
         &mut self,
         name: &str,
         shape: Vec<u64>,
@@ -103,15 +98,15 @@ impl<W: Write + Seek> ZTensorWriter<W> {
         values_native: Vec<u8>,
         indices: Vec<u64>,
         indptr: Vec<u64>,
-        encoding: Encoding, // Applied to all components (values, indices, indptr)
+        encoding: Encoding,
         checksum_algo: ChecksumAlgorithm,
     ) -> Result<(), ZTensorError> {
         let values_comp = self.write_component(values_native, dtype, encoding, checksum_algo)?;
         
-        let indices_bytes = Self::u64_vec_to_u8(indices);
+        let indices_bytes = crate::utils::u64_vec_to_bytes(indices);
         let indices_comp = self.write_component(indices_bytes, DType::Uint64, encoding, checksum_algo)?;
         
-        let indptr_bytes = Self::u64_vec_to_u8(indptr);
+        let indptr_bytes = crate::utils::u64_vec_to_bytes(indptr);
         let indptr_comp = self.write_component(indptr_bytes, DType::Uint64, encoding, checksum_algo)?;
 
         let mut components = BTreeMap::new();
@@ -132,19 +127,19 @@ impl<W: Write + Seek> ZTensorWriter<W> {
 
     /// Adds a sparse COO tensor to the zTensor file.
     #[allow(clippy::too_many_arguments)]
-    pub fn add_sparse_coo_tensor(
+    pub fn add_coo_tensor(
         &mut self,
         name: &str,
         shape: Vec<u64>,
         dtype: DType,
         values_native: Vec<u8>,
-        indices: Vec<u64>, // Flattened coordinates
+        indices: Vec<u64>,
         encoding: Encoding,
         checksum_algo: ChecksumAlgorithm,
     ) -> Result<(), ZTensorError> {
         let values_comp = self.write_component(values_native, dtype, encoding, checksum_algo)?;
         
-        let indices_bytes = Self::u64_vec_to_u8(indices);
+        let indices_bytes = crate::utils::u64_vec_to_bytes(indices);
         let coords_comp = self.write_component(indices_bytes, DType::Uint64, encoding, checksum_algo)?;
 
         let mut components = BTreeMap::new();
@@ -161,13 +156,38 @@ impl<W: Write + Seek> ZTensorWriter<W> {
         self.manifest.tensors.insert(name.to_string(), tensor);
         Ok(())
     }
-    
-    fn u64_vec_to_u8(v: Vec<u64>) -> Vec<u8> {
-        let len = v.len() * 8;
-        let cap = v.capacity() * 8;
-        let ptr = v.as_ptr();
-        std::mem::forget(v);
-        unsafe { Vec::from_raw_parts(ptr as *mut u8, len, cap) }
+
+    /// Backward compatibility alias for add_csr_tensor
+    #[deprecated(since = "0.2.0", note = "use add_csr_tensor instead")]
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_sparse_csr_tensor(
+        &mut self,
+        name: &str,
+        shape: Vec<u64>,
+        dtype: DType,
+        values_native: Vec<u8>,
+        indices: Vec<u64>,
+        indptr: Vec<u64>,
+        encoding: Encoding,
+        checksum_algo: ChecksumAlgorithm,
+    ) -> Result<(), ZTensorError> {
+        self.add_csr_tensor(name, shape, dtype, values_native, indices, indptr, encoding, checksum_algo)
+    }
+
+    /// Backward compatibility alias for add_coo_tensor
+    #[deprecated(since = "0.2.0", note = "use add_coo_tensor instead")]
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_sparse_coo_tensor(
+        &mut self,
+        name: &str,
+        shape: Vec<u64>,
+        dtype: DType,
+        values_native: Vec<u8>,
+        indices: Vec<u64>,
+        encoding: Encoding,
+        checksum_algo: ChecksumAlgorithm,
+    ) -> Result<(), ZTensorError> {
+        self.add_coo_tensor(name, shape, dtype, values_native, indices, encoding, checksum_algo)
     }
 
     fn write_component(
@@ -177,8 +197,8 @@ impl<W: Write + Seek> ZTensorWriter<W> {
         encoding: Encoding,
         checksum_algo: ChecksumAlgorithm
     ) -> Result<Component, ZTensorError> {
-        // 1. Handle Endianness
-        if crate::utils::IS_NATIVE_LITTLE_ENDIAN == 0 && dtype.byte_size()? > 1 {
+        // 1. Handle Endianness: convert from native to little-endian if needed
+        if !crate::utils::is_little_endian() && dtype.byte_size()? > 1 {
              crate::utils::swap_endianness_in_place(&mut data, dtype.byte_size()?);
         }
 
@@ -215,7 +235,7 @@ impl<W: Write + Seek> ZTensorWriter<W> {
     /// Internal helper to write a byte blob to the file with alignment.
     /// Returns (offset, length).
     fn write_component_data(&mut self, data: &[u8]) -> Result<(u64, u64), ZTensorError> {
-        let (aligned_offset, padding_bytes) = calculate_padding(self.current_offset);
+        let (aligned_offset, padding_bytes) = align_offset(self.current_offset);
 
         if padding_bytes > 0 {
             self.writer.write_all(&vec![0u8; padding_bytes as usize])?;
@@ -227,8 +247,6 @@ impl<W: Write + Seek> ZTensorWriter<W> {
         self.current_offset = aligned_offset + length;
         Ok((aligned_offset, length))
     }
-
-    // TODO: Add support for sparse tensors if needed (add_sparse_csr_tensor, etc.)
 
     /// Finalizes the zTensor file.
     /// Writes the Manifest (CBOR) and the Manifest Size.

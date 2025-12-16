@@ -10,10 +10,10 @@ pub enum ZTensorError {
     InvalidMagicNumber {
         found: Vec<u8>,
     },
+    /// Alignment error: offset must be a multiple of the required alignment.
     InvalidAlignment {
         offset: u64,
-        required_alignment: u64,
-        actual_offset: u64,
+        alignment: u64,
     },
     TensorNotFound(String),
     UnsupportedDType(String),
@@ -22,10 +22,11 @@ pub enum ZTensorError {
     DataConversionError(String),
     ChecksumMismatch {
         tensor_name: String,
+        component_name: String,
         expected: String,
         calculated: String,
     },
-    ChecksumFormatError(String), // New error for checksum parsing
+    ChecksumFormatError(String),
     UnexpectedEof,
     InconsistentDataSize {
         expected: u64,
@@ -35,7 +36,7 @@ pub enum ZTensorError {
         expected: String,
         found: String,
         context: String,
-    }, // For typed data retrieval
+    },
     Other(String),
 }
 
@@ -52,14 +53,10 @@ impl fmt::Display for ZTensorError {
                 "Invalid magic number. Expected 'ZTEN1000', found {:?}",
                 String::from_utf8_lossy(found)
             ),
-            ZTensorError::InvalidAlignment {
-                offset,
-                required_alignment,
-                actual_offset,
-            } => write!(
+            ZTensorError::InvalidAlignment { offset, alignment } => write!(
                 f,
-                "Invalid tensor alignment for offset {}. Must be multiple of {}, but actual start is {}",
-                offset, required_alignment, actual_offset
+                "Invalid alignment: offset {} is not a multiple of {}",
+                offset, alignment
             ),
             ZTensorError::TensorNotFound(name) => write!(f, "Tensor not found: {}", name),
             ZTensorError::UnsupportedDType(dtype) => write!(f, "Unsupported DType: {}", dtype),
@@ -70,12 +67,13 @@ impl fmt::Display for ZTensorError {
             ZTensorError::DataConversionError(msg) => write!(f, "Data conversion error: {}", msg),
             ZTensorError::ChecksumMismatch {
                 tensor_name,
+                component_name,
                 expected,
                 calculated,
             } => write!(
                 f,
-                "Checksum mismatch for tensor '{}'. Expected: {}, Calculated: {}",
-                tensor_name, expected, calculated
+                "Checksum mismatch for tensor '{}' component '{}'. Expected: {}, Calculated: {}",
+                tensor_name, component_name, expected, calculated
             ),
             ZTensorError::ChecksumFormatError(msg) => write!(f, "Checksum format error: {}", msg),
             ZTensorError::UnexpectedEof => write!(f, "Unexpected end of file"),
@@ -98,7 +96,6 @@ impl fmt::Display for ZTensorError {
     }
 }
 
-// Error trait and From implementations remain largely the same
 impl std::error::Error for ZTensorError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
@@ -118,8 +115,6 @@ impl From<std::io::Error> for ZTensorError {
     }
 }
 
-impl From<serde_cbor::Error> for ZTensorError {
-    fn from(err: serde_cbor::Error) -> Self {
-        ZTensorError::CborDeserialize(err) // Default, context might create CborSerialize
-    }
-}
+// Note: We don't implement a blanket From<serde_cbor::Error> because we want
+// explicit context about whether it's a serialization or deserialization error.
+// Use ZTensorError::CborSerialize(e) or ZTensorError::CborDeserialize(e) directly.

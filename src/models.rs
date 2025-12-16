@@ -1,6 +1,5 @@
 use crate::error::ZTensorError;
 use serde::{Deserialize, Serialize};
-use serde_cbor::Value as CborValue;
 use std::collections::BTreeMap;
 
 pub const MAGIC_NUMBER: &[u8; 8] = b"ZTEN1000";
@@ -121,8 +120,7 @@ impl Default for Manifest {
 }
 
 /// Data encoding types for Layout is replaced by String "format" in v1.0.
-/// Kept here if we need an enum for internal usage, but the spec says "format": string.
-/// We will rely on string matching as per spec.
+/// We rely on string matching as per spec.
 
 /// Specifies the checksum algorithm to be used by the writer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -131,22 +129,22 @@ pub enum ChecksumAlgorithm {
     Crc32c,
 }
 
-// In-memory representations for Sparse Tensors (helper structs for reading)
-// These remain generally useful.
-
+/// In-memory representation for COO sparse tensors.
 #[derive(Debug, Clone)]
 pub struct CooTensor<T> {
     pub shape: Vec<u64>,
-    pub indices: Vec<Vec<u64>>, // indices[i][j]: j-th index of i-th nonzero
+    /// indices[i][j]: j-th dimension index of i-th nonzero element
+    pub indices: Vec<Vec<u64>>,
     pub values: Vec<T>,
 }
 
+/// In-memory representation for CSR sparse tensors.
 #[derive(Debug, Clone)]
 pub struct CsrTensor<T> {
     pub shape: Vec<u64>,
     pub indptr: Vec<u64>,
-    pub indices: Vec<u64>, // Column indices
+    /// Column indices for each non-zero value
+    pub indices: Vec<u64>,
     pub values: Vec<T>,
 }
 
-pub use crate::models::Encoding as ComponentEncoding; // Alias if needed

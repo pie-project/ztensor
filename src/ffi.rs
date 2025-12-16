@@ -272,14 +272,14 @@ pub extern "C" fn ztensor_reader_read_tensor_component(
     };
     
     let component = match tensor.components.get(component_name) {
-        Some(c) => c,
+        Some(c) => c.clone(),
         None => {
              update_last_error(ZTensorError::Other(format!("Component '{}' not found in tensor '{}'", component_name, name)));
              return ptr::null_mut();
         }
     };
 
-    match reader.read_component(component) {
+    match reader.read_component(&component) {
         Ok(data_vec) => {
             let view = Box::new(CTensorDataView {
                 data: data_vec.as_ptr(),
@@ -443,6 +443,7 @@ pub extern "C" fn ztensor_writer_add_sparse_csr(
         }
     };
 
+    #[allow(deprecated)]
     let res = writer.add_sparse_csr_tensor(
         name,
         shape.to_vec(),
@@ -451,7 +452,7 @@ pub extern "C" fn ztensor_writer_add_sparse_csr(
         indices,
         indptr,
         Encoding::Raw,
-        ChecksumAlgorithm::None, // Default to None for simplicity in C API for now
+        ChecksumAlgorithm::None,
     );
 
     match res {
@@ -514,6 +515,7 @@ pub extern "C" fn ztensor_writer_add_sparse_coo(
         }
     };
 
+    #[allow(deprecated)]
     let res = writer.add_sparse_coo_tensor(
         name,
         shape.to_vec(),
