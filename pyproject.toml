@@ -1,22 +1,16 @@
-# This is the central configuration file for your Python package.
-# It uses the modern PEP 621 standard for metadata and tells tools like
-# pip and maturin how to build your project.
-
 [build-system]
-# Specifies that we are using `maturin` to build the package.
 requires = ["maturin>=1.0,<2.0"]
 build-backend = "maturin"
 
 [project]
-# The name of your package on PyPI.
 name = "ztensor"
-version = "0.1.4"
+version = "1.0.0"
 description = "Python bindings for the zTensor library."
-readme = "README.md" # It's good practice to have a README.
+readme = "README.md" 
 authors = [
     { name = "In Gim", email = "in.gim@yale.edu" },
 ]
-license = "MIT" # Or any other license you prefer
+license = "MIT" 
 classifiers = [
     "Programming Language :: Rust",
     "Programming Language :: Python :: 3",

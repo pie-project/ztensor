@@ -1,14 +1,17 @@
 # ztensor
+[![Crates.io](https://img.shields.io/crates/v/ztensor.svg)](https://crates.io/crates/ztensor)
+[![Docs.rs](https://docs.rs/ztensor/badge.svg)](https://docs.rs/ztensor)
+[![PyPI](https://img.shields.io/pypi/v/ztensor.svg)](https://pypi.org/project/ztensor/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 Simple tensor serialization format
 
 ## Key Features
 
-- **🛡️ Simple Spec** — Minimalist [spec](SPEC.md) for easy parsing.
-- **🚀 Zero-Copy Access** — Instant memory-mapping (mmap) with no RAM overhead.
-- **🔄 Efficient Writes** — Supports streaming and append-only operations without rewriting files.
-- **🔮 Future-Proof** — Decouples physical storage from logical representation for long-term compatibility.
+- **Simple Spec** — Minimalist [spec](SPEC.md) for easy parsing.
+- **Zero-Copy Access** — Instant memory-mapping (mmap) with no RAM overhead.
+- **Efficient Writes** — Supports streaming and append-only operations without rewriting files.
+- **Future-Proof** — Decouples physical storage from logical representation for long-term compatibility.
 
 ## Ecosystem
 
@@ -23,7 +26,7 @@ Simple tensor serialization format
 | **Zero-Copy Read** | ✅ | ✅ | ✅ | ❌ | ⚠️ |
 | **Safe (No Exec)** | ✅ | ✅ | ✅ | ❌ | ✅ |
 | **Streaming / Append** | ✅ | ❌ | ❌ | ❌ | ✅ |
-| **Sparse Support** | ✅ | ❌ | ❌ | ✅ | ✅ |
+| **Sparse Tensors** | ✅ | ❌ | ❌ | ✅ | ✅ |
 | **Compression** | ✅ | ❌ | ❌ | ❌ | ✅ |
 | **Quantization** | ✅ | ✅ | ✅ | ✅ | ✅ |
 | **Parser Complexity** | 🟢 Low | 🟢 Low | 🟡 Med | 🔴 High | 🔴 High |
