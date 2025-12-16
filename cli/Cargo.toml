@@ -12,7 +12,7 @@ name = "ztensor"
 path = "src/main.rs"
 
 [dependencies]
-ztensor = { path = "../" }
+ztensor = { version = "1.0", path = "../" }
 safetensors = "0.4"
 memmap2 = "0.9"
 clap = { version = "4", features = ["derive"] }
