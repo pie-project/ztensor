@@ -1,12 +1,16 @@
 import numpy as np
+import importlib
 from .ztensor import ffi, lib
 
 # --- Optional PyTorch Import ---
+# Use importlib to import PyTorch explicitly and name it _torch to avoid
+# being shadowed by the ztensor.torch submodule
 try:
-    import torch
+    _torch = importlib.import_module("torch")
 
     TORCH_AVAILABLE = True
 except ImportError:
+    _torch = None
     TORCH_AVAILABLE = False
 
 # --- Optional ml_dtypes for bfloat16 in NumPy ---
@@ -77,11 +81,11 @@ DTYPE_ZT_TO_NP = {v: k for k, v in DTYPE_NP_TO_ZT.items()}
 # PyTorch Mappings (if available)
 if TORCH_AVAILABLE:
     DTYPE_TORCH_TO_ZT = {
-        torch.float64: 'float64', torch.float32: 'float32', torch.float16: 'float16',
-        torch.bfloat16: 'bfloat16',
-        torch.int64: 'int64', torch.int32: 'int32',
-        torch.int16: 'int16', torch.int8: 'int8',
-        torch.uint8: 'uint8', torch.bool: 'bool',
+        _torch.float64: 'float64', _torch.float32: 'float32', _torch.float16: 'float16',
+        _torch.bfloat16: 'bfloat16',
+        _torch.int64: 'int64', _torch.int32: 'int32',
+        _torch.int16: 'int16', _torch.int8: 'int8',
+        _torch.uint8: 'uint8', _torch.bool: 'bool',
     }
     DTYPE_ZT_TO_TORCH = {v: k for k, v in DTYPE_TORCH_TO_ZT.items()}
 
@@ -343,7 +347,7 @@ class Reader:
                  if not TORCH_AVAILABLE: raise ZTensorError("PyTorch not installed.")
                  torch_dtype = DTYPE_ZT_TO_TORCH.get(metadata.dtype_str)
                  buffer = ffi.buffer(view_ptr.data, view_ptr.len)
-                 torch_tensor = torch.frombuffer(buffer, dtype=torch_dtype).reshape(metadata.shape)
+                 torch_tensor = _torch.frombuffer(buffer, dtype=torch_dtype).reshape(metadata.shape)
                  torch_tensor._owner = view_ptr
                  return torch_tensor
 
@@ -370,16 +374,16 @@ class Reader:
                 if not TORCH_AVAILABLE: raise ZTensorError("No Torch.")
                 # Torch CSR: torch.sparse_csr_tensor(crow_indices, col_indices, values, size=None)
                 # crowd_indices = indptr.
-                t_vals = torch.from_numpy(vals).clone() # Copied from buffer?
+                t_vals = _torch.from_numpy(vals).clone() # Copied from buffer?
                 # We need to copy because ZTensorView might expire? 
                 # Actually _read_component returns numpy wrapper on buffer.
                 # If we construct torch tensor from it, we need to keep reference.
                 # But sparse tensors in torch usually own their indices/values.
                 # Let's clone to be safe and simple.
-                t_indptr = torch.from_numpy(ptrs.astype(np.int64)).clone() 
-                t_indices = torch.from_numpy(idxs.astype(np.int64)).clone()
+                t_indptr = _torch.from_numpy(ptrs.astype(np.int64)).clone() 
+                t_indices = _torch.from_numpy(idxs.astype(np.int64)).clone()
                 
-                return torch.sparse_csr_tensor(t_indptr, t_indices, t_vals, size=metadata.shape)
+                return _torch.sparse_csr_tensor(t_indptr, t_indices, t_vals, size=metadata.shape)
 
         elif layout == "sparse_coo":
             # Components: values (T), coords (u64, shape=(ndim*nnz))
@@ -400,9 +404,9 @@ class Reader:
             
             elif to == 'torch':
                  if not TORCH_AVAILABLE: raise ZTensorError("No Torch.")
-                 t_vals = torch.from_numpy(vals).clone()
-                 t_indices = torch.from_numpy(coords.astype(np.int64)).clone()
-                 return torch.sparse_coo_tensor(t_indices, t_vals, size=metadata.shape)
+                 t_vals = _torch.from_numpy(vals).clone()
+                 t_indices = _torch.from_numpy(coords.astype(np.int64)).clone()
+                 return _torch.sparse_coo_tensor(t_indices, t_vals, size=metadata.shape)
 
         else:
             raise ZTensorError(f"Unsupported layout: {layout}")
@@ -450,7 +454,7 @@ class Writer:
             data_ptr = ffi.cast("unsigned char*", tensor.ctypes.data)
             nbytes = tensor.nbytes
 
-        elif TORCH_AVAILABLE and isinstance(tensor, torch.Tensor):
+        elif TORCH_AVAILABLE and isinstance(tensor, _torch.Tensor):
             if tensor.is_cuda:
                 raise ZTensorError("Cannot write directly from a CUDA tensor. Copy to CPU first using .cpu().")
             tensor = tensor.contiguous()
@@ -506,7 +510,7 @@ class Writer:
                 count = arr.size
                 dtype_str = DTYPE_NP_TO_ZT.get(arr.dtype)
                 return arr, ptr, length, count, dtype_str
-            elif TORCH_AVAILABLE and isinstance(arr, torch.Tensor):
+            elif TORCH_AVAILABLE and isinstance(arr, _torch.Tensor):
                 if arr.is_cuda: raise ZTensorError("CUDA tensors not supported. Move to CPU.")
                 arr = arr.contiguous()
                 ptr = ffi.cast("unsigned char*", arr.data_ptr())
@@ -529,15 +533,15 @@ class Writer:
                      arr = arr.astype(np.uint64) # Safe copy
                  arr = np.ascontiguousarray(arr)
                  return ffi.cast("uint64_t*", arr.ctypes.data), arr
-            elif TORCH_AVAILABLE and isinstance(arr, torch.Tensor):
+            elif TORCH_AVAILABLE and isinstance(arr, _torch.Tensor):
                  # Torch doesn't strictly have uint64 (it has int64). Reinterpret cast is risky if negative.
                  # Indices shouldn't be negative.
                  # cffi cast int64* to uint64* is okay bitwise.
-                 if arr.dtype != torch.int64 and arr.dtype != torch.int32: # what if int32?
+                 if arr.dtype != _torch.int64 and arr.dtype != _torch.int32: # what if int32?
                      raise TypeError("Indices must be integer type.")
                  # If int32, we MUST convert to int64/uint64 because FFI reads 64-bit strides.
-                 if arr.dtype == torch.int32:
-                      arr = arr.to(torch.int64)
+                 if arr.dtype == _torch.int32:
+                      arr = arr.to(_torch.int64)
                  arr = arr.contiguous()
                  return ffi.cast("uint64_t*", arr.data_ptr()), arr
             else:
@@ -579,7 +583,7 @@ class Writer:
              if isinstance(arr, np.ndarray):
                  arr = np.ascontiguousarray(arr)
                  return arr, ffi.cast("unsigned char*", arr.ctypes.data), arr.nbytes, DTYPE_NP_TO_ZT.get(arr.dtype)
-             elif TORCH_AVAILABLE and isinstance(arr, torch.Tensor):
+             elif TORCH_AVAILABLE and isinstance(arr, _torch.Tensor):
                  if arr.is_cuda: raise ZTensorError("No CUDA")
                  arr = arr.contiguous()
                  return arr, ffi.cast("unsigned char*", arr.data_ptr()), arr.numel() * arr.element_size(), DTYPE_TORCH_TO_ZT.get(arr.dtype)
@@ -593,8 +597,8 @@ class Writer:
                  if arr.dtype != np.uint64: arr = arr.astype(np.uint64) # Safe copy
                  arr = np.ascontiguousarray(arr)
                  return ffi.cast("uint64_t*", arr.ctypes.data), arr, arr.size
-            elif TORCH_AVAILABLE and isinstance(arr, torch.Tensor):
-                 if arr.dtype != torch.int64: arr = arr.to(torch.int64)
+            elif TORCH_AVAILABLE and isinstance(arr, _torch.Tensor):
+                 if arr.dtype != _torch.int64: arr = arr.to(_torch.int64)
                  arr = arr.contiguous()
                  return ffi.cast("uint64_t*", arr.data_ptr()), arr, arr.numel()
             raise TypeError("Unsupported")

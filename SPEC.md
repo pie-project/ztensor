@@ -1,7 +1,9 @@
 # zTensor File Format Specification
 
 **Version:** 1.0.0
+
 **Status:** Draft Standard
+
 **File Extension:** `.zt` (recommended)
 
 ## 1\. Design Philosophy
