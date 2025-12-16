@@ -91,7 +91,7 @@ class TestZTensorBindings(unittest.TestCase):
             self.assertEqual(len(reader), 3)
 
             # Test get_tensor_names
-            read_names = sorted(reader.get_tensor_names())
+            read_names = sorted(reader.tensor_names)
             self.assertEqual(tensor_names, read_names)
 
             # Test __iter__ and __getitem__
@@ -103,10 +103,10 @@ class TestZTensorBindings(unittest.TestCase):
             self.assertEqual(tensor_names, sorted(all_meta))
 
             # Test list_tensors
-            self.assertEqual(len(reader.list_tensors()), 3)
+            self.assertEqual(len(reader.tensors), 3)
 
             # Test specific metadata properties
-            meta_scalar = reader.get_metadata("scalar")
+            meta_scalar = reader.metadata("scalar")
             self.assertEqual(meta_scalar.name, "scalar")
             self.assertEqual(meta_scalar.shape, (1, ))
             self.assertEqual(meta_scalar.dtype, np.dtype('float32'))
@@ -115,7 +115,7 @@ class TestZTensorBindings(unittest.TestCase):
             self.assertGreater(meta_scalar.size, 0)
             self.assertEqual(meta_scalar.layout, "dense")
             # In v1.0, raw encoding is represented as "none" (no encoding applied)
-            self.assertIn(meta_scalar.encoding, ["raw", "none"])
+            self.assertIn(meta_scalar.encoding, ["raw", "none", None])
 
     def test_04_error_handling(self):
         """Test expected failure modes."""

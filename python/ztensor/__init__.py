@@ -183,9 +183,11 @@ class TensorMetadata:
         """The tensor encoding as a string (e.g., 'raw', 'zstd')."""
         if self._encoding is None:
             encoding_ptr = lib.ztensor_metadata_get_encoding_str(self._ptr)
-            _check_ptr(encoding_ptr, "get_encoding_str")
-            self._encoding = ffi.string(encoding_ptr).decode('utf-8')
-            lib.ztensor_free_string(encoding_ptr)
+            if encoding_ptr == ffi.NULL:
+                self._encoding = None
+            else:
+                self._encoding = ffi.string(encoding_ptr).decode('utf-8')
+                lib.ztensor_free_string(encoding_ptr)
         return self._encoding
 
     @property
@@ -239,20 +241,38 @@ class Reader:
         for i in range(len(self)):
             yield self[i]
 
-    def __getitem__(self, index: int) -> TensorMetadata:
-        """Retrieves metadata for a tensor by its index."""
+    def __getitem__(self, key):
+        """
+        Retrieves metadata (int key) or reads tensor data (str key).
+        
+        Args:
+            key: If int, returns TensorMetadata at that index.
+                 If str, returns the tensor data (calls read_tensor).
+        """
         if self._ptr is None: raise ZTensorError("Reader is closed.")
-        if index >= len(self):
-            raise IndexError("Tensor index out of range")
-        meta_ptr = lib.ztensor_reader_get_metadata_by_index(self._ptr, index)
-        _check_ptr(meta_ptr, f"get_metadata_by_index: {index}")
-        return TensorMetadata(meta_ptr)
+        
+        if isinstance(key, int):
+            if key >= len(self):
+                raise IndexError("Tensor index out of range")
+            meta_ptr = lib.ztensor_reader_get_metadata_by_index(self._ptr, key)
+            _check_ptr(meta_ptr, f"get_metadata_by_index: {key}")
+            return TensorMetadata(meta_ptr)
+        elif isinstance(key, str):
+            return self.read_tensor(key)
+        else:
+            raise TypeError(f"Invalid argument type for __getitem__: {type(key)}")
 
-    def list_tensors(self) -> list[TensorMetadata]:
+    def __contains__(self, name: str) -> bool:
+        """Checks if a tensor with the given name exists in the file."""
+        return name in self.tensor_names
+
+    @property
+    def tensors(self) -> list[TensorMetadata]:
         """Returns a list of all TensorMetadata objects in the file."""
         return list(self)
 
-    def get_tensor_names(self) -> list[str]:
+    @property
+    def tensor_names(self) -> list[str]:
         """Returns a list of all tensor names in the file."""
         if self._ptr is None: raise ZTensorError("Reader is closed.")
         c_array_ptr = lib.ztensor_reader_get_all_tensor_names(self._ptr)
@@ -261,13 +281,18 @@ class Reader:
 
         return [ffi.string(c_array_ptr.strings[i]).decode('utf-8') for i in range(c_array_ptr.len)]
 
-    def get_metadata(self, name: str) -> TensorMetadata:
+    def metadata(self, name: str) -> TensorMetadata:
         """Retrieves metadata for a tensor by its name."""
         if self._ptr is None: raise ZTensorError("Reader is closed.")
         name_bytes = name.encode('utf-8')
         meta_ptr = lib.ztensor_reader_get_metadata_by_name(self._ptr, name_bytes)
-        _check_ptr(meta_ptr, f"get_metadata: {name}")
+        _check_ptr(meta_ptr, f"metadata: {name}")
         return TensorMetadata(meta_ptr)
+
+    # Legacy alias for backward compatibility (optional, but good practice if not actively removing)
+    def list_tensors(self): return self.tensors
+    def get_tensor_names(self): return self.tensor_names
+    def get_metadata(self, name): return self.metadata(name)
 
     def _read_component(self, tensor_name: str, component_name: str, dtype_func):
         """Reads a specific component as a numpy array."""
@@ -293,13 +318,13 @@ class Reader:
             to (str): The desired output format. 'numpy' (returns scipy.sparse for sparse) or 'torch'.
 
         Returns:
-            np.ndarray, torch.Tensor, scipy.sparse.spmatrix, or torch.sparse_coo_tensor
+            Union[np.ndarray, torch.Tensor, scipy.sparse.spmatrix, torch.sparse_coo_tensor]
         """
         if self._ptr is None: raise ZTensorError("Reader is closed.")
         if to not in ['numpy', 'torch']:
              raise ValueError(f"Unsupported format: '{to}'.")
 
-        metadata = self.get_metadata(name)
+        metadata = self.metadata(name)
         layout = metadata.layout
 
         if layout == "dense":
@@ -336,7 +361,7 @@ class Reader:
                 try:
                     from scipy.sparse import csr_matrix
                 except ImportError:
-                    raise ZTensorError("exclude scipy? scipy is required for numpy sparse.")
+                    raise ZTensorError("scipy is required for reading sparse tensors as numpy.")
                 
                 # Scipy needs appropriate index types (int32/int64).
                 return csr_matrix((vals, idxs.astype(np.int32), ptrs.astype(np.int32)), shape=metadata.shape)
@@ -458,12 +483,17 @@ class Writer:
     def add_sparse_csr(self, name: str, values, indices, indptr, shape):
         """
         Adds a sparse CSR tensor.
+        
         Args:
             name: Tensor name.
             values: Numpy/Torch array of values.
             indices: Numpy/Torch array of column indices.
             indptr: Numpy/Torch array of index pointers.
             shape: Tuple of (rows, cols).
+            
+        Example:
+            >>> csr = scipy.sparse.csr_matrix([[1, 0], [0, 2]])
+            >>> writer.add_sparse_csr("my_csr", csr.data, csr.indices, csr.indptr, csr.shape)
         """
         if not self._ptr: raise ZTensorError("Writer is closed.")
 
@@ -492,19 +522,12 @@ class Writer:
         i_arr, i_ptr, i_len, i_cnt, _ = get_buffer_info(indices)
         p_arr, p_ptr, p_len, p_cnt, _ = get_buffer_info(indptr)
 
-        # Cast indices/indptr to uint64* (assuming they are compatible types, or we might need conversion)
-        # The FFI expects uint64*. If inputs are int32/int64, we might need to verify or copy?
-        # Rust `add_sparse_csr` expects `indices` and `indptr` as `Vec<u64>`.
-        # The FFI accepts `*const u64`. This means the input buffer MUST be u64 (or i64 with risk).
-        # We should enforce u64 or conversion.
-        # For simplicity/performance, let's assume user provides correct types or we cast if numpy.
-
         def ensure_u64_ptr(arr):
              # If numpy, cast to uint64 if not already
             if isinstance(arr, np.ndarray):
                  if arr.dtype != np.uint64:
-                     arr = arr.astype(np.uint64, copy=False) # Helper copy
-                     arr = np.ascontiguousarray(arr)
+                     arr = arr.astype(np.uint64) # Safe copy
+                 arr = np.ascontiguousarray(arr)
                  return ffi.cast("uint64_t*", arr.ctypes.data), arr
             elif TORCH_AVAILABLE and isinstance(arr, torch.Tensor):
                  # Torch doesn't strictly have uint64 (it has int64). Reinterpret cast is risky if negative.
@@ -543,23 +566,11 @@ class Writer:
     def add_sparse_coo(self, name: str, values, indices, shape):
         """
         Adds a sparse COO tensor.
+        
         Args:
             name: Tensor name
             values: Values array
-            indices: Coords array (flattened or matrix?) 
-                     Spec says "Matrix of coordinates (ndim x nnz)".
-                     The Rust FFI `indices_ptr` expects a flat buffer of u64s.
-                     The Rust reader interprets it as `(d0_i0, d0_i1, ... d0_in, d1_i0...)` (Row-major if Flattened Matrix?)
-                     Wait, implementation details in reader.rs: 
-                     "Assumed row-major flattened... indices.push(idx)"
-                     Actually `reader.rs` implementation: 
-                     `all_coords` is flat u64.
-                     Inside loop `for d in 0..ndim { idx.push(all_coords[d * nnz + i]) }`
-                     This implies `all_coords` is stored as:
-                     [dim0_all_indices, dim1_all_indices, ...]
-                     i.e., blocked by dimension. 
-                     If input `indices` is shape (ndim, nnz), flattening it (C order) gives exactly that.
-                     So user should pass `indices` of shape (ndim, nnz).
+            indices: Matrix of coordinates (ndim x nnz) in C-order (row-major).
             shape: Tensor shape
         """
         if not self._ptr: raise ZTensorError("Writer is closed.")
@@ -579,7 +590,7 @@ class Writer:
         # indices
         def ensure_u64_ptr(arr):
             if isinstance(arr, np.ndarray):
-                 if arr.dtype != np.uint64: arr = arr.astype(np.uint64, copy=False)
+                 if arr.dtype != np.uint64: arr = arr.astype(np.uint64) # Safe copy
                  arr = np.ascontiguousarray(arr)
                  return ffi.cast("uint64_t*", arr.ctypes.data), arr, arr.size
             elif TORCH_AVAILABLE and isinstance(arr, torch.Tensor):
