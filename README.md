@@ -29,6 +29,12 @@ pip install ztensor
 ztensor = "0.1"
 ```
 
+### CLI
+
+```bash
+cargo install ztensor-cli
+```
+
 ## Quick Start: Python
 
 ### Basic Usage with NumPy
@@ -164,26 +170,29 @@ ztensor info model.zt
 ### Convert Other Formats
 Convert SafeTensors, GGUF, or Pickle files to zTensor.
 ```bash
-# Auto-detect format
-ztensor convert model.safetensors model.zt
+# Auto-detect format from extension
+ztensor convert model.safetensors -o model.zt
 
 # Explicit format with compression
-ztensor convert --format gguf --compress llama.gguf llama.zt
+ztensor convert -f gguf -c llama.gguf -o llama.zt
+
+# Delete originals after conversion
+ztensor convert --delete-original *.safetensors -o model.zt
 ```
 
 ### Compression Tools
 ```bash
 # Compress an existing raw file
-ztensor compress raw.zt compressed.zt
+ztensor compress raw.zt -o compressed.zt
 
 # Decompress a file
-ztensor decompress compressed.zt raw.zt
+ztensor decompress compressed.zt -o raw.zt
 ```
 
 ### Merge Files
 Combine multiple zTensor files into one.
 ```bash
-ztensor merge -o merged.zt part1.zt part2.zt
+ztensor merge part1.zt part2.zt -o merged.zt
 ```
 
 ## Supported Data Types

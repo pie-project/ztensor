@@ -85,25 +85,30 @@ pub fn detect_format_from_extension(input: &str) -> Option<InputFormat> {
     }
 }
 
-/// Detect input format for a list of inputs
-pub fn detect_format_for_inputs(inputs: &[String], format: &str) -> Option<InputFormat> {
-    if format == "auto" {
-        let mut detected: Option<InputFormat> = None;
-        for input in inputs {
-            let this_format = detect_format_from_extension(input);
-            if let Some(fmt) = this_format {
-                if let Some(prev) = detected {
-                    if prev != fmt {
-                        return None; // Mixed formats
-                    }
-                } else {
-                    detected = Some(fmt);
+/// Auto-detect input format for a list of inputs (from file extensions)
+pub fn detect_format_for_inputs_auto(inputs: &[String]) -> Option<InputFormat> {
+    let mut detected: Option<InputFormat> = None;
+    for input in inputs {
+        let this_format = detect_format_from_extension(input);
+        if let Some(fmt) = this_format {
+            if let Some(prev) = detected {
+                if prev != fmt {
+                    return None; // Mixed formats
                 }
             } else {
-                return None;
+                detected = Some(fmt);
             }
+        } else {
+            return None; // Unknown extension
         }
-        detected
+    }
+    detected
+}
+
+/// Detect input format for a list of inputs (with explicit format string)
+pub fn detect_format_for_inputs(inputs: &[String], format: &str) -> Option<InputFormat> {
+    if format == "auto" {
+        detect_format_for_inputs_auto(inputs)
     } else {
         match format {
             "safetensor" => Some(InputFormat::SafeTensor),
