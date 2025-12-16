@@ -1,14 +1,13 @@
 # ztensor
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 Simple tensor serialization format
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-
 ## Key Features
 
-- **🛡️ Simple Spec** — Minimalist [format spec](SPEC.md) for easy parsing.
+- **🛡️ Simple Spec** — Minimalist [spec](SPEC.md) for easy parsing.
 - **🚀 Zero-Copy Access** — Instant memory-mapping (mmap) with no RAM overhead.
-- **🔄 Efficient Writes** — Supports streaming and append-only operations (ideal for fine-tuning) without rewriting files.
+- **🔄 Efficient Writes** — Supports streaming and append-only operations without rewriting files.
 - **🔮 Future-Proof** — Decouples physical storage from logical representation for long-term compatibility.
 
 ## Ecosystem
