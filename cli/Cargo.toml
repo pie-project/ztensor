@@ -1,14 +1,14 @@
 [package]
 name = "ztensor-cli"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
 authors = ["In Gim <in.gim@yale.edu>"]
 description = "Command-line tool for zTensor"
 license = "MIT"
-repository = "https://github.com/pie-project/ztensor/cli"
+repository = "https://github.com/pie-project/ztensor"
 
 [[bin]]
-name = "ztensor"            # This is the command users will run
+name = "ztensor"           
 path = "src/main.rs"
 
 [dependencies]
