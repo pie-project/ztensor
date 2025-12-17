@@ -217,11 +217,36 @@ pub extern "C" fn ztensor_reader_read_tensor_view(
     metadata_ptr: *const CTensorMetadata,
 ) -> *mut CTensorDataView {
     let reader = ztensor_handle!(mut reader_ptr);
-    let (name, _metadata) = ztensor_handle!(metadata_ptr);
+    let (name, metadata) = ztensor_handle!(metadata_ptr);
 
-    // In v1.0, `read_raw_tensor_data` is replaced by `read_tensor`
-    // which requires the tensor name.
-    match reader.read_tensor(name) {
+    // Optimization: Use `read_tensor_by_info` to skip the lookup since we have the metadata object.
+    match reader.read_tensor_by_info(name, metadata) {
+        Ok(data_vec) => {
+            let view = Box::new(CTensorDataView {
+                data: data_vec.as_ptr(),
+                len: data_vec.len(),
+                _owner: Box::into_raw(Box::new(data_vec)) as *mut c_void,
+            });
+            Box::into_raw(view)
+        }
+        Err(e) => {
+            update_last_error(e);
+            ptr::null_mut()
+        }
+    }
+}
+
+/// Fast tensor read that skips checksum verification for maximum performance.
+/// Use this when data integrity is verified elsewhere or not critical (e.g., benchmarks).
+#[unsafe(no_mangle)]
+pub extern "C" fn ztensor_reader_read_tensor_view_fast(
+    reader_ptr: *mut CZTensorReader,
+    metadata_ptr: *const CTensorMetadata,
+) -> *mut CTensorDataView {
+    let reader = ztensor_handle!(mut reader_ptr);
+    let (name, metadata) = ztensor_handle!(metadata_ptr);
+
+    match reader.read_tensor_by_info_fast(name, metadata) {
         Ok(data_vec) => {
             let view = Box::new(CTensorDataView {
                 data: data_vec.as_ptr(),

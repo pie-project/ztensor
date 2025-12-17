@@ -227,12 +227,14 @@ class Reader:
         ptr = lib.ztensor_reader_open(path_bytes)
         _check_ptr(ptr, f"Reader open: {file_path}")
         self._ptr = ffi.gc(ptr, lib.ztensor_reader_free)
+        self._tensor_names_cache = None  # Cache for tensor names
 
     def __enter__(self):
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self._ptr = None
+        self._tensor_names_cache = None
 
     def __len__(self):
         """Returns the number of tensors in the file."""
@@ -242,8 +244,10 @@ class Reader:
     def __iter__(self):
         """Iterates over the metadata of all tensors in the file."""
         if self._ptr is None: raise ZTensorError("Reader is closed.")
-        for i in range(len(self)):
-            yield self[i]
+        # Optimization: Don't iterate by index (O(N^2) deeper down).
+        # Instead, get all names (O(N)) and then get metadata by name (O(logN)).
+        for name in self.tensor_names:
+            yield self.metadata(name)
 
     def __getitem__(self, key):
         """
@@ -277,13 +281,17 @@ class Reader:
 
     @property
     def tensor_names(self) -> list[str]:
-        """Returns a list of all tensor names in the file."""
+        """Returns a list of all tensor names in the file (cached)."""
         if self._ptr is None: raise ZTensorError("Reader is closed.")
+        if self._tensor_names_cache is not None:
+            return self._tensor_names_cache
+        
         c_array_ptr = lib.ztensor_reader_get_all_tensor_names(self._ptr)
         _check_ptr(c_array_ptr, "get_all_tensor_names")
         c_array_ptr = ffi.gc(c_array_ptr, lib.ztensor_free_string_array)
 
-        return [ffi.string(c_array_ptr.strings[i]).decode('utf-8') for i in range(c_array_ptr.len)]
+        self._tensor_names_cache = [ffi.string(c_array_ptr.strings[i]).decode('utf-8') for i in range(c_array_ptr.len)]
+        return self._tensor_names_cache
 
     def metadata(self, name: str) -> TensorMetadata:
         """Retrieves metadata for a tensor by its name."""
@@ -312,7 +320,7 @@ class Reader:
         arr = np.frombuffer(buffer, dtype=dtype_func())
         return arr, view_ptr
 
-    def read_tensor(self, name: str, to: str = 'numpy'):
+    def read_tensor(self, name: str, to: str = 'numpy', verify_checksum: bool = False):
         """
         Reads a tensor by name and returns it as a NumPy array or PyTorch tensor.
         Supports 'dense' (returns array/tensor) and 'sparse_csr'/'sparse_coo' (returns Scipy/Torch sparse).
@@ -320,6 +328,7 @@ class Reader:
         Args:
             name (str): The name of the tensor to read.
             to (str): The desired output format. 'numpy' (returns scipy.sparse for sparse) or 'torch'.
+            verify_checksum (bool): If True, verify checksums during read (slower). Default: False.
 
         Returns:
             Union[np.ndarray, torch.Tensor, scipy.sparse.spmatrix, torch.sparse_coo_tensor]
@@ -332,7 +341,11 @@ class Reader:
         layout = metadata.layout
 
         if layout == "dense":
-            view_ptr = lib.ztensor_reader_read_tensor_view(self._ptr, metadata._ptr)
+            # Use fast path (skip checksum) or standard path based on verify_checksum
+            if verify_checksum:
+                view_ptr = lib.ztensor_reader_read_tensor_view(self._ptr, metadata._ptr)
+            else:
+                view_ptr = lib.ztensor_reader_read_tensor_view_fast(self._ptr, metadata._ptr)
             _check_ptr(view_ptr, f"read_tensor: {name}")
             view_ptr = ffi.gc(view_ptr, lib.ztensor_free_tensor_view)
 
