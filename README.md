@@ -31,6 +31,10 @@ Simple tensor serialization format
 | **Quantization** | ✅ | ✅ | ✅ | ✅ | ✅ |
 | **Parser Complexity** | 🟢 Low | 🟢 Low | 🟡 Med | 🔴 High | 🔴 High |
 
+## Benchmark
+
+![benchmark](benchmark/plot.png)
+
 ## Installation
 
 ### Python

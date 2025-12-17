@@ -2,12 +2,11 @@ import os
 import sys
 import time
 import numpy as np
-import h5py
-import gguf
 import argparse
 import threading
 from typing import Dict
-import ztensor
+
+# Note: h5py, gguf, ztensor are imported lazily in benchmark functions
 
 # --- UTILITIES ---
 
@@ -89,6 +88,10 @@ def generate_tensor_dict(total_size_mb: int, distribution: str = "mixed") -> Dic
 # --- BENCHMARK FUNCTIONS ---
 
 def benchmark_write(format_name, tensors, filepath):
+    import ztensor
+    import h5py
+    import gguf
+    
     start = time.perf_counter()
     
     if format_name == "ztensor" or format_name == "ztensor_zstd":
@@ -126,13 +129,16 @@ def benchmark_write(format_name, tensors, filepath):
     return size_gb / duration, size_gb 
 
 def benchmark_read(format_name, filepath):
+    import ztensor
+    import h5py
+    import gguf
+    
     start = time.perf_counter()
     loaded_tensors = {}
 
     if format_name == "ztensor" or format_name == "ztensor_zstd":
-        with ztensor.Reader(filepath) as r:
-            for name in r.tensor_names:
-                loaded_tensors[name] = r.read_tensor(name, to='numpy')
+        import ztensor.numpy
+        loaded_tensors = ztensor.numpy.load_file(filepath)
 
     elif format_name == "safetensors":
         import safetensors.numpy
@@ -165,7 +171,7 @@ def benchmark_read(format_name, filepath):
 def run_sweep():
     # Sweep configuration
     sizes = [128, 512, 1024, 2048] # MB
-    distributions = ["mixed", "small", "large"]
+    distributions = ["mixed", "large"]
     formats = ["safetensors", "pickle", "hdf5", "ztensor", "gguf"] 
     
     results = []
@@ -218,59 +224,251 @@ def run_sweep():
                 })
 
     # Save CSV
+    import pandas as pd
     df = pd.DataFrame(results)
     df.to_csv("bench_out/sweep_results.csv", index=False)
     print("Sweep complete. Results saved to bench_out/sweep_results.csv")
     plot_results(df)
 
 def plot_results(df):
-    distributions = df['Distribution'].unique()
-    
-    # 1. Throughput vs Size (per distribution)
-    for dist in distributions:
-        subset = df[df['Distribution'] == dist]
-        plt.figure(figsize=(10, 6))
-        for fmt in subset['Format'].unique():
-            data = subset[subset['Format'] == fmt]
-            plt.plot(data['SizeMB'], data['WriteGBs'], marker='o', label=fmt)
-        
-        plt.title(f"Write Throughput vs File Size ({dist.title()})")
-        plt.xlabel("Total Size (MB)")
-        plt.ylabel("Throughput (GB/s)")
-        plt.legend()
-        plt.grid(True)
-        plt.savefig(f"bench_out/plots/write_throughput_{dist}.png")
-        plt.close()
-        
-    # 2. Read Latency vs Size (per distribution)
-    for dist in distributions:
-        subset = df[df['Distribution'] == dist]
-        plt.figure(figsize=(10, 6))
-        for fmt in subset['Format'].unique():
-            data = subset[subset['Format'] == fmt]
-            plt.plot(data['SizeMB'], data['ReadSeconds'], marker='o', label=fmt)
-            
-        plt.title(f"Read Latency vs File Size ({dist.title()})")
-        plt.xlabel("Total Size (MB)")
-        plt.ylabel("Latency (s)")
-        plt.legend()
-        plt.grid(True)
-        plt.savefig(f"bench_out/plots/read_latency_{dist}.png")
-        plt.close()
+    """Quick plots after sweep (calls draw_plot)."""
+    draw_plot("bench_out/sweep_results.csv")
 
-    print("Plots generated in bench_out/plots/")
+
+def draw_plot(csv_path: str = "bench_out/sweep_results.csv", output_dir: str = "bench_out/plots"):
+    """
+    Creates publication-grade benchmark plots from sweep results CSV.
+    
+    Args:
+        csv_path: Path to the sweep_results.csv file
+        output_dir: Directory to save plots
+    """
+    import matplotlib.pyplot as plt
+    import pandas as pd
+    import numpy as np
+    
+    # Load data
+    df = pd.read_csv(csv_path)
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # --- Publication Style Setup ---
+    plt.rcParams.update({
+        'font.family': 'sans-serif',
+        'font.sans-serif': ['Helvetica', 'Arial', 'DejaVu Sans'],
+        'font.size': 11,
+        'axes.labelsize': 12,
+        'axes.titlesize': 14,
+        'axes.titleweight': 'bold',
+        'legend.fontsize': 10,
+        'xtick.labelsize': 10,
+        'ytick.labelsize': 10,
+        'figure.dpi': 150,
+        'savefig.dpi': 300,
+        'savefig.bbox': 'tight',
+        'axes.spines.top': False,
+        'axes.spines.right': False,
+        'axes.grid': True,
+        'grid.alpha': 0.3,
+        'grid.linestyle': '--',
+    })
+    
+    # Color palette - vibrant, colorblind-friendly
+    COLORS = {
+        'ztensor': '#2563EB',      # Blue (primary)
+        'safetensors': '#DC2626',  # Red
+        'pickle': '#16A34A',       # Green
+        'hdf5': '#9333EA',         # Purple
+        'gguf': '#EA580C',         # Orange
+    }
+    
+    MARKERS = {
+        'ztensor': 'o',
+        'safetensors': 's',
+        'pickle': '^',
+        'hdf5': 'D',
+        'gguf': 'v',
+    }
+    
+    distributions = df['Distribution'].unique()
+    formats = df['Format'].unique()
+    
+    # === 1. Write Throughput Plots ===
+    for dist in distributions:
+        fig, ax = plt.subplots(figsize=(8, 5))
+        subset = df[df['Distribution'] == dist]
+        
+        for fmt in formats:
+            data = subset[subset['Format'] == fmt].sort_values('SizeMB')
+            ax.plot(
+                data['SizeMB'], data['WriteGBs'],
+                marker=MARKERS.get(fmt, 'o'),
+                markersize=8,
+                linewidth=2.5,
+                color=COLORS.get(fmt, '#666'),
+                label=fmt,
+                alpha=0.9
+            )
+        
+        ax.set_xlabel('File Size (MB)')
+        ax.set_ylabel('Write Throughput (GB/s)')
+        ax.set_title(f'Write Performance — {dist.title()} Tensors')
+        ax.legend(loc='best', framealpha=0.9)
+        ax.set_ylim(bottom=0)
+        
+        # Add subtle background
+        ax.set_facecolor('#FAFAFA')
+        
+        plt.tight_layout()
+        plt.savefig(f"{output_dir}/write_throughput_{dist}.png")
+        plt.savefig(f"{output_dir}/write_throughput_{dist}.pdf")  # Vector for papers
+        plt.close()
+    
+    # === 2. Read Throughput Plots (convert latency to throughput) ===
+    for dist in distributions:
+        fig, ax = plt.subplots(figsize=(8, 5))
+        subset = df[df['Distribution'] == dist]
+        
+        for fmt in formats:
+            data = subset[subset['Format'] == fmt].sort_values('SizeMB')
+            # Convert read latency to throughput: GB/s = (SizeMB / 1024) / ReadSeconds
+            read_throughput = (data['SizeMB'] / 1024) / data['ReadSeconds']
+            ax.plot(
+                data['SizeMB'], read_throughput,
+                marker=MARKERS.get(fmt, 'o'),
+                markersize=8,
+                linewidth=2.5,
+                color=COLORS.get(fmt, '#666'),
+                label=fmt,
+                alpha=0.9
+            )
+        
+        ax.set_xlabel('File Size (MB)')
+        ax.set_ylabel('Read Throughput (GB/s)')
+        ax.set_title(f'Read Performance — {dist.title()} Tensors')
+        ax.legend(loc='best', framealpha=0.9)
+        ax.set_ylim(bottom=0)
+        ax.set_facecolor('#FAFAFA')
+        
+        plt.tight_layout()
+        plt.savefig(f"{output_dir}/read_throughput_{dist}.png")
+        plt.savefig(f"{output_dir}/read_throughput_{dist}.pdf")
+        plt.close()
+    
+    # === 3. Combined Bar Chart (largest size, all distributions) ===
+    max_size = df['SizeMB'].max()
+    subset = df[df['SizeMB'] == max_size]
+    
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    
+    # Group data by distribution
+    for idx, (metric, title, ylabel) in enumerate([
+        ('WriteGBs', 'Write Throughput', 'Throughput (GB/s)'),
+        ('ReadThroughput', 'Read Throughput', 'Throughput (GB/s)')
+    ]):
+        ax = axes[idx]
+        
+        x = np.arange(len(distributions))
+        width = 0.15
+        multiplier = 0
+        
+        for fmt in formats:
+            values = []
+            for dist in distributions:
+                row = subset[(subset['Format'] == fmt) & (subset['Distribution'] == dist)]
+                if metric == 'WriteGBs':
+                    val = row['WriteGBs'].values[0] if len(row) > 0 else 0
+                else:
+                    val = (row['SizeMB'].values[0] / 1024) / row['ReadSeconds'].values[0] if len(row) > 0 else 0
+                values.append(val)
+            
+            offset = width * multiplier
+            bars = ax.bar(
+                x + offset, values, width,
+                label=fmt,
+                color=COLORS.get(fmt, '#666'),
+                alpha=0.9,
+                edgecolor='white',
+                linewidth=0.5
+            )
+            multiplier += 1
+        
+        ax.set_xlabel('Tensor Distribution')
+        ax.set_ylabel(ylabel)
+        ax.set_title(f'{title} @ {max_size}MB')
+        ax.set_xticks(x + width * (len(formats) - 1) / 2)
+        ax.set_xticklabels([d.title() for d in distributions])
+        ax.legend(loc='upper right', framealpha=0.9)
+        ax.set_ylim(bottom=0)
+        ax.set_facecolor('#FAFAFA')
+    
+    plt.tight_layout()
+    plt.savefig(f"{output_dir}/comparison_bar_{max_size}mb.png")
+    plt.savefig(f"{output_dir}/comparison_bar_{max_size}mb.pdf")
+    plt.close()
+    
+    # === 4. Heatmap for quick overview ===
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+    
+    for idx, (metric, title) in enumerate([('WriteGBs', 'Write GB/s'), ('ReadThroughput', 'Read GB/s')]):
+        ax = axes[idx]
+        
+        # Create pivot table
+        pivot_data = []
+        for fmt in formats:
+            row = []
+            for size in sorted(df['SizeMB'].unique()):
+                # Average across distributions
+                subset = df[(df['Format'] == fmt) & (df['SizeMB'] == size)]
+                if metric == 'WriteGBs':
+                    val = subset['WriteGBs'].mean()
+                else:
+                    val = ((subset['SizeMB'] / 1024) / subset['ReadSeconds']).mean()
+                row.append(val)
+            pivot_data.append(row)
+        
+        pivot_data = np.array(pivot_data)
+        
+        im = ax.imshow(pivot_data, cmap='RdYlGn', aspect='auto')
+        
+        ax.set_xticks(np.arange(len(df['SizeMB'].unique())))
+        ax.set_yticks(np.arange(len(formats)))
+        ax.set_xticklabels([f"{s}MB" for s in sorted(df['SizeMB'].unique())])
+        ax.set_yticklabels(formats)
+        ax.set_xlabel('File Size')
+        ax.set_title(title)
+        
+        # Add value annotations
+        for i in range(len(formats)):
+            for j in range(len(df['SizeMB'].unique())):
+                text = ax.text(j, i, f'{pivot_data[i, j]:.1f}',
+                             ha='center', va='center', color='black', fontsize=9)
+        
+        plt.colorbar(im, ax=ax, shrink=0.8)
+    
+    plt.tight_layout()
+    plt.savefig(f"{output_dir}/heatmap_overview.png")
+    plt.savefig(f"{output_dir}/heatmap_overview.pdf")
+    plt.close()
+    
+    print(f"✓ Publication-grade plots saved to {output_dir}/")
 
 # --- MAIN LOOP ---
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("mode", nargs="?", choices=["run", "sweep"], default="run", help="Run mode: single 'run' or matrix 'sweep'")
+    parser.add_argument("mode", nargs="?", choices=["run", "sweep", "plot"], default="run", 
+                       help="Run mode: single 'run', matrix 'sweep', or 'plot' to regenerate charts")
     parser.add_argument("--size", type=str, choices=["small", "large"], default="small")
     parser.add_argument("--runs", type=int, default=3)
+    parser.add_argument("--csv", type=str, default="bench_out/sweep_results.csv", help="CSV path for plot mode")
     args = parser.parse_args()
     
     if args.mode == "sweep":
         run_sweep()
+        return
+    
+    if args.mode == "plot":
+        draw_plot(args.csv)
         return
 
     # Default single run behavior

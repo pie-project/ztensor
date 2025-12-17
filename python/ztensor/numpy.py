@@ -117,9 +117,9 @@ def load_file(
         names = reader.tensor_names
         if not names:
             return {}
-        # Use batch API for efficiency
+        # Use batch API for efficiency (already returns owned copies)
         tensors = reader.read_tensors(names, to='numpy')
-        return {name: np.array(tensor) for name, tensor in zip(names, tensors)}
+        return dict(zip(names, tensors))
 
 
 def load(data: bytes) -> Dict[str, np.ndarray]:
