@@ -43,3 +43,6 @@ __pycache__/
 python/ztensor/ztensor/
 *.so
 *.dylib
+
+*.tmp
+bench_out/

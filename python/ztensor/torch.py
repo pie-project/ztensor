@@ -133,21 +133,21 @@ def load_file(
     # Normalize device
     if isinstance(device, int):
         device = f"cuda:{device}"
-    device = torch.device(device)
+    target_device = torch.device(device)
     
-    result = {}
     with Reader(str(filename)) as reader:
-        for meta in reader:
-            # Read tensor as torch format
-            tensor = reader.read_tensor(meta.name, to='torch')
-            # Clone to own the memory (since read_tensor returns a view)
-            tensor = tensor.clone()
-            # Move to target device if not cpu
-            if device.type != "cpu":
-                tensor = tensor.to(device)
-            result[meta.name] = tensor
-    
-    return result
+        names = reader.tensor_names
+        if not names:
+            return {}
+        # Use batch API for efficiency
+        tensors = reader.read_tensors(names, to='torch')
+        result = {}
+        for name, tensor in zip(names, tensors):
+            # Clone is already done by read_tensors
+            if target_device.type != "cpu":
+                tensor = tensor.to(target_device)
+            result[name] = tensor
+        return result
 
 
 def load(data: bytes) -> Dict[str, torch.Tensor]:

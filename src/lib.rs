@@ -69,7 +69,7 @@ mod tests {
 
         assert_eq!(reader.list_tensors().len(), 1);
         
-        let retrieved_data = reader.read_tensor(tensor_name)?;
+        let retrieved_data = reader.read_tensor(tensor_name, true)?;
         assert_eq!(retrieved_data, tensor_data_bytes);
         Ok(())
     }
@@ -104,7 +104,7 @@ mod tests {
         
         let offset = data_comp.offset;
 
-        let retrieved_data = reader.read_tensor(tensor_name)?;
+        let retrieved_data = reader.read_tensor(tensor_name, true)?;
         assert_eq!(retrieved_data, tensor_data_bytes);
 
         // Corrupt data
@@ -122,7 +122,7 @@ mod tests {
         let mut corrupted_buffer = Cursor::new(file_bytes);
         let mut corrupted_reader = ZTensorReader::new(&mut corrupted_buffer)?;
 
-        match corrupted_reader.read_tensor(tensor_name) {
+        match corrupted_reader.read_tensor(tensor_name, true) {
             Err(ZTensorError::ChecksumMismatch { tensor_name: tn, component_name: cn, .. }) => {
                 assert_eq!(tn, "checksum_tensor");
                 assert_eq!(cn, "data");
@@ -564,7 +564,7 @@ mod tests {
         buffer.seek(std::io::SeekFrom::Start(0)).unwrap();
         let mut reader = ZTensorReader::new(&mut buffer)?;
 
-        match reader.read_tensor("nonexistent") {
+        match reader.read_tensor("nonexistent", true) {
             Err(ZTensorError::TensorNotFound(name)) => {
                 assert_eq!(name, "nonexistent");
             }

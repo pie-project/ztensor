@@ -16,30 +16,28 @@ use crate::writer::ZTensorWriter;
 
 // --- C-Compatible Structs & Handles ---
 
-/// Opaque handle to a file-based zTensor reader.
 pub type CZTensorReader = ZTensorReader<Cursor<Mmap>>;
-/// Opaque handle to a file-based zTensor writer.
 pub type CZTensorWriter = ZTensorWriter<BufWriter<std::fs::File>>;
-/// Opaque handle to an in-memory zTensor writer.
 pub type CInMemoryZTensorWriter = ZTensorWriter<Cursor<Vec<u8>>>;
-/// Opaque, owned handle to a tensor's metadata.
-/// In v1.0, the `Tensor` struct does not contain its name; the name is the key in the manifest.
-/// To preserve the ability to pass a "metadata" handle that includes the name, we wrap it.
 pub type CTensorMetadata = (String, Tensor);
 
-/// A self-contained, C-compatible view of owned tensor data.
 #[repr(C)]
 pub struct CTensorDataView {
     pub data: *const c_uchar,
     pub len: size_t,
-    // Private field holding the owned Vec<u8> data.
     _owner: *mut c_void,
 }
 
-/// A C-compatible, heap-allocated array of C strings.
 #[repr(C)]
 pub struct CStringArray {
     pub strings: *mut *mut c_char,
+    pub len: size_t,
+}
+
+/// A C-compatible batch result containing multiple tensor data views.
+#[repr(C)]
+pub struct CTensorDataViewArray {
+    pub views: *mut CTensorDataView,
     pub len: size_t,
 }
 
@@ -55,10 +53,6 @@ fn update_last_error(err: ZTensorError) {
     *LAST_ERROR.lock().unwrap() = Some(msg);
 }
 
-/// Retrieves the last error message set by a failed API call.
-///
-/// The returned string is valid until the next API call.
-/// Returns `null` if no error has occurred.
 #[unsafe(no_mangle)]
 pub extern "C" fn ztensor_last_error_message() -> *const c_char {
     match LAST_ERROR.lock().unwrap().as_ref() {
@@ -69,8 +63,6 @@ pub extern "C" fn ztensor_last_error_message() -> *const c_char {
 
 // --- Internal Helpers ---
 
-/// A macro to safely access the Rust object behind an opaque C pointer.
-/// It checks for null and returns a safe reference, handling the error case.
 macro_rules! ztensor_handle {
     ($ptr:expr) => {
         if $ptr.is_null() {
@@ -106,7 +98,6 @@ macro_rules! ztensor_handle {
     };
 }
 
-/// Helper to convert a Rust String into a C-style, null-terminated string pointer.
 fn to_cstring(s: String) -> *mut c_char {
     CString::new(s).map_or(ptr::null_mut(), |cs| cs.into_raw())
 }
@@ -175,7 +166,6 @@ pub extern "C" fn ztensor_reader_get_metadata_by_index(
     index: size_t,
 ) -> *mut CTensorMetadata {
     let reader = ztensor_handle!(reader_ptr);
-    // BTreeMap is ordered by key. We iterate to find nth.
     let tensors = reader.list_tensors();
     match tensors.iter().nth(index) {
         Some((name, tensor)) => Box::into_raw(Box::new((name.clone(), tensor.clone()))),
@@ -207,20 +197,33 @@ pub extern "C" fn ztensor_reader_get_all_tensor_names(
         len: c_names.len(),
     });
 
-    std::mem::forget(c_names); // C side is now responsible for this memory
+    std::mem::forget(c_names);
     Box::into_raw(string_array)
 }
 
+/// Reads a single tensor by name.
+/// 
+/// # Arguments
+/// * `reader_ptr` - Reader handle
+/// * `name_str` - Tensor name
+/// * `verify_checksum` - Whether to verify checksum (0 = false, non-zero = true)
 #[unsafe(no_mangle)]
-pub extern "C" fn ztensor_reader_read_tensor_view(
+pub extern "C" fn ztensor_reader_read_tensor(
     reader_ptr: *mut CZTensorReader,
-    metadata_ptr: *const CTensorMetadata,
+    name_str: *const c_char,
+    verify_checksum: c_int,
 ) -> *mut CTensorDataView {
     let reader = ztensor_handle!(mut reader_ptr);
-    let (name, metadata) = ztensor_handle!(metadata_ptr);
+    
+    let name = match unsafe { CStr::from_ptr(name_str).to_str() } {
+        Ok(s) => s,
+        Err(_) => {
+            update_last_error(ZTensorError::Other("Invalid UTF-8 name".into()));
+            return ptr::null_mut();
+        }
+    };
 
-    // Optimization: Use `read_tensor_by_info` to skip the lookup since we have the metadata object.
-    match reader.read_tensor_by_info(name, metadata) {
+    match reader.read_tensor(name, verify_checksum != 0) {
         Ok(data_vec) => {
             let view = Box::new(CTensorDataView {
                 data: data_vec.as_ptr(),
@@ -236,24 +239,60 @@ pub extern "C" fn ztensor_reader_read_tensor_view(
     }
 }
 
-/// Fast tensor read that skips checksum verification for maximum performance.
-/// Use this when data integrity is verified elsewhere or not critical (e.g., benchmarks).
+/// Reads multiple tensors in batch.
+/// 
+/// # Arguments
+/// * `reader_ptr` - Reader handle
+/// * `names` - Array of tensor name C strings
+/// * `names_len` - Number of names
+/// * `verify_checksum` - Whether to verify checksum (0 = false, non-zero = true)
 #[unsafe(no_mangle)]
-pub extern "C" fn ztensor_reader_read_tensor_view_fast(
+pub extern "C" fn ztensor_reader_read_tensors(
     reader_ptr: *mut CZTensorReader,
-    metadata_ptr: *const CTensorMetadata,
-) -> *mut CTensorDataView {
+    names: *const *const c_char,
+    names_len: size_t,
+    verify_checksum: c_int,
+) -> *mut CTensorDataViewArray {
     let reader = ztensor_handle!(mut reader_ptr);
-    let (name, metadata) = ztensor_handle!(metadata_ptr);
+    
+    // Parse names
+    let name_strs: Vec<&str> = match (0..names_len)
+        .map(|i| {
+            let name_ptr = unsafe { *names.add(i) };
+            if name_ptr.is_null() {
+                return Err(ZTensorError::Other("Null name in batch read".into()));
+            }
+            unsafe { CStr::from_ptr(name_ptr).to_str() }
+                .map_err(|_| ZTensorError::Other("Invalid UTF-8 name in batch".into()))
+        })
+        .collect::<Result<Vec<_>, _>>()
+    {
+        Ok(names) => names,
+        Err(e) => {
+            update_last_error(e);
+            return ptr::null_mut();
+        }
+    };
 
-    match reader.read_tensor_by_info_fast(name, metadata) {
-        Ok(data_vec) => {
-            let view = Box::new(CTensorDataView {
-                data: data_vec.as_ptr(),
-                len: data_vec.len(),
-                _owner: Box::into_raw(Box::new(data_vec)) as *mut c_void,
+    match reader.read_tensors(&name_strs, verify_checksum != 0) {
+        Ok(data_vecs) => {
+            let mut views: Vec<CTensorDataView> = data_vecs
+                .into_iter()
+                .map(|data_vec| {
+                    CTensorDataView {
+                        data: data_vec.as_ptr(),
+                        len: data_vec.len(),
+                        _owner: Box::into_raw(Box::new(data_vec)) as *mut c_void,
+                    }
+                })
+                .collect();
+            
+            let result = Box::new(CTensorDataViewArray {
+                views: views.as_mut_ptr(),
+                len: views.len(),
             });
-            Box::into_raw(view)
+            std::mem::forget(views);
+            Box::into_raw(result)
         }
         Err(e) => {
             update_last_error(e);
@@ -286,7 +325,6 @@ pub extern "C" fn ztensor_reader_read_tensor_component(
         }
     };
 
-    // Need to find the component first from the manifest
     let tensor_opt = reader.get_tensor(name);
     let tensor = match tensor_opt {
         Some(t) => t.clone(),
@@ -299,8 +337,8 @@ pub extern "C" fn ztensor_reader_read_tensor_component(
     let component = match tensor.components.get(component_name) {
         Some(c) => c.clone(),
         None => {
-             update_last_error(ZTensorError::Other(format!("Component '{}' not found in tensor '{}'", component_name, name)));
-             return ptr::null_mut();
+            update_last_error(ZTensorError::Other(format!("Component '{}' not found in tensor '{}'", component_name, name)));
+            return ptr::null_mut();
         }
     };
 
@@ -468,8 +506,7 @@ pub extern "C" fn ztensor_writer_add_sparse_csr(
         }
     };
 
-    #[allow(deprecated)]
-    let res = writer.add_sparse_csr_tensor(
+    let res = writer.add_csr_tensor(
         name,
         shape.to_vec(),
         dtype,
@@ -540,8 +577,7 @@ pub extern "C" fn ztensor_writer_add_sparse_coo(
         }
     };
 
-    #[allow(deprecated)]
-    let res = writer.add_sparse_coo_tensor(
+    let res = writer.add_coo_tensor(
         name,
         shape.to_vec(),
         dtype,
@@ -594,19 +630,13 @@ pub extern "C" fn ztensor_metadata_get_dtype_str(
 #[unsafe(no_mangle)]
 pub extern "C" fn ztensor_metadata_get_offset(metadata_ptr: *const CTensorMetadata) -> u64 {
     let (_, metadata) = ztensor_handle!(metadata_ptr, 0);
-    metadata
-        .components
-        .get("data")
-        .map_or(0, |c| c.offset)
+    metadata.components.get("data").map_or(0, |c| c.offset)
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn ztensor_metadata_get_size(metadata_ptr: *const CTensorMetadata) -> u64 {
     let (_, metadata) = ztensor_handle!(metadata_ptr, 0);
-    metadata
-        .components
-        .get("data")
-        .map_or(0, |c| c.length)
+    metadata.components.get("data").map_or(0, |c| c.length)
 }
 
 #[unsafe(no_mangle)]
@@ -622,9 +652,7 @@ pub extern "C" fn ztensor_metadata_get_encoding_str(
     metadata_ptr: *const CTensorMetadata,
 ) -> *mut c_char {
     let (_, metadata) = ztensor_handle!(metadata_ptr);
-    metadata
-        .components
-        .get("data")
+    metadata.components.get("data")
         .map_or(ptr::null_mut(), |c| to_cstring(format!("{:?}", c.encoding).to_lowercase()))
 }
 
@@ -640,9 +668,7 @@ pub extern "C" fn ztensor_metadata_get_checksum_str(
     metadata_ptr: *const CTensorMetadata,
 ) -> *mut c_char {
     let (_, metadata) = ztensor_handle!(metadata_ptr);
-    metadata
-        .components
-        .get("data")
+    metadata.components.get("data")
         .and_then(|c| c.digest.as_ref())
         .map_or(ptr::null_mut(), |s| to_cstring(s.clone()))
 }
@@ -692,7 +718,20 @@ pub extern "C" fn ztensor_free_tensor_view(view_ptr: *mut CTensorDataView) {
     if !view_ptr.is_null() {
         unsafe {
             let view = Box::from_raw(view_ptr);
-            // This reconstitutes the `Vec<u8>` and allows it to be dropped.
+            let _ = Box::from_raw(view._owner as *mut Vec<u8>);
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn ztensor_free_tensor_view_array(arr_ptr: *mut CTensorDataViewArray) {
+    if arr_ptr.is_null() {
+        return;
+    }
+    unsafe {
+        let arr = Box::from_raw(arr_ptr);
+        let views = Vec::from_raw_parts(arr.views, arr.len, arr.len);
+        for view in views {
             let _ = Box::from_raw(view._owner as *mut Vec<u8>);
         }
     }

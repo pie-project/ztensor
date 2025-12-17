@@ -113,14 +113,13 @@ def load_file(
         >>> file_path = "./my_folder/bert.zt"
         >>> loaded = load_file(file_path)
     """
-    result = {}
     with Reader(str(filename)) as reader:
-        for meta in reader:
-            # Read tensor as numpy format and copy to own the memory
-            tensor = reader.read_tensor(meta.name, to='numpy')
-            result[meta.name] = np.array(tensor)
-    
-    return result
+        names = reader.tensor_names
+        if not names:
+            return {}
+        # Use batch API for efficiency
+        tensors = reader.read_tensors(names, to='numpy')
+        return {name: np.array(tensor) for name, tensor in zip(names, tensors)}
 
 
 def load(data: bytes) -> Dict[str, np.ndarray]:

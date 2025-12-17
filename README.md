@@ -9,7 +9,7 @@ Simple tensor serialization format
 ## Key Features
 
 - **Simple Spec** — Minimalist [spec](SPEC.md) for easy parsing.
-- **Zero-Copy Access** — Instant memory-mapping (mmap) with no RAM overhead.
+- **Zero-Copy Access** — Instant memory-mapping (mmap) with no extra RAM copying overhead.
 - **Efficient Writes** — Supports streaming and append-only operations without rewriting files.
 - **Future-Proof** — Decouples physical storage from logical representation for long-term compatibility.
 
