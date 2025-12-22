@@ -21,9 +21,11 @@ pub use writer::ZTensorWriter;
 pub use compat::{LegacyReader, is_legacy_file, is_legacy_format};
 
 #[cfg(test)]
+
 mod tests {
     use super::*;
     use crate::models::MAGIC;
+    use crate::writer::Compression;
     use half::{bf16, f16};
     use std::io::{Cursor, Read, Seek, SeekFrom};
 
@@ -60,17 +62,21 @@ mod tests {
         let mut writer = ZTensorWriter::new(&mut buffer)?;
 
         let data: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0];
-        let bytes: Vec<u8> = data.iter().flat_map(|f| f.to_le_bytes()).collect();
-
-        writer.add_object("test", vec![2, 2], DType::F32, Encoding::Raw, bytes.clone(), ChecksumAlgorithm::None)?;
+        // Use typed API directly
+        writer.add_object("test", vec![2, 2], DType::F32, Compression::Raw, &data, ChecksumAlgorithm::None)?;
         writer.finalize()?;
 
         buffer.seek(SeekFrom::Start(0))?;
         let mut reader = ZTensorReader::new(&mut buffer)?;
 
         assert_eq!(reader.list_objects().len(), 1);
-        let retrieved = reader.read_object("test", true)?;
-        assert_eq!(retrieved, bytes);
+        let retrieved_bytes = reader.read_object("test", true)?;
+        let retrieved_floats: Vec<f32> = retrieved_bytes
+            .chunks_exact(4)
+            .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+            .collect();
+            
+        assert_eq!(retrieved_floats, data);
 
         Ok(())
     }
@@ -81,12 +87,10 @@ mod tests {
         let mut writer = ZTensorWriter::new(&mut buffer)?;
 
         let f32_data: Vec<f32> = vec![1.0, 2.5, -3.0, 4.25];
-        let f32_bytes: Vec<u8> = f32_data.iter().flat_map(|f| f.to_le_bytes()).collect();
-        writer.add_object("f32_obj", vec![4], DType::F32, Encoding::Raw, f32_bytes, ChecksumAlgorithm::None)?;
+        writer.add_object("f32_obj", vec![4], DType::F32, Compression::Raw, &f32_data, ChecksumAlgorithm::None)?;
 
         let u16_data: Vec<u16> = vec![10, 20, 30000, 65535];
-        let u16_bytes: Vec<u8> = u16_data.iter().flat_map(|f| f.to_le_bytes()).collect();
-        writer.add_object("u16_obj", vec![2, 2], DType::U16, Encoding::Raw, u16_bytes, ChecksumAlgorithm::None)?;
+        writer.add_object("u16_obj", vec![2, 2], DType::U16, Compression::Raw, &u16_data, ChecksumAlgorithm::None)?;
 
         writer.finalize()?;
         buffer.seek(SeekFrom::Start(0))?;
@@ -113,9 +117,7 @@ mod tests {
         let mut writer = ZTensorWriter::new(&mut buffer)?;
 
         let data: Vec<f32> = (0..1000).map(|i| i as f32 * 0.5).collect();
-        let bytes: Vec<u8> = data.iter().flat_map(|f| f.to_le_bytes()).collect();
-
-        writer.add_object("compressed", vec![1000], DType::F32, Encoding::Zstd, bytes, ChecksumAlgorithm::Crc32c)?;
+        writer.add_object("compressed", vec![1000], DType::F32, Compression::Zstd(0), &data, ChecksumAlgorithm::Crc32c)?;
         writer.finalize()?;
 
         buffer.seek(SeekFrom::Start(0))?;
@@ -138,7 +140,7 @@ mod tests {
         let mut writer = ZTensorWriter::new(&mut buffer)?;
 
         let data: Vec<u8> = (0..=20).collect();
-        writer.add_object("checksummed", vec![data.len() as u64], DType::U8, Encoding::Raw, data.clone(), ChecksumAlgorithm::Crc32c)?;
+        writer.add_object("checksummed", vec![data.len() as u64], DType::U8, Compression::Raw, &data, ChecksumAlgorithm::Crc32c)?;
         writer.finalize()?;
 
         buffer.seek(SeekFrom::Start(0))?;
@@ -147,7 +149,7 @@ mod tests {
         let obj = reader.get_object("checksummed").unwrap();
         let comp = obj.components.get("data").unwrap();
         assert!(comp.digest.as_ref().unwrap().starts_with("crc32c:0x"));
-        let offset = comp.offset;  // Extract before mutable borrow
+        let offset = comp.offset;
 
         let retrieved = reader.read_object("checksummed", true)?;
         assert_eq!(retrieved, data);
@@ -181,7 +183,7 @@ mod tests {
         let mut writer = ZTensorWriter::new(&mut buffer)?;
 
         let data: Vec<u8> = (0..=100).collect();
-        writer.add_object("sha256_test", vec![data.len() as u64], DType::U8, Encoding::Raw, data.clone(), ChecksumAlgorithm::Sha256)?;
+        writer.add_object("sha256_test", vec![data.len() as u64], DType::U8, Compression::Raw, &data, ChecksumAlgorithm::Sha256)?;
         writer.finalize()?;
 
         buffer.seek(SeekFrom::Start(0))?;
@@ -207,16 +209,14 @@ mod tests {
             f16::from_f32(2.5),
             f16::from_f32(-3.0),
         ];
-        let f16_bytes: Vec<u8> = f16_data.iter().flat_map(|f| f.to_le_bytes()).collect();
-        writer.add_object("f16_obj", vec![3], DType::F16, Encoding::Raw, f16_bytes, ChecksumAlgorithm::None)?;
+        writer.add_object("f16_obj", vec![3], DType::F16, Compression::Raw, &f16_data, ChecksumAlgorithm::None)?;
 
         let bf16_data: Vec<bf16> = vec![
             bf16::from_f32(1.0),
             bf16::from_f32(2.5),
             bf16::from_f32(-3.0),
         ];
-        let bf16_bytes: Vec<u8> = bf16_data.iter().flat_map(|f| f.to_le_bytes()).collect();
-        writer.add_object("bf16_obj", vec![3], DType::BF16, Encoding::Raw, bf16_bytes, ChecksumAlgorithm::None)?;
+        writer.add_object("bf16_obj", vec![3], DType::BF16, Compression::Raw, &bf16_data, ChecksumAlgorithm::None)?;
 
         writer.finalize()?;
         buffer.seek(SeekFrom::Start(0))?;
@@ -241,11 +241,10 @@ mod tests {
         let mut writer = ZTensorWriter::new(&mut buffer)?;
 
         let values: Vec<f32> = vec![1.0, 2.0];
-        let values_bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
         let indices: Vec<u64> = vec![1, 2];
         let indptr: Vec<u64> = vec![0, 1, 2];
 
-        writer.add_csr_object("sparse_csr", vec![2, 3], DType::F32, values_bytes, indices.clone(), indptr.clone(), Encoding::Raw, ChecksumAlgorithm::None)?;
+        writer.add_csr_object("sparse_csr", vec![2, 3], DType::F32, &values, &indices, &indptr, Compression::Raw, ChecksumAlgorithm::None)?;
         writer.finalize()?;
 
         buffer.seek(SeekFrom::Start(0))?;
@@ -266,11 +265,10 @@ mod tests {
         let mut writer = ZTensorWriter::new(&mut buffer)?;
 
         let values: Vec<i32> = vec![10, 20];
-        let values_bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
         // SoA format: [row_indices..., col_indices...]
         let coords: Vec<u64> = vec![0, 1, 0, 2];
 
-        writer.add_coo_object("sparse_coo", vec![2, 3], DType::I32, values_bytes, coords, Encoding::Raw, ChecksumAlgorithm::None)?;
+        writer.add_coo_object("sparse_coo", vec![2, 3], DType::I32, &values, &coords, Compression::Raw, ChecksumAlgorithm::None)?;
         writer.finalize()?;
 
         buffer.seek(SeekFrom::Start(0))?;
@@ -313,7 +311,6 @@ mod tests {
             }
             _ => panic!("Expected ObjectNotFound"),
         }
-
         Ok(())
     }
 
@@ -324,8 +321,9 @@ mod tests {
 
         macro_rules! add_dtype {
             ($name:expr, $dtype:expr, $val:expr, $t:ty) => {
-                let bytes = ($val as $t).to_le_bytes().to_vec();
-                writer.add_object($name, vec![1], $dtype, Encoding::Raw, bytes, ChecksumAlgorithm::None)?;
+                let val = $val as $t;
+                // No need to convert to bytes!
+                writer.add_object($name, vec![1], $dtype, Compression::Raw, &[val], ChecksumAlgorithm::None)?;
             };
         }
 
@@ -339,7 +337,10 @@ mod tests {
         add_dtype!("t_u32", DType::U32, 200u32, u32);
         add_dtype!("t_u16", DType::U16, 300u16, u16);
         add_dtype!("t_u8", DType::U8, 50u8, u8);
-        writer.add_object("t_bool", vec![1], DType::Bool, Encoding::Raw, vec![1u8], ChecksumAlgorithm::None)?;
+        writer.add_object_bytes("t_bool", vec![1], DType::Bool, Compression::Raw, &[1u8], ChecksumAlgorithm::None)?; 
+        
+        // Manual bool test using bytes directly since bool is not Pod
+        writer.add_object_bytes("t_bool_typed", vec![1], DType::Bool, Compression::Raw, &[1u8], ChecksumAlgorithm::None)?;
 
         writer.finalize()?;
         buffer.seek(SeekFrom::Start(0))?;
@@ -355,7 +356,7 @@ mod tests {
         assert_eq!(reader.read_object_as::<u32>("t_u32")?[0], 200);
         assert_eq!(reader.read_object_as::<u16>("t_u16")?[0], 300);
         assert_eq!(reader.read_object_as::<u8>("t_u8")?[0], 50);
-        assert_eq!(reader.read_object_as::<bool>("t_bool")?[0], true);
+        assert_eq!(reader.read_object_as::<bool>("t_bool_typed")?[0], true);
 
         Ok(())
     }
@@ -369,8 +370,7 @@ mod tests {
             let file = std::fs::File::create(&path)?;
             let mut writer = ZTensorWriter::new(std::io::BufWriter::new(file))?;
             let data: Vec<f32> = vec![1.0, 2.0, 3.0];
-            let bytes: Vec<u8> = data.iter().flat_map(|x| x.to_le_bytes()).collect();
-            writer.add_object("test", vec![3], DType::F32, Encoding::Raw, bytes, ChecksumAlgorithm::None)?;
+            writer.add_object("test", vec![3], DType::F32, Compression::Raw, &data, ChecksumAlgorithm::None)?;
             writer.finalize()?;
         }
 

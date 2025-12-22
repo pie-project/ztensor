@@ -480,9 +480,9 @@ pub extern "C" fn ztensor_writer_add_tensor(
     };
 
     let data = unsafe { slice::from_raw_parts(data_ptr, data_len) };
-    let encoding = if compress != 0 { Encoding::Zstd } else { Encoding::Raw };
+    let compression = if compress != 0 { crate::writer::Compression::Zstd(0) } else { crate::writer::Compression::Raw };
 
-    match writer.add_object(name, shape.to_vec(), dtype, encoding, data.to_vec(), ChecksumAlgorithm::None) {
+    match writer.add_object_bytes(name, shape.to_vec(), dtype, compression, data, ChecksumAlgorithm::None) {
         Ok(_) => 0,
         Err(e) => {
             update_last_error(e);
@@ -523,11 +523,11 @@ pub extern "C" fn ztensor_writer_add_sparse_csr(
         None => { update_last_error(ZTensorError::UnsupportedDType(dtype_s.to_string())); return -1; }
     };
 
-    let values = unsafe { slice::from_raw_parts(values_ptr, values_len) }.to_vec();
-    let indices = unsafe { slice::from_raw_parts(indices_ptr, indices_len) }.to_vec();
-    let indptr = unsafe { slice::from_raw_parts(indptr_ptr, indptr_len) }.to_vec();
+    let values = unsafe { slice::from_raw_parts(values_ptr, values_len) };
+    let indices = unsafe { slice::from_raw_parts(indices_ptr, indices_len) };
+    let indptr = unsafe { slice::from_raw_parts(indptr_ptr, indptr_len) };
 
-    match writer.add_csr_object(name, shape.to_vec(), dtype, values, indices, indptr, Encoding::Raw, ChecksumAlgorithm::None) {
+    match writer.add_csr_object_bytes(name, shape.to_vec(), dtype, values, indices, indptr, crate::writer::Compression::Raw, ChecksumAlgorithm::None) {
         Ok(_) => 0,
         Err(e) => { update_last_error(e); -1 }
     }
@@ -563,10 +563,10 @@ pub extern "C" fn ztensor_writer_add_sparse_coo(
         None => { update_last_error(ZTensorError::UnsupportedDType(dtype_s.to_string())); return -1; }
     };
 
-    let values = unsafe { slice::from_raw_parts(values_ptr, values_len) }.to_vec();
-    let coords = unsafe { slice::from_raw_parts(indices_ptr, indices_len) }.to_vec();
+    let values = unsafe { slice::from_raw_parts(values_ptr, values_len) };
+    let coords = unsafe { slice::from_raw_parts(indices_ptr, indices_len) };
 
-    match writer.add_coo_object(name, shape.to_vec(), dtype, values, coords, Encoding::Raw, ChecksumAlgorithm::None) {
+    match writer.add_coo_object_bytes(name, shape.to_vec(), dtype, values, coords, crate::writer::Compression::Raw, ChecksumAlgorithm::None) {
         Ok(_) => 0,
         Err(e) => { update_last_error(e); -1 }
     }

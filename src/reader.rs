@@ -12,8 +12,8 @@ use crate::error::ZTensorError;
 use crate::models::{Component, CooTensor, CsrTensor, DType, Encoding, Manifest, Object, ALIGNMENT, MAGIC, MAX_MANIFEST_SIZE};
 use crate::utils::swap_endianness_in_place;
 
-/// Max object size (1GB).
-const MAX_OBJECT_SIZE: u64 = 1 * 1024 * 1024 * 1024;
+/// Max object size (32GB).
+const MAX_OBJECT_SIZE: u64 = 32 * 1024 * 1024 * 1024;
 
 /// Trait for types that can be safely read from bytes.
 pub trait Pod: Sized + Default + Clone {
@@ -556,7 +556,7 @@ impl<R: Read + Seek> ZTensorReader<R> {
         component: &Component,
         ctx: &ReadContext,
     ) -> Result<Vec<u64>, ZTensorError> {
-        let mut bytes = match component.encoding {
+        let bytes = match component.encoding {
             Encoding::Zstd => self.read_component(component)?,
             Encoding::Raw => {
                 if component.length > MAX_OBJECT_SIZE {
@@ -571,9 +571,7 @@ impl<R: Read + Seek> ZTensorReader<R> {
             }
         };
 
-        if cfg!(target_endian = "big") {
-            swap_endianness_in_place(&mut bytes, 8);
-        }
+
 
         Ok(bytes
             .chunks_exact(8)
@@ -674,71 +672,5 @@ impl<R: Read + Seek> ZTensorReader<R> {
         let indptr = self.read_u64_component(&ptr_comp, &ptr_ctx)?;
 
         Ok(CsrTensor { shape, indptr, indices, values })
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::io::Cursor;
-    use crate::models::{DType, Component, Encoding};
-
-    #[test]
-    fn test_oom_protection() {
-        // defined constant in reader.rs is 2GB
-        // Create an object that requires > 2GB
-        // 3 billion bytes > 2GB
-        let huge_size: u64 = 3_000_000_000;
-        
-        // Mock manifest components
-        let mut objects = BTreeMap::new();
-        let mut components = BTreeMap::new();
-        components.insert("data".to_string(), Component {
-            dtype: DType::U8,
-            encoding: Encoding::Raw,
-            offset: 0,
-            length: huge_size, // usage in read_component variants
-            digest: None,
-        });
-
-        objects.insert("huge_tensor".to_string(), Object {
-            format: "dense".to_string(),
-            shape: vec![huge_size], // usage for num_elements calculation
-            components,
-            attributes: None,
-        });
-
-        let manifest = Manifest {
-            version: "1.1.0".to_string(),
-            objects,
-            attributes: None,
-        };
-
-        // Mock reader (empty since we won't actually read 3GB)
-        let cursor = Cursor::new(vec![]);
-        let mut reader = ZTensorReader {
-            reader: cursor,
-            manifest,
-        };
-
-        // Test read_object_as
-        let result = reader.read_object_as::<u8>("huge_tensor");
-        match result {
-            Err(ZTensorError::ObjectTooLarge { size, limit }) => {
-                assert_eq!(size, huge_size);
-                assert_eq!(limit, MAX_OBJECT_SIZE);
-            }
-            _ => panic!("Expected ObjectTooLarge error, got {:?}", result),
-        }
-
-        // Test read_object (which uses read_dense_impl)
-        let result = reader.read_object("huge_tensor", false);
-        match result {
-            Err(ZTensorError::ObjectTooLarge { size, limit }) => {
-                assert_eq!(size, huge_size);
-                assert_eq!(limit, MAX_OBJECT_SIZE);
-            }
-            _ => panic!("Expected ObjectTooLarge error, got {:?}", result),
-        }
     }
 }

@@ -107,7 +107,7 @@ impl fmt::Display for ZTensorError {
             Self::ObjectTooLarge { size, limit } => {
                 write!(
                     f,
-                    "Object size {} exceeds limit of {} (2GB)",
+                    "Object size {} exceeds limit of {} (32GB)",
                     size, limit
                 )
             }

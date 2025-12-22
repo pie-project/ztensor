@@ -8,7 +8,17 @@ use std::path::Path;
 
 use crate::error::ZTensorError;
 use crate::models::{ChecksumAlgorithm, Component, DType, Encoding, Manifest, Object, MAGIC};
-use crate::utils::{align_offset, is_little_endian, sha256_hex, swap_endianness_in_place, u64_vec_to_bytes};
+use crate::utils::{align_offset, is_little_endian, swap_endianness_in_place, DigestWriter};
+use crate::reader::Pod;
+
+/// Compression settings for writing.
+#[derive(Debug, Clone, Copy)]
+pub enum Compression {
+    /// No compression.
+    Raw,
+    /// Zstd compression with specified level (default is 3, 0 means default).
+    Zstd(i32),
+}
 
 /// Writer for zTensor v1.1 files.
 pub struct ZTensorWriter<W: Write + Seek> {
@@ -41,30 +51,30 @@ impl<W: Write + Seek> ZTensorWriter<W> {
         self.manifest.attributes = Some(attrs);
     }
 
-    /// Adds a dense object (tensor) to the file.
-    #[allow(clippy::too_many_arguments)]
-    pub fn add_object(
+    /// Adds a dense object from raw bytes (FFI/unsafe usage).
+    ///
+    /// The caller must ensure `data` contains valid LE bytes for the given `dtype`.
+    /// Endianness swapping will be performed if `dtype` is multi-byte and host is BE.
+    pub fn add_object_bytes(
         &mut self,
         name: &str,
         shape: Vec<u64>,
         dtype: DType,
-        encoding: Encoding,
-        raw_data: Vec<u8>,
+        compression: Compression,
+        data: &[u8],
         checksum: ChecksumAlgorithm,
     ) -> Result<(), ZTensorError> {
-        // Validate size
         let num_elements: u64 = if shape.is_empty() { 1 } else { shape.iter().product() };
         let expected_size = num_elements * dtype.byte_size() as u64;
 
-        if raw_data.len() as u64 != expected_size {
-            return Err(ZTensorError::InconsistentDataSize {
+        if data.len() as u64 != expected_size {
+             return Err(ZTensorError::InconsistentDataSize {
                 expected: expected_size,
-                found: raw_data.len() as u64,
+                found: data.len() as u64,
             });
         }
 
-        let component = self.write_component(raw_data, dtype, encoding, checksum)?;
-
+        let component = self.write_component(data, dtype, compression, checksum)?;
         let mut components = BTreeMap::new();
         components.insert("data".to_string(), component);
 
@@ -79,24 +89,49 @@ impl<W: Write + Seek> ZTensorWriter<W> {
         Ok(())
     }
 
-    /// Adds a CSR sparse object.
+    /// Adds a dense object (tensor) to the file.
     #[allow(clippy::too_many_arguments)]
-    pub fn add_csr_object(
+    pub fn add_object<T: Pod + bytemuck::Pod>(
         &mut self,
         name: &str,
         shape: Vec<u64>,
         dtype: DType,
-        values: Vec<u8>,
-        indices: Vec<u64>,
-        indptr: Vec<u64>,
-        encoding: Encoding,
+        compression: Compression,
+        data: &[T],
         checksum: ChecksumAlgorithm,
     ) -> Result<(), ZTensorError> {
-        let values_comp = self.write_component(values, dtype, encoding, checksum)?;
-        let indices_bytes = u64_vec_to_bytes(indices);
-        let indices_comp = self.write_component(indices_bytes, DType::U64, encoding, checksum)?;
-        let indptr_bytes = u64_vec_to_bytes(indptr);
-        let indptr_comp = self.write_component(indptr_bytes, DType::U64, encoding, checksum)?;
+        // Validation
+        if !T::dtype_matches(&dtype) {
+             return Err(ZTensorError::TypeMismatch {
+                expected: dtype.as_str().to_string(),
+                found: std::any::type_name::<T>().to_string(),
+                context: format!("add_object '{}'", name),
+            });
+        }
+        
+        // Safe cast to bytes (requires T: bytemuck::Pod)
+        let bytes = bytemuck::cast_slice(data);
+        self.add_object_bytes(name, shape, dtype, compression, bytes, checksum)
+    }
+
+    /// Adds a CSR sparse object from raw bytes.
+    pub fn add_csr_object_bytes(
+        &mut self,
+        name: &str,
+        shape: Vec<u64>,
+        dtype: DType,
+        values: &[u8],
+        indices: &[u64],
+        indptr: &[u64],
+        compression: Compression,
+        checksum: ChecksumAlgorithm,
+    ) -> Result<(), ZTensorError> {
+        let indices_bytes = bytemuck::cast_slice(indices);
+        let indptr_bytes = bytemuck::cast_slice(indptr);
+
+        let values_comp = self.write_component(values, dtype, compression, checksum)?;
+        let indices_comp = self.write_component(indices_bytes, DType::U64, compression, checksum)?;
+        let indptr_comp = self.write_component(indptr_bytes, DType::U64, compression, checksum)?;
 
         let mut components = BTreeMap::new();
         components.insert("values".to_string(), values_comp);
@@ -114,21 +149,38 @@ impl<W: Write + Seek> ZTensorWriter<W> {
         Ok(())
     }
 
-    /// Adds a COO sparse object.
+    /// Adds a CSR sparse object.
     #[allow(clippy::too_many_arguments)]
-    pub fn add_coo_object(
+    pub fn add_csr_object<T: Pod + bytemuck::Pod>(
         &mut self,
         name: &str,
         shape: Vec<u64>,
         dtype: DType,
-        values: Vec<u8>,
-        coords: Vec<u64>,
-        encoding: Encoding,
+        values: &[T],
+        indices: &[u64],
+        indptr: &[u64],
+        compression: Compression,
         checksum: ChecksumAlgorithm,
     ) -> Result<(), ZTensorError> {
-        let values_comp = self.write_component(values, dtype, encoding, checksum)?;
-        let coords_bytes = u64_vec_to_bytes(coords);
-        let coords_comp = self.write_component(coords_bytes, DType::U64, encoding, checksum)?;
+        let values_bytes = bytemuck::cast_slice(values);
+        self.add_csr_object_bytes(name, shape, dtype, values_bytes, indices, indptr, compression, checksum)
+    }
+
+    /// Adds a COO sparse object from raw bytes.
+    pub fn add_coo_object_bytes(
+        &mut self,
+        name: &str,
+        shape: Vec<u64>,
+        dtype: DType,
+        values: &[u8],
+        coords: &[u64],
+        compression: Compression,
+        checksum: ChecksumAlgorithm,
+    ) -> Result<(), ZTensorError> {
+        let coords_bytes = bytemuck::cast_slice(coords);
+        
+        let values_comp = self.write_component(values, dtype, compression, checksum)?;
+        let coords_comp = self.write_component(coords_bytes, DType::U64, compression, checksum)?;
 
         let mut components = BTreeMap::new();
         components.insert("values".to_string(), values_comp);
@@ -145,65 +197,120 @@ impl<W: Write + Seek> ZTensorWriter<W> {
         Ok(())
     }
 
+    /// Adds a COO sparse object.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_coo_object<T: Pod + bytemuck::Pod>(
+        &mut self,
+        name: &str,
+        shape: Vec<u64>,
+        dtype: DType,
+        values: &[T],
+        coords: &[u64],
+        compression: Compression,
+        checksum: ChecksumAlgorithm,
+    ) -> Result<(), ZTensorError> {
+        let values_bytes = bytemuck::cast_slice(values);
+        self.add_coo_object_bytes(name, shape, dtype, values_bytes, coords, compression, checksum)
+    }
+
     fn write_component(
         &mut self,
-        mut data: Vec<u8>,
+        data: &[u8],
         dtype: DType,
-        encoding: Encoding,
+        compression: Compression,
         checksum: ChecksumAlgorithm,
     ) -> Result<Component, ZTensorError> {
-        // Convert to little-endian if needed
-        if !is_little_endian() && dtype.byte_size() > 1 {
-            swap_endianness_in_place(&mut data, dtype.byte_size());
+        // 1. Align
+        let (aligned_offset, padding) = align_offset(self.current_offset);
+        if padding > 0 {
+            self.writer.write_all(&vec![0u8; padding as usize])?;
+        }
+        self.current_offset = aligned_offset;
+
+        // 2. Setup Writers
+        struct CountingWriter<W> {
+            inner: W,
+            count: u64,
+        }
+        impl<W: Write> Write for CountingWriter<W> {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                let n = self.inner.write(buf)?;
+                self.count += n as u64;
+                Ok(n)
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                self.inner.flush()
+            }
         }
 
-        // Compress if requested
-        let (on_disk_data, stored_encoding) = match encoding {
-            Encoding::Raw => (data, Encoding::Raw),
-            Encoding::Zstd => {
-                let compressed = zstd::encode_all(std::io::Cursor::new(data), 0)
-                    .map_err(ZTensorError::ZstdCompression)?;
-                (compressed, Encoding::Zstd)
+        let mut counting_writer = CountingWriter {
+            inner: &mut self.writer,
+            count: 0,
+        };
+        
+        let mut digest_writer = DigestWriter::new(&mut counting_writer, checksum);
+
+        let stored_encoding = match compression {
+            Compression::Raw => {
+                // Write data
+                // Uses streaming chunks to perform endianness swap if needed
+                Self::write_data(&mut digest_writer, data, dtype)?;
+                Encoding::Raw
+            }
+            Compression::Zstd(level) => {
+                {
+                    let mut encoder = zstd::stream::write::Encoder::new(&mut digest_writer, level)
+                        .map_err(ZTensorError::ZstdCompression)?;
+                    Self::write_data(&mut encoder, data, dtype)?;
+                    encoder.finish().map_err(ZTensorError::ZstdCompression)?;
+                }
+                Encoding::Zstd
             }
         };
 
-        // Calculate checksum
-        let digest = match checksum {
-            ChecksumAlgorithm::None => None,
-            ChecksumAlgorithm::Crc32c => {
-                let cs = crc32c::crc32c(&on_disk_data);
-                Some(format!("crc32c:0x{:08X}", cs))
-            }
-            ChecksumAlgorithm::Sha256 => {
-                let hash = sha256_hex(&on_disk_data);
-                Some(format!("sha256:{}", hash))
-            }
-        };
-
-        // Write with alignment
-        let (offset, length) = self.write_aligned_data(&on_disk_data)?;
+        // Finalize digest
+        let digest = digest_writer.finalize();
+        
+        // Update offset
+        let length = counting_writer.count;
+        self.current_offset += length;
 
         Ok(Component {
             dtype,
-            offset,
+            offset: aligned_offset,
             length,
             encoding: stored_encoding,
             digest,
         })
     }
 
-    fn write_aligned_data(&mut self, data: &[u8]) -> Result<(u64, u64), ZTensorError> {
-        let (aligned_offset, padding) = align_offset(self.current_offset);
-
-        if padding > 0 {
-            self.writer.write_all(&vec![0u8; padding as usize])?;
+    fn write_data<Output: Write>(
+        writer: &mut Output,
+        data: &[u8],
+        dtype: DType,
+    ) -> Result<(), ZTensorError> {
+        let is_native_safe = is_little_endian() || !dtype.is_multi_byte();
+        
+        if is_native_safe {
+            writer.write_all(data)?;
+        } else {
+            // Swap in chunks
+            const CHUNK_SIZE: usize = 4096;
+            let mut buffer = Vec::with_capacity(CHUNK_SIZE);
+            
+            // Iterate over chunks of size CHUNK_SIZE
+            // Ensure we don't split multi-byte elements
+            // Since CHUNK_SIZE=4096 is divisible by 1,2,4,8, we are safe.
+            for chunk in data.chunks(CHUNK_SIZE) {
+                buffer.clear();
+                buffer.extend_from_slice(chunk);
+                
+                swap_endianness_in_place(&mut buffer, dtype.byte_size());
+                
+                writer.write_all(&buffer)?;
+            }
         }
-
-        self.writer.write_all(data)?;
-        let length = data.len() as u64;
-
-        self.current_offset = aligned_offset + length;
-        Ok((aligned_offset, length))
+        Ok(())
     }
 
     /// Finalizes the file by writing manifest and footer.
