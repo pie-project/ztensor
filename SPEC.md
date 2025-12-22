@@ -3,8 +3,6 @@
 **Version:** 1.1.0  
 **Extension:** `.zt`
 
----
-
 ## Part I: The Container (Physical Layer)
 
 The zTensor Container is an append-only, binary-safe envelope. It handles storage, alignment, and compression but is agnostic to the logical meaning of the data.
@@ -31,28 +29,22 @@ The file is a stream of aligned binary blobs followed by a metadata index.
 +---------------------------------------+
 | Magic Footer (8 bytes)                | ASCII: "ZTEN1000"
 +---------------------------------------+ <--- EOF
-
 ```
 
 ### 2. Global Constants & Endianness
 
-* **Structural Integers:** **Little-Endian (LE)**
-* Applies to: `Manifest Size` (at EOF) and binary blob contents (unless specified otherwise by `dtype`).
+* **Structural Integers:** Little-Endian (LE)
+  * Applies to: `Manifest Size` (at EOF) and binary blob contents (unless specified otherwise by `dtype`).
 
+* **Manifest Encoding:** CBOR (RFC 7049)
+  * Applies to: The internal structure of the metadata map.
+  * *Note:* CBOR uses Network Byte Order (Big-Endian) for its internal length prefixes.
 
-* **Manifest Encoding:** **CBOR (RFC 7049)**
-* Applies to: The internal structure of the metadata map.
-* *Note:* CBOR uses Network Byte Order (Big-Endian) for its internal length prefixes.
+* **Alignment:** 64 bytes
+  * All binary components must start at an offset divisible by 64.
 
-
-* **Alignment:** **64 bytes**
-* All binary components must start at an offset divisible by 64.
-
-
-* **Padding:** **Zero (`0x00`)**
-* **Tail Protection:** The footer repeats the Magic Number to prevent crashes on truncated files.
-
----
+* **Padding:** Zero (`0x00`)
+  * **Tail Protection:** The footer repeats the Magic Number to prevent crashes on truncated files.
 
 ## Part II: The Manifest (Metadata Layer)
 
@@ -72,7 +64,6 @@ The Manifest is a **CBOR-encoded Map** located at `EOF - 16 - manifest_size`.
     "layer1.bias": { ... }
   }
 }
-
 ```
 
 | Field | Type | Required | Description |
@@ -103,7 +94,6 @@ Defines the physical storage, typing, and encoding of a specific blob.
   "encoding": "raw",
   "digest": "sha256:8f4a..."
 }
-
 ```
 
 | Field | Type | Default | Description |
@@ -123,13 +113,8 @@ Defines the physical storage, typing, and encoding of a specific blob.
 | **Complex** | `complex64`, `complex128` | Stored as contiguous pairs `[real, imag]`. |
 | **Signed Int** | `i64`, `i32`, `i16`, `i8` | Two's complement Little-Endian. |
 | **Unsigned** | `u64`, `u32`, `u16`, `u8` | Little-Endian. |
-| **Boolean** | `bool` | **1 Byte per Bool.**<br>
+| **Boolean** | `bool` | **1 Byte per Bool.** `0x00` = False, `0x01` = True. (Allows direct mmap). |
 
-<br>`0x00` = False, `0x01` = True.<br>
-
-<br>*Allows direct mmap.* |
-
----
 
 ## Part III: Standard Layouts (Logical Layer)
 
@@ -145,36 +130,29 @@ Standard contiguous array in **Row-Major (C-contiguous)** order.
 Compressed Sparse Row. Allows mixed types (e.g., `f32` values with `u16` indices).
 
 * **Required Components:**
-1. `values`: Non-zero elements.
-2. `indices`: Column indices (Integer).
-3. `indptr`: Row pointers (Integer, size = rows + 1).
-
-
+  1. `values`: Non-zero elements.
+  2. `indices`: Column indices (Integer).
+  3. `indptr`: Row pointers (Integer, size = rows + 1).
 
 ### 3. Format: `sparse_coo`
 
 Coordinate List.
 
 * **Required Components:**
-1. `values`: Non-zero elements.
-2. `coords`: Coordinate indices.
-
+  1. `values`: Non-zero elements.
+  2. `coords`: Coordinate indices.
 
 * **Coordinate Ordering:** `coords` is a flattened array of shape `(ndim * nnz)` stored in **Structure-of-Arrays (SoA)** order.
-* *Storage Order:* `[row_indices... , col_indices...]`
-
-
+  * *Storage Order:* `[row_indices... , col_indices...]`
 
 ### 4. Format: `quantized_group` (e.g., GPTQ)
 
 Block-wise quantization where weights are packed, and scales/zeros are kept in higher precision.
 
 * **Required Components:**
-1. `packed_weight`: The quantized data (e.g., `i32` or `u8` acting as a container).
-2. `scales`: Scaling factors.
-3. `zeros`: Zero-points.
-
-
+  1. `packed_weight`: The quantized data (e.g., `i32` or `u8` acting as a container).
+  2. `scales`: Scaling factors.
+  3. `zeros`: Zero-points.
 
 **Example (4-bit GPTQ):** Logical shape `[4096, 4096]`, but physically stored as packed `i32`.
 
@@ -193,10 +171,8 @@ Block-wise quantization where weights are packed, and scales/zeros are kept in h
     "zeros":         { "dtype": "f16", "offset": 8651776, "length": 262144 }
   }
 }
-
 ```
 
----
 
 ## Part IV: Parsing & Safety
 
@@ -209,17 +185,13 @@ Block-wise quantization where weights are packed, and scales/zeros are kept in h
 5. **Read Manifest:** Seek to `EOF - 16 - manifest_size`. Read `manifest_size` bytes.
 6. **Decode CBOR:** Pass the buffer to a standard CBOR decoder. The decoder handles the internal structure (Big-Endian lengths) per RFC 7049.
 7. **Load Component:**
-* Seek to `component.offset`.
-* Read `component.length`.
-* If `component.encoding == "zstd"`, decompress buffer.
-* Cast result to `component.dtype` (interpreting binary data as **Little-Endian**).
-
-
+   * Seek to `component.offset`.
+   * Read `component.length`.
+   * If `component.encoding == "zstd"`, decompress buffer.
+   * Cast result to `component.dtype` (interpreting binary data as **Little-Endian**).
 
 ### 2. Security Guidelines
 
 * **No Execution:** Parsers **MUST NOT** execute any data (no pickle/eval).
 * **Bounds Check:** `offset + length` MUST NOT exceed `FILE_SIZE`.
 * **Padding Integrity:** Parsers generally ignore padding bytes, but writers **MUST** set them to `0x00` to ensure identical file hashes for identical content.
-
-```

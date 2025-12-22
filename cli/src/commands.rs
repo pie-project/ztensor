@@ -6,10 +6,22 @@ use hf_hub::api::sync::ApiBuilder;
 use hf_hub::Repo;
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
-use ztensor::{ChecksumAlgorithm, Encoding, ZTensorReader, ZTensorWriter};
+use ztensor::{ChecksumAlgorithm, ZTensorReader, ZTensorWriter};
+use ztensor::writer::Compression;
 
 use crate::extractors::{SafeTensorExtractor, TensorExtractor};
 use crate::utils::create_progress_bar;
+
+/// Helper to determine compression settings
+fn get_compression(compress: bool, level: Option<i32>) -> Compression {
+    if let Some(l) = level {
+        Compression::Zstd(l)
+    } else if compress {
+        Compression::Zstd(3) // Default level
+    } else {
+        Compression::Raw
+    }
+}
 
 // ============================================================================
 // Table Printing
@@ -125,12 +137,13 @@ pub fn run_conversion(
     inputs: &[String],
     output: &str,
     compress: bool,
+    level: Option<i32>,
     preserve: bool,
 ) -> Result<()> {
     let mut writer = ZTensorWriter::create(output)
         .with_context(|| format!("Failed to create output file '{}'", output))?;
     let mut seen_names = HashSet::new();
-    let encoding = if compress { Encoding::Zstd } else { Encoding::Raw };
+    let compression = get_compression(compress, level);
     
     let pb = create_progress_bar(inputs.len() as u64)?;
     
@@ -142,12 +155,12 @@ pub fn run_conversion(
             if seen_names.contains(&t.name) {
                 bail!("Duplicate tensor name '{}' found in file '{}'. Aborting.", t.name, input);
             }
-            writer.add_object(
+            writer.add_object_bytes(
                 &t.name,
                 t.shape,
                 t.dtype,
-                encoding.clone(),
-                t.data,
+                compression,
+                &t.data,
                 ChecksumAlgorithm::None,
             )?;
             seen_names.insert(t.name);
@@ -170,12 +183,18 @@ pub fn run_conversion(
 // ============================================================================
 
 /// Compress a zTensor file (raw -> zstd)
-pub fn compress_ztensor(input: &str, output: &str) -> Result<()> {
+pub fn compress_ztensor(input: &str, output: &str, level: Option<i32>) -> Result<()> {
     let mut reader = ZTensorReader::open(input)
         .with_context(|| format!("Failed to open input file '{}'", input))?;
     let mut writer = ZTensorWriter::create(output)
         .with_context(|| format!("Failed to create output file '{}'", output))?;
     let objects = reader.list_objects().clone();
+    
+    let compression = if let Some(l) = level {
+        Compression::Zstd(l)
+    } else {
+        Compression::Zstd(3)
+    };
     
     let pb = create_progress_bar(objects.len() as u64)?;
     
@@ -188,12 +207,12 @@ pub fn compress_ztensor(input: &str, output: &str) -> Result<()> {
         let data_comp = obj.components.get("data")
             .ok_or_else(|| anyhow::anyhow!("Missing data component for tensor '{}'", name))?;
         let data = reader.read_object(&name, true)?;
-        writer.add_object(
+        writer.add_object_bytes(
             &name,
             obj.shape,
             data_comp.dtype,
-            Encoding::Zstd,
-            data,
+            compression,
+            &data,
             ChecksumAlgorithm::None,
         )?;
         pb.inc(1);
@@ -223,12 +242,12 @@ pub fn decompress_ztensor(input: &str, output: &str) -> Result<()> {
         let data_comp = obj.components.get("data")
             .ok_or_else(|| anyhow::anyhow!("Missing data component for tensor '{}'", name))?;
         let data = reader.read_object(&name, true)?;
-        writer.add_object(
+        writer.add_object_bytes(
             &name,
             obj.shape,
             data_comp.dtype,
-            Encoding::Raw,
-            data,
+            Compression::Raw,
+            &data,
             ChecksumAlgorithm::None,
         )?;
         pb.inc(1);
@@ -268,12 +287,12 @@ pub fn merge_ztensor_files(
             let data_comp = obj.components.get("data")
                 .ok_or_else(|| anyhow::anyhow!("Missing data component for tensor '{}'", name))?;
             let data = reader.read_object(&name, true)?;
-            writer.add_object(
+            writer.add_object_bytes(
                 &name,
                 obj.shape,
                 data_comp.dtype,
-                Encoding::Raw,
-                data,
+                Compression::Raw,
+                &data,
                 ChecksumAlgorithm::None,
             )?;
             seen_names.insert(name);
@@ -292,7 +311,7 @@ pub fn merge_ztensor_files(
 }
 
 /// Migrate a v0.1.0 ztensor file to v1.1.0 format
-pub fn migrate_ztensor(input: &str, output: &str, compress: bool) -> Result<()> {
+pub fn migrate_ztensor(input: &str, output: &str, compress: bool, level: Option<i32>) -> Result<()> {
     use ztensor::compat::LegacyReader;
     use std::fs::File;
 
@@ -313,7 +332,7 @@ pub fn migrate_ztensor(input: &str, output: &str, compress: bool) -> Result<()> 
     let objects = reader.list_objects().clone();
     let pb = create_progress_bar(objects.len() as u64)?;
     
-    let encoding = if compress { Encoding::Zstd } else { Encoding::Raw };
+    let compression = get_compression(compress, level);
 
     for (name, obj) in objects {
         pb.set_message(format!("Migrating {}", name));
@@ -324,12 +343,12 @@ pub fn migrate_ztensor(input: &str, output: &str, compress: bool) -> Result<()> 
             
         let data = reader.read_object(&name, true)?;
         
-        writer.add_object(
+        writer.add_object_bytes(
             &name,
             obj.shape,
             data_comp.dtype,
-            encoding.clone(),
-            data,
+            compression,
+            &data,
             ChecksumAlgorithm::None,
         )?;
         pb.inc(1);
@@ -352,6 +371,7 @@ pub fn download_hf(
     token: Option<&str>,
     revision: &str,
     compress: bool,
+    level: Option<i32>,
 ) -> Result<()> {
     // Create output directory if it doesn't exist
     let output_path = Path::new(output_dir);
@@ -394,7 +414,7 @@ pub fn download_hf(
     }
     println!();
 
-    let encoding = if compress { Encoding::Zstd } else { Encoding::Raw };
+    let compression = get_compression(compress, level);
     let extractor = SafeTensorExtractor;
     
     let file_count = safetensor_files.len();
@@ -433,12 +453,12 @@ pub fn download_hf(
             .with_context(|| format!("Failed to create output file '{}'", output_file.display()))?;
 
         for t in tensors {
-            writer.add_object(
+            writer.add_object_bytes(
                 &t.name,
                 t.shape,
                 t.dtype,
-                encoding.clone(),
-                t.data,
+                compression,
+                &t.data,
                 ChecksumAlgorithm::None,
             )?;
         }
@@ -463,7 +483,7 @@ mod tests {
     fn create_test_ztensor(path: &std::path::Path, tensors: Vec<(&str, Vec<u64>, ztensor::DType, Vec<u8>)>) {
         let mut writer = ZTensorWriter::create(path).unwrap();
         for (name, shape, dtype, data) in tensors {
-            writer.add_object(name, shape, dtype, Encoding::Raw, data, ChecksumAlgorithm::None).unwrap();
+            writer.add_object_bytes(name, shape, dtype, Compression::Raw, &data, ChecksumAlgorithm::None).unwrap();
         }
         writer.finalize().unwrap();
     }
@@ -480,7 +500,7 @@ mod tests {
             ("test_tensor", vec![2, 3], ztensor::DType::F32, data.clone()),
         ]);
         
-        compress_ztensor(input_path.to_str().unwrap(), compressed_path.to_str().unwrap()).unwrap();
+        compress_ztensor(input_path.to_str().unwrap(), compressed_path.to_str().unwrap(), Some(1)).unwrap();
         assert!(compressed_path.exists());
         
         decompress_ztensor(compressed_path.to_str().unwrap(), decompressed_path.to_str().unwrap()).unwrap();
@@ -540,7 +560,7 @@ mod tests {
 
     #[test]
     fn test_compress_nonexistent_file() {
-        let result = compress_ztensor("/nonexistent/path.zt", "/tmp/out.zt");
+        let result = compress_ztensor("/nonexistent/path.zt", "/tmp/out.zt", None);
         assert!(result.is_err());
     }
 
@@ -571,7 +591,7 @@ mod tests {
         };
         
         let inputs = vec!["dummy.input".to_string()];
-        run_conversion(extractor, &inputs, output_path.to_str().unwrap(), false, true).unwrap();
+        run_conversion(extractor, &inputs, output_path.to_str().unwrap(), false, None, true).unwrap();
         
         assert!(output_path.exists());
     }
@@ -599,7 +619,7 @@ mod tests {
         };
         
         let inputs = vec!["dummy.input".to_string()];
-        let result = run_conversion(extractor, &inputs, output_path.to_str().unwrap(), false, true);
+        let result = run_conversion(extractor, &inputs, output_path.to_str().unwrap(), false, None, true);
         assert!(result.is_err());
     }
 }

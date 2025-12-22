@@ -1,5 +1,7 @@
 //! zTensor CLI: inspect, convert, and compress tensor files
 
+
+
 mod commands;
 mod extractors;
 mod pickle;
@@ -70,6 +72,10 @@ enum Commands {
         #[arg(short = 'c', long)]
         compress: bool,
 
+        /// Zstd compression level (1-22). Implies --compress.
+        #[arg(short = 'l', long)]
+        level: Option<i32>,
+
         /// Input format (auto-detects from extension by default)
         #[arg(short = 'f', long, value_enum, default_value_t = FormatArg::Auto)]
         format: FormatArg,
@@ -92,6 +98,10 @@ enum Commands {
         /// Output .zt file (compressed)
         #[arg(short = 'o', long, required = true)]
         output: String,
+
+        /// Zstd compression level (1-22, default 3)
+        #[arg(short = 'l', long)]
+        level: Option<i32>,
     },
 
     /// Decompress a zTensor file (zstd → raw)
@@ -126,6 +136,10 @@ enum Commands {
         /// Compress tensor data with zstd
         #[arg(short = 'c', long)]
         compress: bool,
+
+        /// Zstd compression level (1-22). Implies --compress.
+        #[arg(short = 'l', long)]
+        level: Option<i32>,
     },
 
     /// Show metadata and stats for a zTensor file
@@ -192,6 +206,10 @@ enum Commands {
         /// Compress tensor data with zstd
         #[arg(short = 'c', long)]
         compress: bool,
+
+        /// Zstd compression level (1-22). Implies --compress.
+        #[arg(short = 'l', long)]
+        level: Option<i32>,
     },
 }
 
@@ -203,6 +221,7 @@ fn main() -> Result<()> {
             inputs,
             output,
             compress,
+            level,
             format,
             delete_original,
         }) => {
@@ -225,15 +244,15 @@ fn main() -> Result<()> {
             
             match detected_format {
                 Some(utils::InputFormat::SafeTensor) => {
-                    run_conversion(SafeTensorExtractor, inputs, output, *compress, preserve)?;
+                    run_conversion(SafeTensorExtractor, inputs, output, *compress, *level, preserve)?;
                     println!("Successfully converted {} safetensor file(s) into {}", inputs.len(), output);
                 }
                 Some(utils::InputFormat::GGUF) => {
-                    run_conversion(GgufExtractor, inputs, output, *compress, preserve)?;
+                    run_conversion(GgufExtractor, inputs, output, *compress, *level, preserve)?;
                     println!("Successfully converted {} GGUF file(s) into {}", inputs.len(), output);
                 }
                 Some(utils::InputFormat::Pickle) => {
-                    run_conversion(PickleExtractor, inputs, output, *compress, preserve)?;
+                    run_conversion(PickleExtractor, inputs, output, *compress, *level, preserve)?;
                     println!("Successfully converted {} pickle file(s) into {}", inputs.len(), output);
                 }
                 None => {
@@ -244,11 +263,11 @@ fn main() -> Result<()> {
                 }
             }
         }
-        Some(Commands::Compress { input, output }) => {
+        Some(Commands::Compress { input, output, level }) => {
             if Path::new(output).exists() {
                 bail!("Output file '{}' already exists. Please remove it or choose a different name.", output);
             }
-            compress_ztensor(input, output)?;
+            compress_ztensor(input, output, *level)?;
             println!("Successfully compressed {} to {}", input, output);
         }
         Some(Commands::Decompress { input, output }) => {
@@ -258,11 +277,11 @@ fn main() -> Result<()> {
             decompress_ztensor(input, output)?;
             println!("Successfully decompressed {} to {}", input, output);
         }
-        Some(Commands::Migrate { input, output, compress }) => {
+        Some(Commands::Migrate { input, output, compress, level }) => {
             if Path::new(output).exists() {
                 bail!("Output file '{}' already exists. Please remove it or choose a different name.", output);
             }
-            migrate_ztensor(input, output, *compress)?;
+            migrate_ztensor(input, output, *compress, *level)?;
             println!("Successfully migrated {} to {}", input, output);
         }
         Some(Commands::Info { file }) => {
@@ -303,8 +322,9 @@ fn main() -> Result<()> {
             token,
             revision,
             compress,
+            level,
         }) => {
-            download_hf(repo, output_dir, token.as_deref(), revision, *compress)?;
+            download_hf(repo, output_dir, token.as_deref(), revision, *compress, *level)?;
         }
         None => {
             Cli::command().print_help()?;

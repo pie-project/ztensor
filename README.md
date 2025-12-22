@@ -13,7 +13,7 @@ Simple tensor serialization format
 - **Efficient Writes** — Supports streaming and append-only operations without rewriting files.
 - **Future-Proof** — Decouples physical storage from logical representation for long-term compatibility.
 
-## Ecosystem
+## Tools
 
 - **Rust Core** — High-performance, SIMD-aligned implementation.
 - **Python API** — First-class bindings for **NumPy** and **PyTorch**.
@@ -197,8 +197,11 @@ Convert SafeTensors, GGUF, or Pickle files to zTensor.
 # Auto-detect format from extension
 ztensor convert model.safetensors -o model.zt
 
-# Explicit format with compression
+# Explicit format with compression (default level 3)
 ztensor convert -f gguf -c llama.gguf -o llama.zt
+
+# Specify compression level (1-22)
+ztensor convert model.safetensors -o model.zt -l 10
 
 # Delete originals after conversion
 ztensor convert --delete-original *.safetensors -o model.zt
@@ -206,17 +209,23 @@ ztensor convert --delete-original *.safetensors -o model.zt
 
 ### Compression Tools
 ```bash
-# Compress an existing raw file
+# Compress an existing raw file (default level 3)
 ztensor compress raw.zt -o compressed.zt
+
+# Compress with specific level (1-22)
+ztensor compress raw.zt -o highly_compressed.zt -l 19
 
 # Decompress a file
 ztensor decompress compressed.zt -o raw.zt
 ```
 
-### Merge Files
-Combine multiple zTensor files into one.
+### File Management
 ```bash
+# Merge multiple files into one
 ztensor merge part1.zt part2.zt -o merged.zt
+
+# Migrate legacy v0.1.0 files to v1.1.0
+ztensor migrate old_model.zt -o new_model.zt
 ```
 
 ### Download from HuggingFace
