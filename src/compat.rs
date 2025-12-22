@@ -12,9 +12,10 @@
 
 use byteorder::{LittleEndian, ReadBytesExt};
 use serde::Deserialize;
+use memmap2::Mmap;
 use std::collections::BTreeMap;
 use std::fs::File;
-use std::io::{BufReader, Read, Seek, SeekFrom};
+use std::io::{BufReader, Cursor, Read, Seek, SeekFrom};
 use std::path::Path;
 
 use crate::error::ZTensorError;
@@ -81,6 +82,94 @@ impl LegacyReader<BufReader<File>> {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, ZTensorError> {
         let file = File::open(path)?;
         Self::new(BufReader::new(file))
+    }
+}
+
+impl LegacyReader<Cursor<Mmap>> {
+    /// Opens a legacy v0.1.0 file using memory mapping.
+    pub fn open_mmap(path: impl AsRef<Path>) -> Result<Self, ZTensorError> {
+        let file = File::open(path)?;
+        let mmap = unsafe { Mmap::map(&file)? };
+        Self::new(Cursor::new(mmap))
+    }
+
+    /// Gets a zero-copy reference to an object's data.
+    pub fn get_object_slice(&self, name: &str) -> Result<&[u8], ZTensorError> {
+        let obj = self.manifest.objects.get(name)
+            .ok_or_else(|| ZTensorError::ObjectNotFound(name.to_string()))?;
+
+        // Logic similar to ZTensorReader::get_object_slice
+        let component = obj.components.get("data").ok_or_else(|| {
+            ZTensorError::InvalidFileStructure(format!(
+                "Dense object '{}' missing 'data' component",
+                name
+            ))
+        })?;
+
+        if component.encoding != Encoding::Raw {
+            return Err(ZTensorError::Other(format!(
+                "Zero-copy not supported for compressed component in '{}'", name
+            )));
+        }
+
+        // Validate alignment
+        if component.offset % ALIGNMENT != 0 {
+            return Err(ZTensorError::InvalidAlignment {
+                offset: component.offset,
+                alignment: ALIGNMENT,
+            });
+        }
+
+        let mmap = self.reader.get_ref();
+        let start = component.offset as usize;
+        let end = start + component.length as usize;
+
+        if end > mmap.len() {
+            return Err(ZTensorError::InvalidFileStructure(format!(
+                "Component '{}' out of bounds (end={} > file_len={})",
+                name, end, mmap.len()
+            )));
+        }
+
+        Ok(&mmap[start..end])
+    }
+
+    /// Gets a typed zero-copy reference to an object's data.
+    pub fn get_object_slice_as<T: Pod>(&self, name: &str) -> Result<&[T], ZTensorError> {
+        let obj = self.manifest.objects.get(name)
+            .ok_or_else(|| ZTensorError::ObjectNotFound(name.to_string()))?;
+        
+        let component = obj.components.get("data").ok_or_else(|| {
+            ZTensorError::InvalidFileStructure(format!("Missing 'data' component for {}", name))
+        })?;
+
+        if !T::dtype_matches(&component.dtype) {
+             return Err(ZTensorError::TypeMismatch {
+                expected: component.dtype.as_str().to_string(),
+                found: std::any::type_name::<T>().to_string(),
+                context: format!("object '{}'", name),
+            });
+        }
+
+        let bytes = self.get_object_slice(name)?;
+        
+        // Safety checks for casting
+        if bytes.len() % T::SIZE != 0 {
+            return Err(ZTensorError::InvalidFileStructure(format!(
+                "Byte length {} is not a multiple of type size {}",
+                bytes.len(), T::SIZE
+            )));
+        }
+        
+        let ptr = bytes.as_ptr();
+        if (ptr as usize) % std::mem::align_of::<T>() != 0 {
+            return Err(ZTensorError::Other(format!(
+                "Memory not aligned for type {}", std::any::type_name::<T>()
+            )));
+        }
+
+        let len = bytes.len() / T::SIZE;
+        Ok(unsafe { std::slice::from_raw_parts(ptr as *const T, len) })
     }
 }
 
@@ -221,6 +310,53 @@ impl<R: Read + Seek> LegacyReader<R> {
         Ok(data)
     }
 
+    /// Reads raw component data.
+    pub fn read_component(&mut self, component: &Component) -> Result<Vec<u8>, ZTensorError> {
+        if component.offset % ALIGNMENT != 0 {
+            return Err(ZTensorError::InvalidAlignment {
+                offset: component.offset,
+                alignment: ALIGNMENT,
+            });
+        }
+
+        self.reader.seek(SeekFrom::Start(component.offset))?;
+
+        let mut data = match component.encoding {
+            Encoding::Zstd => {
+                let mut compressed = vec![0u8; component.length as usize];
+                self.reader.read_exact(&mut compressed)?;
+
+                if let Some(ref digest) = component.digest {
+                   // We don't have object name here easily for error context match, 
+                   // but verify_checksum_impl needs it.
+                   // We can pass a placeholder or change verify_checksum_impl.
+                   verify_checksum_impl(digest, &compressed, "component")?;
+                }
+
+                let mut decompressed = Vec::new();
+                zstd::stream::copy_decode(std::io::Cursor::new(compressed), &mut decompressed)
+                    .map_err(ZTensorError::ZstdDecompression)?;
+                decompressed
+            }
+            Encoding::Raw => {
+                let mut buf = vec![0u8; component.length as usize];
+                self.reader.read_exact(&mut buf)?;
+
+                if let Some(ref digest) = component.digest {
+                    verify_checksum_impl(digest, &buf, "component")?;
+                }
+                buf
+            }
+        };
+
+        // Handle endianness
+        if cfg!(target_endian = "big") && component.dtype.is_multi_byte() {
+            swap_endianness_in_place(&mut data, component.dtype.byte_size());
+        }
+
+        Ok(data)
+    }
+
     /// Reads object as typed vector.
     pub fn read_object_as<T: Pod>(&mut self, name: &str) -> Result<Vec<T>, ZTensorError> {
         let obj = self.manifest.objects.get(name)
@@ -310,5 +446,79 @@ mod tests {
 
         let mut cursor = Cursor::new(v11_data.to_vec());
         assert!(!is_legacy_format(&mut cursor).unwrap());
+    }
+
+    #[test]
+    fn test_legacy_mmap() -> Result<(), Box<dyn std::error::Error>> {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        // 1. Create temp file
+        let mut file = NamedTempFile::new()?;
+        let path = file.path().to_path_buf();
+
+        // 2. Write Magic
+        file.write_all(MAGIC_V01)?;
+
+        // Padding to align to 64 bytes (ALIGNMENT)
+        // File pos is 8.
+        // We want data at 64.
+        // Padding bytes = 64 - 8 = 56.
+        let padding = vec![0u8; 56];
+        file.write_all(&padding)?;
+
+        // 3. Write Data (f32: 1.0, 2.0, 3.0, 4.0)
+        let data: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0];
+        let bytes: &[u8] = bytemuck::cast_slice(&data);
+        let offset = 64u64;
+        let size = bytes.len() as u64;
+        file.write_all(bytes)?;
+
+        // 4. Create Manifest (CBOR)
+        // struct LegacyTensorMeta { ... }
+        // We need to construct this manually or use a helper struct for serialization
+        #[derive(serde::Serialize)]
+        struct LegacyTensorMetaSer {
+            name: String,
+            offset: u64,
+            size: u64,
+            dtype: String,
+            shape: Vec<u64>,
+            encoding: String,
+            layout: String,
+        }
+
+        let meta = LegacyTensorMetaSer {
+            name: "tensor1".to_string(),
+            offset,
+            size,
+            dtype: "float32".to_string(),
+            shape: vec![4],
+            encoding: "raw".to_string(),
+            layout: "dense".to_string(),
+        };
+        
+        let manifest = vec![meta];
+        let cbor_data = serde_cbor::to_vec(&manifest)?;
+        file.write_all(&cbor_data)?;
+
+        // 5. Write Manifest Size
+        file.write_all(&(cbor_data.len() as u64).to_le_bytes())?;
+
+        // Flush
+        file.flush()?;
+
+        // 6. Test Reader
+        let reader = LegacyReader::open_mmap(&path)?;
+        
+        // Test untyped
+        let slice = reader.get_object_slice("tensor1")?;
+        assert_eq!(slice, bytes);
+
+        // Test typed
+        let typed_slice = reader.get_object_slice_as::<f32>("tensor1")?;
+        assert_eq!(typed_slice, &data);
+
+        Ok(())
     }
 }

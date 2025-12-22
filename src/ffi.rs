@@ -22,7 +22,14 @@ use crate::writer::ZTensorWriter;
 
 // --- Type Aliases ---
 
-pub type CZTensorReader = ZTensorReader<Cursor<Mmap>>;
+use crate::compat::{LegacyReader, is_legacy_file};
+
+// --- Type Aliases ---
+
+pub enum CZTensorReader {
+    V1(ZTensorReader<Cursor<Mmap>>),
+    Legacy(LegacyReader<Cursor<Mmap>>),
+}
 pub type CZTensorWriter = ZTensorWriter<BufWriter<std::fs::File>>;
 pub type CObjectMetadata = (String, Object);
 
@@ -152,8 +159,26 @@ pub extern "C" fn ztensor_reader_open(path_str: *const c_char) -> *mut CZTensorR
         }
     };
 
-    match ZTensorReader::open_mmap(path) {
-        Ok(reader) => Box::into_raw(Box::new(reader)),
+    // Check version
+    match is_legacy_file(path) {
+        Ok(true) => {
+             match LegacyReader::open_mmap(path) {
+                Ok(reader) => Box::into_raw(Box::new(CZTensorReader::Legacy(reader))),
+                Err(e) => {
+                    update_last_error(e);
+                    ptr::null_mut()
+                }
+            }
+        },
+        Ok(false) => {
+            match ZTensorReader::open_mmap(path) {
+                Ok(reader) => Box::into_raw(Box::new(CZTensorReader::V1(reader))),
+                Err(e) => {
+                    update_last_error(e);
+                    ptr::null_mut()
+                }
+            }
+        },
         Err(e) => {
             update_last_error(e);
             ptr::null_mut()
@@ -164,7 +189,10 @@ pub extern "C" fn ztensor_reader_open(path_str: *const c_char) -> *mut CZTensorR
 #[unsafe(no_mangle)]
 pub extern "C" fn ztensor_reader_get_metadata_count(reader_ptr: *const CZTensorReader) -> size_t {
     let reader = ztensor_handle!(reader_ptr, 0);
-    reader.list_objects().len()
+    match reader {
+        CZTensorReader::V1(r) => r.list_objects().len(),
+        CZTensorReader::Legacy(r) => r.list_objects().len(),
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -181,7 +209,12 @@ pub extern "C" fn ztensor_reader_get_metadata_by_name(
         }
     };
 
-    match reader.get_object(name) {
+    let object = match reader {
+        CZTensorReader::V1(r) => r.get_object(name),
+        CZTensorReader::Legacy(r) => r.get_object(name),
+    };
+
+    match object {
         Some(obj) => Box::into_raw(Box::new((name.to_string(), obj.clone()))),
         None => {
             update_last_error(ZTensorError::ObjectNotFound(name.to_string()));
@@ -196,7 +229,10 @@ pub extern "C" fn ztensor_reader_get_metadata_by_index(
     index: size_t,
 ) -> *mut CObjectMetadata {
     let reader = ztensor_handle!(reader_ptr);
-    let objects = reader.list_objects();
+    let objects = match reader {
+        CZTensorReader::V1(r) => r.list_objects(),
+        CZTensorReader::Legacy(r) => r.list_objects(),
+    };
     match objects.iter().nth(index) {
         Some((name, obj)) => Box::into_raw(Box::new((name.clone(), obj.clone()))),
         None => {
@@ -211,9 +247,10 @@ pub extern "C" fn ztensor_reader_get_all_tensor_names(
     reader_ptr: *const CZTensorReader,
 ) -> *mut CStringArray {
     let reader = ztensor_handle!(reader_ptr);
-    let names: Vec<CString> = reader
-        .list_objects()
-        .keys()
+    let names: Vec<CString> = match reader {
+        CZTensorReader::V1(r) => r.list_objects().keys(),
+        CZTensorReader::Legacy(r) => r.list_objects().keys(),
+    }
         .filter_map(|name| CString::new(name.as_str()).ok())
         .collect();
 
@@ -243,7 +280,12 @@ pub extern "C" fn ztensor_reader_read_tensor(
         }
     };
 
-    match reader.read_object(name, verify_checksum != 0) {
+    let res = match reader {
+        CZTensorReader::V1(r) => r.read_object(name, verify_checksum != 0),
+        CZTensorReader::Legacy(r) => r.read_object(name, verify_checksum != 0),
+    };
+
+    match res {
         Ok(data_vec) => {
             let view = Box::new(CTensorDataView {
                 data: data_vec.as_ptr(),
@@ -289,7 +331,11 @@ pub extern "C" fn ztensor_reader_read_tensors(
     for name in name_strs {
         // Try zero-copy first if verification is not requested
         if !should_verify {
-             if let Ok(slice) = reader.get_object_slice(name) {
+             let res = match reader {
+                 CZTensorReader::V1(r) => r.get_object_slice(name),
+                 CZTensorReader::Legacy(r) => r.get_object_slice(name),
+             };
+             if let Ok(slice) = res {
                  views.push(CTensorDataView {
                      data: slice.as_ptr(),
                      len: slice.len(),
@@ -300,7 +346,12 @@ pub extern "C" fn ztensor_reader_read_tensors(
         }
 
         // Fallback to copy (standard read)
-        match reader.read_object(name, should_verify) {
+        let res = match reader {
+            CZTensorReader::V1(r) => r.read_object(name, should_verify),
+            CZTensorReader::Legacy(r) => r.read_object(name, should_verify),
+        };
+
+        match res {
             Ok(data_vec) => {
                  views.push(CTensorDataView {
                     data: data_vec.as_ptr(),
@@ -354,7 +405,12 @@ pub extern "C" fn ztensor_reader_read_tensor_component(
         }
     };
 
-    let obj = match reader.get_object(name) {
+    let obj_opt = match reader {
+        CZTensorReader::V1(r) => r.get_object(name),
+        CZTensorReader::Legacy(r) => r.get_object(name),
+    };
+
+    let obj = match obj_opt {
         Some(o) => o.clone(),
         None => {
             update_last_error(ZTensorError::ObjectNotFound(name.to_string()));
@@ -370,7 +426,12 @@ pub extern "C" fn ztensor_reader_read_tensor_component(
         }
     };
 
-    match reader.read_component(&component) {
+    let res = match reader {
+        CZTensorReader::V1(r) => r.read_component(&component),
+        CZTensorReader::Legacy(r) => r.read_component(&component),
+    };
+
+    match res {
         Ok(data_vec) => {
             let view = Box::new(CTensorDataView {
                 data: data_vec.as_ptr(),
@@ -403,7 +464,12 @@ pub extern "C" fn ztensor_reader_get_tensor_slice(
         }
     };
 
-    match reader.get_object_slice(name) {
+    let res = match reader {
+        CZTensorReader::V1(r) => r.get_object_slice(name),
+        CZTensorReader::Legacy(r) => r.get_object_slice(name),
+    };
+
+    match res {
         Ok(slice) => {
             let view = Box::new(CTensorDataView {
                 data: slice.as_ptr(),

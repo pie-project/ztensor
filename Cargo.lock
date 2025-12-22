@@ -826,5 +826,6 @@ dependencies = [
  "serde",
  "serde_cbor",
  "sha2",
+ "tempfile",
  "zstd",
 ]
