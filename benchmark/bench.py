@@ -4,9 +4,12 @@ import time
 import numpy as np
 import argparse
 import threading
-from typing import Dict
+from typing import Dict, Union
 
-# Note: h5py, gguf, ztensor are imported lazily in benchmark functions
+# Note: h5py, gguf, ztensor, torch are imported lazily in benchmark functions
+
+# Global backend setting: 'numpy' or 'torch'
+BACKEND = 'numpy'
 
 # --- UTILITIES ---
 
@@ -38,15 +41,17 @@ def clear_cache_robust():
 import pandas as pd
 import matplotlib.pyplot as plt
 
-def generate_tensor_dict(total_size_mb: int, distribution: str = "mixed") -> Dict[str, np.ndarray]:
+def generate_tensor_dict(total_size_mb: int, distribution: str = "mixed") -> Dict[str, Union[np.ndarray, 'torch.Tensor']]:
     """
     Generates tensors summing to total_size_mb.
     distribution:
       - 'mixed': Realistic mix (some large weights, some small biases/metadata)
       - 'small': Many small tensors (1KB - 100KB). Stresses metadata/parsing.
       - 'large': Few large tensors (10MB - 100MB). Stresses raw BW.
+    
+    Uses global BACKEND setting to determine tensor type ('numpy' or 'torch').
     """
-    print(f"[{distribution.upper()}] Generating {total_size_mb}MB of synthetic data...")
+    print(f"[{distribution.upper()}] Generating {total_size_mb}MB of synthetic data (backend={BACKEND})...")
     tensors = {}
     remaining_bytes = total_size_mb * 1024 * 1024
     i = 0
@@ -78,10 +83,19 @@ def generate_tensor_dict(total_size_mb: int, distribution: str = "mixed") -> Dic
             shape = (elems,)
         
         if np.prod(shape) == 0: break
-            
-        t = np.random.randn(*shape).astype(np.float32)
+        
+        # Generate as numpy first, then convert if needed
+        t_np = np.random.randn(*shape).astype(np.float32)
+        
+        if BACKEND == 'torch':
+            import torch
+            t = torch.from_numpy(t_np)
+            remaining_bytes -= t.numel() * t.element_size()
+        else:
+            t = t_np
+            remaining_bytes -= t.nbytes
+        
         tensors[f"layer_{i}.weight"] = t
-        remaining_bytes -= t.nbytes
         i += 1
     return tensors
 
@@ -101,8 +115,12 @@ def benchmark_write(format_name, tensors, filepath):
                 w.add_tensor(name, t, compress=compress)
 
     elif format_name == "safetensors":
-        import safetensors.numpy
-        safetensors.numpy.save_file(tensors, filepath)
+        if BACKEND == 'torch':
+            import safetensors.torch
+            safetensors.torch.save_file(tensors, filepath)
+        else:
+            import safetensors.numpy
+            safetensors.numpy.save_file(tensors, filepath)
         
     elif format_name == "pickle":
         import pickle
@@ -112,12 +130,16 @@ def benchmark_write(format_name, tensors, filepath):
     elif format_name == "hdf5":
         with h5py.File(filepath, "w") as f:
             for name, t in tensors.items():
-                f.create_dataset(name, data=t)
+                # Convert torch tensors to numpy for hdf5
+                data = t.numpy() if BACKEND == 'torch' else t
+                f.create_dataset(name, data=data)
                 
     elif format_name == "gguf":
         gw = gguf.GGUFWriter(filepath, "benchmark_model")
         for name, t in tensors.items():
-            gw.add_tensor(name, t)
+            # gguf requires numpy arrays
+            data = t.numpy() if BACKEND == 'torch' else t
+            gw.add_tensor(name, data)
         gw.write_header_to_file()
         gw.write_kv_data_to_file()
         gw.write_tensors_to_file()
@@ -137,12 +159,20 @@ def benchmark_read(format_name, filepath):
     loaded_tensors = {}
 
     if format_name == "ztensor" or format_name == "ztensor_zstd":
-        import ztensor.numpy
-        loaded_tensors = ztensor.numpy.load_file(filepath)
+        if BACKEND == 'torch':
+            import ztensor.torch
+            loaded_tensors = ztensor.torch.load_file(filepath)
+        else:
+            import ztensor.numpy
+            loaded_tensors = ztensor.numpy.load_file(filepath)
 
     elif format_name == "safetensors":
-        import safetensors.numpy
-        loaded_tensors = safetensors.numpy.load_file(filepath)
+        if BACKEND == 'torch':
+            import safetensors.torch
+            loaded_tensors = safetensors.torch.load_file(filepath)
+        else:
+            import safetensors.numpy
+            loaded_tensors = safetensors.numpy.load_file(filepath)
 
     elif format_name == "pickle":
         import pickle
@@ -151,13 +181,23 @@ def benchmark_read(format_name, filepath):
 
     elif format_name == "hdf5":
         with h5py.File(filepath, "r") as f:
-            for k in f.keys():
-                loaded_tensors[k] = f[k][:]
+            if BACKEND == 'torch':
+                import torch
+                for k in f.keys():
+                    loaded_tensors[k] = torch.from_numpy(f[k][:])
+            else:
+                for k in f.keys():
+                    loaded_tensors[k] = f[k][:]
 
     elif format_name == "gguf":
         reader = gguf.GGUFReader(filepath)
-        for tensor in reader.tensors:
-            loaded_tensors[tensor.name] = np.array(tensor.data, copy=True)
+        if BACKEND == 'torch':
+            import torch
+            for tensor in reader.tensors:
+                loaded_tensors[tensor.name] = torch.from_numpy(np.array(tensor.data, copy=True))
+        else:
+            for tensor in reader.tensors:
+                loaded_tensors[tensor.name] = np.array(tensor.data, copy=True)
 
     # FORCE ACTUAL LOAD
     for t in loaded_tensors.values():
@@ -455,13 +495,19 @@ def draw_plot(csv_path: str = "bench_out/sweep_results.csv", output_dir: str = "
 # --- MAIN LOOP ---
 
 def main():
+    global BACKEND
+    
     parser = argparse.ArgumentParser()
     parser.add_argument("mode", nargs="?", choices=["run", "sweep", "plot"], default="run", 
                        help="Run mode: single 'run', matrix 'sweep', or 'plot' to regenerate charts")
     parser.add_argument("--size", type=str, choices=["small", "large"], default="small")
     parser.add_argument("--runs", type=int, default=3)
     parser.add_argument("--csv", type=str, default="bench_out/sweep_results.csv", help="CSV path for plot mode")
+    parser.add_argument("--backend", type=str, choices=["numpy", "torch"], default="numpy",
+                       help="Tensor backend to use: 'numpy' (default) or 'torch'")
     args = parser.parse_args()
+    
+    BACKEND = args.backend
     
     if args.mode == "sweep":
         run_sweep()
