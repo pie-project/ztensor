@@ -108,8 +108,15 @@ def benchmark_write(format_name, tensors, filepath):
     
     start = time.perf_counter()
     
-    if format_name == "ztensor" or format_name == "ztensor_zstd":
-        compress = (format_name == "ztensor_zstd")
+    if format_name.startswith("ztensor"):
+        compress = False
+        if format_name == "ztensor_zstd":
+            compress = True # Level 3
+        elif format_name == "ztensor_fast":
+             compress = 1 # Level 1
+        elif format_name == "ztensor_max":
+             compress = 19 # Level 19
+
         with ztensor.Writer(filepath) as w:
             for name, t in tensors.items():
                 w.add_tensor(name, t, compress=compress)
@@ -158,7 +165,7 @@ def benchmark_read(format_name, filepath):
     start = time.perf_counter()
     loaded_tensors = {}
 
-    if format_name == "ztensor" or format_name == "ztensor_zstd":
+    if format_name.startswith("ztensor"):
         if BACKEND == 'torch':
             import ztensor.torch
             loaded_tensors = ztensor.torch.load_file(filepath)
@@ -212,7 +219,7 @@ def run_sweep():
     # Sweep configuration
     sizes = [128, 512, 1024, 2048] # MB
     distributions = ["mixed", "large"]
-    formats = ["safetensors", "pickle", "hdf5", "ztensor", "gguf"] 
+    formats = ["safetensors", "pickle", "hdf5", "ztensor", "ztensor_zstd", "ztensor_fast", "ztensor_max", "gguf"] 
     
     results = []
     
@@ -319,6 +326,9 @@ def draw_plot(csv_path: str = "bench_out/sweep_results.csv", output_dir: str = "
         'pickle': '#16A34A',       # Green
         'hdf5': '#9333EA',         # Purple
         'gguf': '#EA580C',         # Orange
+        'ztensor_zstd': '#3B82F6', # Lighter Blue
+        'ztensor_fast': '#60A5FA', # Even Lighter Blue
+        'ztensor_max': '#1E40AF',  # Darker Blue
     }
     
     MARKERS = {
@@ -521,7 +531,7 @@ def main():
     size_mb = 100 if args.size == "small" else 1024 
     tensors = generate_tensor_dict(size_mb, "mixed")
     
-    formats = ["safetensors", "pickle", "hdf5", "gguf", "ztensor", "ztensor_zstd"]
+    formats = ["safetensors", "pickle", "hdf5", "gguf", "ztensor", "ztensor_zstd", "ztensor_fast", "ztensor_max"]
 
     os.makedirs("bench_out", exist_ok=True)
     

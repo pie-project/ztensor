@@ -1,6 +1,7 @@
 import numpy as np
 import importlib
 from .ztensor import ffi, lib
+from typing import Union
 
 # --- Optional PyTorch Import ---
 try:
@@ -529,16 +530,30 @@ class Writer:
                 lib.ztensor_writer_free(self._ptr)
                 self._ptr = None
 
-    def add_tensor(self, name: str, tensor, compress: bool = False):
+    def add_tensor(self, name: str, tensor, compress: Union[bool, int] = False):
         """
         Adds a NumPy or PyTorch tensor to the file.
 
         Args:
             name (str): The name of the tensor to add.
             tensor (np.ndarray or torch.Tensor): The tensor data to write.
-            compress (bool): If True, compress the tensor data using zstd. Default: False.
+            compress (bool or int): Compression settings.
+                - False / 0: No compression (Raw).
+                - True: Default Zstd compression (Level 3).
+                - int > 0: Specific Zstd compression level (e.g., 1-22).
         """
         if not self._ptr: raise ZTensorError("Writer is closed or finalized.")
+
+        # Resolve compression level
+        compression_level = 0
+        if compress is True:
+            compression_level = 3  # Default zstd level
+        elif compress is False or compress is None:
+            compression_level = 0
+        elif isinstance(compress, int):
+            compression_level = compress
+        else:
+            raise TypeError(f"Invalid type for 'compress': {type(compress)}. Expected bool or int.")
 
         if isinstance(tensor, np.ndarray):
             tensor = np.ascontiguousarray(tensor)
@@ -573,9 +588,13 @@ class Writer:
 
         status = lib.ztensor_writer_add_tensor(
             self._ptr, name_bytes, shape_ptr, len(shape),
-            dtype_bytes, data_ptr, nbytes, 1 if compress else 0
+            dtype_bytes, data_ptr, nbytes, compression_level
         )
         _check_status(status, f"add_tensor: {name}")
+
+        # Keep alive: data_ptr is derived from tensor, so keeping tensor alive is enough?
+        # Actually ffi.cast doesn't keep alive. We need to ensure 'tensor' stays alive until after the call.
+        # Python arguments are kept alive during the call, so this is safe.
 
     def add_sparse_csr(self, name: str, values, indices, indptr, shape):
         """Adds a sparse CSR tensor."""

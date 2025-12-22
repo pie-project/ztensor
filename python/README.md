@@ -60,7 +60,7 @@ Adds a NumPy array or PyTorch tensor to the file.
 |-----------|------|-------------|
 | `name` | `str` | Tensor name (must be unique) |
 | `tensor` | `np.ndarray` or `torch.Tensor` | Tensor data |
-| `compress` | `bool` | Enable zstd compression (default: `False`) |
+| `compress` | `bool \| int` | Compression: `False`/`0` (off), `True` (level 3), or `int` (level 1-22). |
 
 ```python
 import numpy as np
@@ -69,8 +69,11 @@ with Writer("tensors.zt") as writer:
     # Basic tensor
     writer.add_tensor("embedding", np.zeros((512, 768), dtype=np.float32))
     
-    # With compression
+    # With compression (level 3)
     writer.add_tensor("large_tensor", np.random.randn(10000, 10000).astype(np.float32), compress=True)
+    
+    # With generic level (e.g. 1 for speed, 19 for size)
+    writer.add_tensor("max_compressed", data, compress=19)
     
     # PyTorch tensor
     import torch

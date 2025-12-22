@@ -35,6 +35,8 @@ Simple tensor serialization format
 
 ![benchmark](benchmark/plot.png)
 
+See [benchmark](benchmark/bench.py) for more details.
+
 ## Installation
 
 ### Python
@@ -127,55 +129,56 @@ with Writer("compressed.zt") as w:
 ### Basic Usage
 
 ```rust
-use ztensor::{ZTensorWriter, ZTensorReader, DType, Encoding, ChecksumAlgorithm};
+use ztensor::{ZTensorWriter, ZTensorReader, DType, Compression, ChecksumAlgorithm};
 
 // Write
 let mut writer = ZTensorWriter::create("model.zt")?;
-writer.add_tensor("weights", vec![1024, 768], DType::Float32, 
-                  Encoding::Raw, data_bytes, ChecksumAlgorithm::None)?;
+// Zero-copy generic write with generic Compression
+writer.add_object("weights", vec![1024, 768], DType::F32, 
+                 Compression::Raw, &data_vec, ChecksumAlgorithm::None)?;
 writer.finalize()?;
 
 // Read
 let mut reader = ZTensorReader::open("model.zt")?;
 // Read as specific type (automatically handles endianness)
-let weights: Vec<f32> = reader.read_tensor_as("weights")?;
+let weights: Vec<f32> = reader.read_object_as("weights")?;
 ```
 
 ### Sparse Tensors
 
 ```rust
-// Write CSR
-writer.add_csr_tensor(
+// Write CSR (using generic method)
+writer.add_csr_object(
     "sparse_data",
     vec![100, 100],      // shape
-    DType::Float32,
-    values_bytes,        // standard LE bytes
-    indices,             // Vec<u64>
-    indptr,              // Vec<u64>
-    Encoding::Raw,
+    DType::F32,
+    &values,             // &[f32]
+    &indices,            // &[u64]
+    &indptr,             // &[u64]
+    Compression::Raw,
     ChecksumAlgorithm::None
 )?;
 
 // Read CSR
-let csr = reader.read_csr_tensor::<f32>("sparse_data")?;
+let csr = reader.read_csr_object::<f32>("sparse_data")?;
 println!("Values: {:?}", csr.values);
 ```
 
 ### Compression
 
 ```rust
-// Write with compression
-writer.add_tensor(
+// Write with compression (level 3)
+writer.add_object(
     "compressed_data",
     vec![512, 512],
-    DType::Float32,
-    Encoding::Zstd, // Use zstd encoding
-    data_bytes,
+    DType::F32,
+    Compression::Zstd(3), // Use zstd encoding with level 3
+    &data,                // &[f32]
     ChecksumAlgorithm::Crc32c // Optional checksum
 )?;
 
 // Read (auto-decompresses)
-let data: Vec<f32> = reader.read_tensor_as("compressed_data")?;
+let data: Vec<f32> = reader.read_object_as("compressed_data")?;
 ```
 
 ## CLI

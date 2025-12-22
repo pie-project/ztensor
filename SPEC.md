@@ -62,7 +62,7 @@ The Manifest is a **CBOR-encoded Map** located at `EOF - 16 - manifest_size`.
 
 ```json
 {
-  "version": "1.2.0",
+  "version": "1.1.0",
   "attributes": {
     "framework": "PyTorch",
     "license": "Apache-2.0"

@@ -25,6 +25,7 @@ def save_file(
     tensor_dict: Dict[str, np.ndarray],
     filename: Union[str, os.PathLike],
     metadata: Optional[Dict[str, str]] = None,
+    compression: Union[bool, int] = False,
 ) -> None:
     """
     Saves a dictionary of tensors into `filename` in ztensor format.
@@ -39,6 +40,8 @@ def save_file(
             NOTE: ztensor does not currently support custom metadata; this
             parameter is accepted for API compatibility with safetensors
             but will be ignored.
+        compression: Compression settings. False/0 (raw), True (level 3), or int > 0 (level).
+            Default: False.
 
     Returns:
         None
@@ -54,12 +57,13 @@ def save_file(
     with Writer(str(filename)) as writer:
         for name, tensor in tensor_dict.items():
             tensor = np.ascontiguousarray(tensor)
-            writer.add_tensor(name, tensor)
+            writer.add_tensor(name, tensor, compress=compression)
 
 
 def save(
     tensor_dict: Dict[str, np.ndarray],
     metadata: Optional[Dict[str, str]] = None,
+    compression: Union[bool, int] = False,
 ) -> bytes:
     """
     Saves a dictionary of tensors into raw bytes in ztensor format.
@@ -71,6 +75,8 @@ def save(
             NOTE: ztensor does not currently support custom metadata; this
             parameter is accepted for API compatibility with safetensors
             but will be ignored.
+        compression: Compression settings. False/0 (raw), True (level 3), or int > 0 (level).
+            Default: False.
 
     Returns:
         The raw bytes representing the format.
@@ -88,7 +94,7 @@ def save(
         tmp_path = tmp.name
     
     try:
-        save_file(tensor_dict, tmp_path, metadata=metadata)
+        save_file(tensor_dict, tmp_path, metadata=metadata, compression=compression)
         with open(tmp_path, "rb") as f:
             return f.read()
     finally:

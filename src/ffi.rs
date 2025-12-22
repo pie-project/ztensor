@@ -480,7 +480,7 @@ pub extern "C" fn ztensor_writer_add_tensor(
     };
 
     let data = unsafe { slice::from_raw_parts(data_ptr, data_len) };
-    let compression = if compress != 0 { crate::writer::Compression::Zstd(0) } else { crate::writer::Compression::Raw };
+    let compression = if compress == 0 { crate::writer::Compression::Raw } else { crate::writer::Compression::Zstd(compress) };
 
     match writer.add_object_bytes(name, shape.to_vec(), dtype, compression, data, ChecksumAlgorithm::None) {
         Ok(_) => 0,

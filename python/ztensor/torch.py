@@ -31,6 +31,7 @@ def save_file(
     tensors: Dict[str, torch.Tensor],
     filename: Union[str, os.PathLike],
     metadata: Optional[Dict[str, str]] = None,
+    compression: Union[bool, int] = False,
 ) -> None:
     """
     Saves a dictionary of tensors into `filename` in ztensor format.
@@ -49,7 +50,9 @@ def save_file(
             affect tensor loading.
             NOTE: ztensor does not currently support custom metadata; this
             parameter is accepted for API compatibility with safetensors
-            but will be ignored.
+            binary format.
+        compression: Compression settings. False/0 (raw), True (level 3), or int > 0 (level).
+            Default: False.
 
     Returns:
         None
@@ -68,12 +71,13 @@ def save_file(
                 tensor = tensor.cpu()
             if not tensor.is_contiguous():
                 tensor = tensor.contiguous()
-            writer.add_tensor(name, tensor)
+            writer.add_tensor(name, tensor, compress=compression)
 
 
 def save(
     tensors: Dict[str, torch.Tensor],
     metadata: Optional[Dict[str, str]] = None,
+    compression: Union[bool, int] = False,
 ) -> bytes:
     """
     Saves a dictionary of tensors into raw bytes in ztensor format.
@@ -85,6 +89,8 @@ def save(
             NOTE: ztensor does not currently support custom metadata; this
             parameter is accepted for API compatibility with safetensors
             but will be ignored.
+        compression: Compression settings. False/0 (raw), True (level 3), or int > 0 (level).
+            Default: False.
 
     Returns:
         The raw bytes representing the format.
@@ -102,7 +108,7 @@ def save(
         tmp_path = tmp.name
     
     try:
-        save_file(tensors, tmp_path, metadata=metadata)
+        save_file(tensors, tmp_path, metadata=metadata, compression=compression)
         with open(tmp_path, "rb") as f:
             return f.read()
     finally:
