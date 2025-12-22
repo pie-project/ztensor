@@ -354,13 +354,18 @@ class Reader:
                     from scipy.sparse import csr_matrix
                 except ImportError:
                     raise ZTensorError("scipy is required for reading sparse tensors as numpy.")
-                return csr_matrix((vals, idxs.astype(np.int32), ptrs.astype(np.int32)), shape=metadata.shape)
+                # Create CSR matrix with zero-copy views
+                result = csr_matrix((vals, idxs.astype(np.int32), ptrs.astype(np.int32)), shape=metadata.shape)
+                # Keep FFI view pointers alive for the lifetime of the sparse matrix
+                result._ztensor_owners = (v_ref, i_ref, p_ref)
+                return result
             
             elif to == 'torch':
                 if not TORCH_AVAILABLE: raise ZTensorError("No Torch.")
-                t_vals = _torch.from_numpy(vals).clone()
-                t_indptr = _torch.from_numpy(ptrs.astype(np.int64)).clone() 
-                t_indices = _torch.from_numpy(idxs.astype(np.int64)).clone()
+                # PyTorch sparse tensors copy internally, so we need to copy data
+                t_vals = _torch.from_numpy(vals.copy())
+                t_indptr = _torch.from_numpy(ptrs.astype(np.int64))
+                t_indices = _torch.from_numpy(idxs.astype(np.int64))
                 return _torch.sparse_csr_tensor(t_indptr, t_indices, t_vals, size=metadata.shape)
 
         elif layout == "sparse_coo":
@@ -374,12 +379,17 @@ class Reader:
             if to == 'numpy':
                 if ndim != 2: raise ZTensorError("Scipy COO only supports 2D.")
                 from scipy.sparse import coo_matrix
-                return coo_matrix((vals, (coords[0], coords[1])), shape=metadata.shape)
+                # Create COO matrix with zero-copy views  
+                result = coo_matrix((vals, (coords[0], coords[1])), shape=metadata.shape)
+                # Keep FFI view pointers alive for the lifetime of the sparse matrix
+                result._ztensor_owners = (v_ref, c_ref)
+                return result
             
             elif to == 'torch':
                 if not TORCH_AVAILABLE: raise ZTensorError("No Torch.")
-                t_vals = _torch.from_numpy(vals).clone()
-                t_indices = _torch.from_numpy(coords.astype(np.int64)).clone()
+                # PyTorch sparse tensors copy internally
+                t_vals = _torch.from_numpy(vals.copy())
+                t_indices = _torch.from_numpy(coords.astype(np.int64))
                 return _torch.sparse_coo_tensor(t_indices, t_vals, size=metadata.shape)
 
         else:

@@ -417,6 +417,61 @@ class TestSparseTensors:
             loaded = r.read_tensor("coo")
             np.testing.assert_array_equal(loaded.toarray(), sparse.toarray())
 
+    @pytest.mark.skipif(not TORCH_AVAILABLE, reason="PyTorch not installed")
+    def test_sparse_csr_torch_roundtrip(self, temp_file):
+        """CSR sparse tensor roundtrip with PyTorch."""
+        # Create sparse matrix
+        dense = np.array([[1, 0, 2], [0, 0, 3], [4, 5, 6]], dtype=np.float32)
+        
+        try:
+            from scipy.sparse import csr_matrix
+            sparse = csr_matrix(dense)
+        except ImportError:
+            pytest.skip("scipy not installed")
+        
+        with Writer(temp_file) as w:
+            w.add_sparse_csr("sparse",
+                values=sparse.data,
+                indices=sparse.indices.astype(np.uint64),
+                indptr=sparse.indptr.astype(np.uint64),
+                shape=sparse.shape)
+        
+        with Reader(temp_file) as r:
+            loaded = r.read_tensor("sparse", to='torch')
+            assert loaded.is_sparse_csr
+            assert loaded.shape == sparse.shape
+            torch.testing.assert_close(loaded.to_dense(), torch.from_numpy(dense))
+
+    @pytest.mark.skipif(not TORCH_AVAILABLE, reason="PyTorch not installed")
+    def test_sparse_coo_torch_roundtrip(self, temp_file):
+        """COO sparse tensor roundtrip with PyTorch."""
+        # Create COO data
+        row = np.array([0, 1, 2])
+        col = np.array([1, 2, 0])
+        data = np.array([1.0, 2.0, 3.0], dtype=np.float32)
+        shape = (3, 3)
+        
+        # Expected dense result
+        expected_dense = np.zeros(shape, dtype=np.float32)
+        expected_dense[0, 1] = 1.0
+        expected_dense[1, 2] = 2.0
+        expected_dense[2, 0] = 3.0
+        
+        # Convert to SoA format for writing
+        coords = np.vstack([row, col]).astype(np.uint64).flatten()
+        
+        with Writer(temp_file) as w:
+            w.add_sparse_coo("coo",
+                values=data,
+                indices=coords,
+                shape=shape)
+        
+        with Reader(temp_file) as r:
+            loaded = r.read_tensor("coo", to='torch')
+            assert loaded.is_sparse
+            assert loaded.shape == shape
+            torch.testing.assert_close(loaded.to_dense(), torch.from_numpy(expected_dense))
+
 
 # ============================================================================
 # 5. PYTORCH TESTS
