@@ -429,6 +429,7 @@ class Reader:
                 1 if verify_checksum else 0
             )
             _check_ptr(arr_ptr, "read_tensors batch")
+            # Keep arr_ptr alive - it owns all the views
             arr_ptr = ffi.gc(arr_ptr, lib.ztensor_free_tensor_view_array)
             
             for idx, name in enumerate(dense_names):
@@ -436,15 +437,19 @@ class Reader:
                 meta = metadatas[dense_indices[idx]]
                 
                 if to == 'numpy':
-                    # Note: We need to keep the arr_ptr alive, so we store the reference
-                    buffer = ffi.buffer(view.data, view.len)
-                    arr = np.frombuffer(buffer, dtype=meta.dtype).reshape(meta.shape).copy()
-                    dense_results[name] = arr
+                    # Zero-copy: _ZTensorView keeps arr_ptr alive via view_ptr reference
+                    dense_results[name] = _ZTensorView(
+                        buffer=ffi.buffer(view.data, view.len),
+                        dtype=meta.dtype,
+                        shape=meta.shape,
+                        view_ptr=arr_ptr  # Keep the batch array alive
+                    )
                 elif to == 'torch':
                     if not TORCH_AVAILABLE: raise ZTensorError("PyTorch not installed.")
                     torch_dtype = DTYPE_ZT_TO_TORCH.get(meta.dtype_str)
                     buffer = ffi.buffer(view.data, view.len)
-                    tensor = _torch.frombuffer(buffer, dtype=torch_dtype).reshape(meta.shape).clone()
+                    tensor = _torch.frombuffer(buffer, dtype=torch_dtype).reshape(meta.shape)
+                    tensor._owner = arr_ptr  # Keep the batch array alive
                     dense_results[name] = tensor
         
         # Assemble final results
@@ -530,51 +535,47 @@ class Writer:
     def add_sparse_csr(self, name: str, values, indices, indptr, shape):
         """Adds a sparse CSR tensor."""
         if not self._ptr: raise ZTensorError("Writer is closed.")
+        
+        # Keep all arrays alive during FFI call
+        keepalive = []
 
-        def get_buffer_info(arr):
+        def get_buffer_info(arr, force_dtype=None):
             if isinstance(arr, np.ndarray):
+                if force_dtype is not None and arr.dtype != force_dtype:
+                    arr = arr.astype(force_dtype)
                 arr = np.ascontiguousarray(arr)
+                keepalive.append(arr)  # Prevent GC
                 ptr = ffi.cast("unsigned char*", arr.ctypes.data)
                 length = arr.nbytes
                 count = arr.size
                 dtype_str = DTYPE_NP_TO_ZT.get(arr.dtype)
-                return arr, ptr, length, count, dtype_str
+                return ptr, length, count, dtype_str
             elif TORCH_AVAILABLE and isinstance(arr, _torch.Tensor):
                 if arr.is_cuda: raise ZTensorError("CUDA tensors not supported. Move to CPU.")
                 arr = arr.contiguous()
+                keepalive.append(arr)  # Prevent GC
                 ptr = ffi.cast("unsigned char*", arr.data_ptr())
                 length = arr.numel() * arr.element_size()
                 count = arr.numel()
                 dtype_str = DTYPE_TORCH_TO_ZT.get(arr.dtype)
-                return arr, ptr, length, count, dtype_str
+                return ptr, length, count, dtype_str
             else:
                 raise TypeError(f"Unsupported array type: {type(arr)}")
 
-        v_arr, v_ptr, v_len, _, v_dtype = get_buffer_info(values)
-        i_arr, i_ptr, i_len, i_cnt, _ = get_buffer_info(indices)
-        p_arr, p_ptr, p_len, p_cnt, _ = get_buffer_info(indptr)
-
-        def ensure_u64_ptr(arr):
-            if isinstance(arr, np.ndarray):
-                if arr.dtype != np.uint64:
-                    arr = arr.astype(np.uint64)
-                arr = np.ascontiguousarray(arr)
-                return ffi.cast("uint64_t*", arr.ctypes.data), arr
-            elif TORCH_AVAILABLE and isinstance(arr, _torch.Tensor):
-                if arr.dtype != _torch.int64 and arr.dtype != _torch.int32:
-                    raise TypeError("Indices must be integer type.")
-                if arr.dtype == _torch.int32:
-                    arr = arr.to(_torch.int64)
-                arr = arr.contiguous()
-                return ffi.cast("uint64_t*", arr.data_ptr()), arr
-            else:
-                raise TypeError("Unsupported type")
-
-        i_ptr_u64, _i_keep = ensure_u64_ptr(indices)
-        p_ptr_u64, _p_keep = ensure_u64_ptr(indptr)
+        # Get values as bytes
+        v_ptr, v_len, _, v_dtype = get_buffer_info(values)
+        
+        # Convert indices and indptr to uint64
+        i_ptr, _, i_cnt, _ = get_buffer_info(indices, force_dtype=np.uint64)
+        p_ptr, _, p_cnt, _ = get_buffer_info(indptr, force_dtype=np.uint64)
+        
+        # Cast to u64* for FFI
+        i_ptr_u64 = ffi.cast("uint64_t*", ffi.cast("unsigned char*", i_ptr))
+        p_ptr_u64 = ffi.cast("uint64_t*", ffi.cast("unsigned char*", p_ptr))
         
         name_bytes = name.encode('utf-8')
         shape_array = np.array(shape, dtype=np.uint64)
+        keepalive.append(shape_array)
         shape_ptr = ffi.cast("uint64_t*", shape_array.ctypes.data)
         dtype_bytes = v_dtype.encode('utf-8')
 
@@ -584,8 +585,8 @@ class Writer:
             shape_ptr, len(shape),
             dtype_bytes,
             v_ptr, v_len,
-            i_ptr_u64, indices.shape[0] if hasattr(indices, 'shape') else len(indices),
-            p_ptr_u64, indptr.shape[0] if hasattr(indptr, 'shape') else len(indptr),
+            i_ptr_u64, i_cnt,
+            p_ptr_u64, p_cnt,
         )
         _check_status(status, f"add_sparse_csr: {name}")
 

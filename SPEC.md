@@ -1,259 +1,225 @@
-# zTensor File Format Specification
+# zTensor Specification
 
-**Version:** 1.0.0
+**Version:** 1.1.0  
+**Extension:** `.zt`
 
-**Status:** Draft Standard
+---
 
-**File Extension:** `.zt` (recommended)
+## Part I: The Container (Physical Layer)
 
-## 1\. Design Philosophy
+The zTensor Container is an append-only, binary-safe envelope. It handles storage, alignment, and compression but is agnostic to the logical meaning of the data.
 
-zTensor v1.0 separates **Physical Storage** (Components) from **Logical Tensors**.
+### 1. File Structure
 
-  * **Physical Layer:** A flat list of named, aligned, binary blobs (Components).
-  * **Logical Layer:** A metadata Manifest that describes how to assemble these components into high-level structures (Dense Tensors, Sparse Matrices, Graphs).
-
-This decoupling ensures that the file format does not need to change when new AI architectures (e.g., Ragged Tensors, Quantized LoRA adapters) are invented.
-
-## 2\. Global Constants
-
-  * **Endianness:** **Little-Endian (LE)** only. All integers and multi-byte data types must be written in LE.
-  * **Alignment:** **64 bytes**. All binary components must start at an offset divisible by 64.
-  * **Padding:** **Zero (`0x00`)**. All padding bytes used for alignment must be zero to prevent data leakage.
-  * **Memory Order:** **Row-major (C-contiguous)**. Dense tensors are stored in row-major order.
-
-## 3\. File Structure
-
-The file is written as an append-only stream. The index (Manifest) is located at the end to support streaming writes.
+The file is a stream of aligned binary blobs followed by a metadata index.
 
 ```text
-+---------------------------------------+
-| Magic Number (8 bytes)                |
-+---------------------------------------+ <--- Offset 8
-|                                       |
-| Component Blob A (Aligned 64B)        |
-|                                       |
-+---------------------------------------+
-| Zero Padding (0-63 bytes)             |
++---------------------------------------+ <--- Offset 0
+| Magic Header (8 bytes)                | ASCII: "ZTEN1000"
 +---------------------------------------+
 |                                       |
-| Component Blob B (Aligned 64B)        |
+| Component Blob A (Aligned 64B)        | <--- Offset % 64 == 0
 |                                       |
 +---------------------------------------+
-| ...                                   |
+| Zero Padding (0-63 bytes)             | <--- Must be 0x00
 +---------------------------------------+
-| CBOR Manifest (Metadata)              |
+| ... (Additional Blobs)                |
++---------------------------------------+
+| CBOR Manifest (Variable Size)         | <--- Standard CBOR (RFC 7049)
 +---------------------------------------+
 | Manifest Size (8 bytes, uint64 LE)    |
++---------------------------------------+
+| Magic Footer (8 bytes)                | ASCII: "ZTEN1000"
 +---------------------------------------+ <--- EOF
+
 ```
 
-### 3.1 Header & Footer
+### 2. Global Constants & Endianness
 
-| Field | Size | Type | Value / Description |
-| :--- | :--- | :--- | :--- |
-| **Magic Number** | 8 bytes | ASCII | `ZTEN1000` (Version 1.0) |
-| **Manifest Size** | 8 bytes | uint64 | Size of the CBOR payload in bytes. |
+* **Structural Integers:** **Little-Endian (LE)**
+* Applies to: `Manifest Size` (at EOF) and binary blob contents (unless specified otherwise by `dtype`).
 
------
 
-## 4\. The Manifest (Metadata)
+* **Manifest Encoding:** **CBOR (RFC 7049)**
+* Applies to: The internal structure of the metadata map.
+* *Note:* CBOR uses Network Byte Order (Big-Endian) for its internal length prefixes.
 
-The metadata is a **CBOR-encoded Map** located at the end of the file. Unlike v0.1, this is a **Manifest Object**, not a list.
 
-### 4.1 Root Structure
+* **Alignment:** **64 bytes**
+* All binary components must start at an offset divisible by 64.
+
+
+* **Padding:** **Zero (`0x00`)**
+* **Tail Protection:** The footer repeats the Magic Number to prevent crashes on truncated files.
+
+---
+
+## Part II: The Manifest (Metadata Layer)
+
+The Manifest is a **CBOR-encoded Map** located at `EOF - 16 - manifest_size`.
+
+### 1. Root Object
 
 ```json
 {
-  "version": "1.0",
-  "generator": "zTensor-Rust v0.1.0",
+  "version": "1.2.0",
   "attributes": {
-    "license": "Apache-2.0",
-    "description": "ResNet-50 Checkpoint",
     "framework": "PyTorch",
-    "created_at": "2024-01-15T10:30:00Z"
+    "license": "Apache-2.0"
   },
-  "tensors": {
+  "objects": {
     "layer1.weight": { ... },
     "layer1.bias": { ... }
   }
 }
+
 ```
 
-#### Recommended Attribute Keys
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `version` | string | **Yes** | The zTensor spec version (e.g., "1.2.0"). |
+| `attributes` | map | No | Global metadata (key-value pairs). |
+| `objects` | map | **Yes** | The map of logical tensor definitions. |
 
-| Key | Description |
-| :--- | :--- |
-| `license` | License identifier (e.g., `Apache-2.0`, `MIT`) |
-| `description` | Human-readable description of the file contents |
-| `framework` | Source framework (e.g., `PyTorch`, `TensorFlow`, `JAX`) |
-| `model_name` | Name of the model (e.g., `ResNet-50`, `Llama-3-8B`) |
-| `created_at` | ISO 8601 timestamp of file creation |
+### 2. The Logical Object (Tensor)
 
-### 4.2 Tensor Object Schema
-
-Each value in the `tensors` map represents a **Logical Tensor**.
+Defines the high-level geometry.
 
 | Field | Type | Description |
-| :--- | :--- | :--- |
-| `dtype` | string | Data type (`float32`, `float16`, `float64`, `bfloat16`, `int8`, `int16`, `int32`, `int64`, `uint8`, `uint16`, `uint32`, `uint64`, `bool`) |
-| `shape` | array | Dimensions, e.g., `[1024, 768]`. |
-| `format` | string | The schema used to assemble components (e.g., `dense`, `sparse_csr`, `sparse_coo`). |
-| `components` | map | Key-Value pairs mapping **Component Roles** to **Physical Locations**. |
+| --- | --- | --- |
+| `shape` | array | Logical dimensions (e.g., `[1024, 768]`). |
+| `format` | string | Layout schema (`dense`, `sparse_csr`, `quantized_group`, etc.). |
+| `components` | map | Mapping of **Roles** to **Component Definitions**. |
 
-### 4.3 Component Object Schema
+### 3. The Component Definition
 
-Describes a physical byte range in the file.
-
-| Field | Type | Description |
-| :--- | :--- | :--- |
-| `offset` | uint64 | Absolute file offset (Must be multiple of 64). |
-| `length` | uint64 | Size of the data in bytes (compressed size if encoded). |
-| `encoding` | string | Optional. `raw` (default) or `zstd`. |
-| `digest` | string | Optional. Checksum in format `algorithm:value`. Supported algorithms: `crc32c` (e.g., `crc32c:0x1A2B3C4D`), `sha256` (e.g., `sha256:8f4a...`). |
-
------
-
-## 5\. Logical Layouts (Schemas)
-
-The power of v1.0 lies in the `format` field. Parsers switch behavior based on this string.
-
-### 5.1 Format: `dense`
-
-Standard contiguous array in **row-major (C-contiguous)** order.
-
-  * **Required Components:** `data`
-  * **Description:** The raw binary dump of the tensor values.
-
-**Example Manifest Entry:**
+Defines the physical storage, typing, and encoding of a specific blob.
 
 ```json
-"embedding_table": {
-  "dtype": "float32",
-  "shape": [5000, 256],
-  "format": "dense",
-  "components": {
-    "data": { "offset": 64, "length": 5120000 }
-  }
+{
+  "dtype": "f8_e4m3",
+  "offset": 1024,
+  "length": 4096,
+  "encoding": "raw",
+  "digest": "sha256:8f4a..."
 }
+
 ```
 
-### 5.2 Format: `sparse_csr` (Compressed Sparse Row)
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `dtype` | string | **Req** | The primitive type of the data (see §2.4). |
+| `offset` | uint64 | **Req** | Absolute file offset (Must be multiple of 64). |
+| `length` | uint64 | **Req** | Size of the stored data in bytes. |
+| `encoding` | string | `"raw"` | `"raw"` (default) or `"zstd"`. |
+| `digest` | string | `null` | Optional checksum of the **content only** (ignoring padding). |
 
-Common for sparse matrices in scientific computing.
+### 4. Supported Data Types (`dtype`)
 
-  * **Required Components:**
-    1.  `values`: Non-zero elements (dtype as specified in tensor).
-    2.  `indices`: Column indices for values (`uint64`, 8 bytes per index).
-    3.  `indptr`: Row pointers (`uint64`, 8 bytes per pointer, length = rows + 1).
+| Category | Types | Storage Notes |
+| --- | --- | --- |
+| **Floats** | `f64`, `f32`, `f16`, `bf16` | IEEE 754 Little-Endian. |
+| **Float8** | `f8_e4m3`, `f8_e5m2` | OCP/NVIDIA Standard. Little-Endian. |
+| **Complex** | `complex64`, `complex128` | Stored as contiguous pairs `[real, imag]`. |
+| **Signed Int** | `i64`, `i32`, `i16`, `i8` | Two's complement Little-Endian. |
+| **Unsigned** | `u64`, `u32`, `u16`, `u8` | Little-Endian. |
+| **Boolean** | `bool` | **1 Byte per Bool.**<br>
 
-**Example Manifest Entry:**
+<br>`0x00` = False, `0x01` = True.<br>
 
-```json
-"adjacency_matrix": {
-  "dtype": "float32",
-  "shape": [1000, 1000],
-  "format": "sparse_csr",
-  "components": {
-    "values":  { "offset": 64, "length": 400 },
-    "indices": { "offset": 512, "length": 400 },
-    "indptr":  { "offset": 960, "length": 8008 }
-  }
-}
-```
+<br>*Allows direct mmap.* |
 
-### 5.3 Format: `sparse_coo` (Coordinate List)
+---
 
-Common for PyTorch sparse tensors.
+## Part III: Standard Layouts (Logical Layer)
 
-  * **Required Components:**
-    1.  `values`: Non-zero elements (dtype as specified in tensor).
-    2.  `coords`: Coordinate matrix (`uint64`, 8 bytes per index).
+### 1. Format: `dense`
 
-**Coordinate Storage Order:**
-The `coords` component stores a flattened matrix of shape $(ndim \times nnz)$ in **row-major order**:
-  - First `nnz` values are indices for dimension 0
-  - Next `nnz` values are indices for dimension 1
-  - And so on for each dimension
+Standard contiguous array in **Row-Major (C-contiguous)** order.
 
-**Example Manifest Entry:**
+* **Required Components:** `data`
+* **Memory Mapping:** Readers **SHOULD** mmap `data` if `encoding` is `raw`.
 
-```json
-"sparse_embeddings": {
-  "dtype": "float32",
-  "shape": [10000, 512],
-  "format": "sparse_coo",
-  "components": {
-    "values": { "offset": 64, "length": 4000 },
-    "coords": { "offset": 4096, "length": 16000 }
-  }
-}
-```
+### 2. Format: `sparse_csr`
 
-In this example, `coords` contains 2000 `uint64` values (2 dimensions × 1000 non-zeros).
+Compressed Sparse Row. Allows mixed types (e.g., `f32` values with `u16` indices).
 
------
+* **Required Components:**
+1. `values`: Non-zero elements.
+2. `indices`: Column indices (Integer).
+3. `indptr`: Row pointers (Integer, size = rows + 1).
 
-## 6\. Parsing Algorithm
 
-To read a zTensor v1.0 file:
 
-1.  **Read Footer:** Seek to `FILE_SIZE - 8`. Read 8 bytes as `uint64` (Little Endian) to get `manifest_size`.
-2.  **Validate Size:** Verify `manifest_size < FILE_SIZE - 16` to prevent overflow.
-3.  **Read Manifest:** Seek to `FILE_SIZE - 8 - manifest_size`. Read `manifest_size` bytes.
-4.  **Decode:** Parse bytes as CBOR.
-5.  **Check Version:** Compare `version` field. See §6.1 for version negotiation rules.
-6.  **Select Tensor:** Look up the desired tensor by name in the `tensors` map.
-7.  **Check Format:**
-      * If `dense`: Locate the `data` component.
-      * If `sparse_...`: Locate the specific components required by that format.
-8.  **Retrieve Data:**
-      * Seek to `component.offset`.
-      * Read `component.length` bytes.
-      * If `encoding == "zstd"`, decompress.
-      * If `encoding == "raw"` or absent, cast bytes to `dtype` (using Little Endian).
+### 3. Format: `sparse_coo`
 
-### 6.1 Version Negotiation
+Coordinate List.
 
-Versioning follows **Semantic Versioning** principles:
+* **Required Components:**
+1. `values`: Non-zero elements.
+2. `coords`: Coordinate indices.
 
-| File Version | Reader Behavior |
-| :--- | :--- |
-| Same major & minor (e.g., `1.0` ↔ `1.0`) | ✅ Proceed normally |
-| Same major, higher minor (e.g., file `1.1`, reader `1.0`) | ⚠️ Warn, proceed (may miss new features) |
-| Same major, lower minor (e.g., file `1.0`, reader `1.1`) | ✅ Proceed normally |
-| Different major (e.g., file `2.0`, reader `1.x`) | ❌ Fail with version error |
 
------
+* **Coordinate Ordering:** `coords` is a flattened array of shape `(ndim * nnz)` stored in **Structure-of-Arrays (SoA)** order.
+* *Storage Order:* `[row_indices... , col_indices...]`
 
-## 7\. Implementation Guidelines
 
-### 7.1 Security
 
-  * Readers **MUST** verify that `offset + length <= FILE_SIZE`.
-  * Readers **MUST** verify that `manifest_size < FILE_SIZE - 16` (magic header + footer).
-  * Readers **SHOULD** warn if `offset` is not 64-byte aligned (performance warning).
-  * Readers **SHOULD** validate checksums when `digest` is present.
+### 4. Format: `quantized_group` (e.g., GPTQ)
 
-### 7.2 Memory Mapping
+Block-wise quantization where weights are packed, and scales/zeros are kept in higher precision.
 
-For `dense` tensors with `encoding: "raw"`, readers should prefer **memory mapping (mmap)**. The 64-byte alignment guarantees that the pointer returned by mmap is valid for SIMD operations (AVX-512) without copying.
+* **Required Components:**
+1. `packed_weight`: The quantized data (e.g., `i32` or `u8` acting as a container).
+2. `scales`: Scaling factors.
+3. `zeros`: Zero-points.
 
-### 7.3 Extensions
 
-New formats (e.g., `quantized_4bit`) can be added simply by defining which components they require (e.g., `data`, `scale`, `zero_point`), without changing the file version.
 
-**Example: Quantized 4-bit Format**
+**Example (4-bit GPTQ):** Logical shape `[4096, 4096]`, but physically stored as packed `i32`.
 
 ```json
-"quantized_layer": {
-  "dtype": "uint8",
+"model.layers.0.self_attn.q_proj": {
   "shape": [4096, 4096],
-  "format": "quantized_4bit",
+  "format": "quantized_group",
+  "attributes": {
+    "bits": 4,
+    "group_size": 128,
+    "packing": "8_per_i32"
+  },
   "components": {
-    "data": { "offset": 64, "length": 8388608 },
-    "scale": { "offset": 8388672, "length": 16384 },
-    "zero_point": { "offset": 8405056, "length": 16384 }
+    "packed_weight": { "dtype": "i32", "offset": 1024, "length": 8388608 }, 
+    "scales":        { "dtype": "f16", "offset": 8389632, "length": 262144 },
+    "zeros":         { "dtype": "f16", "offset": 8651776, "length": 262144 }
   }
 }
+
+```
+
+---
+
+## Part IV: Parsing & Safety
+
+### 1. Parsing Algorithm
+
+1. **Read Footer:** Seek to `EOF - 16`. Read 16 bytes.
+2. **Verify Magic:** Ensure the last 8 bytes are `ZTEN1000`. If not, the file is corrupt.
+3. **Read Size:** Decode the first 8 bytes as `uint64` (**Little-Endian**) to get `manifest_size`.
+4. **Safety Check:** If `manifest_size > 1,073,741,824` (1GB), the parser **MUST** abort to prevent DoS/OOM attacks.
+5. **Read Manifest:** Seek to `EOF - 16 - manifest_size`. Read `manifest_size` bytes.
+6. **Decode CBOR:** Pass the buffer to a standard CBOR decoder. The decoder handles the internal structure (Big-Endian lengths) per RFC 7049.
+7. **Load Component:**
+* Seek to `component.offset`.
+* Read `component.length`.
+* If `component.encoding == "zstd"`, decompress buffer.
+* Cast result to `component.dtype` (interpreting binary data as **Little-Endian**).
+
+
+
+### 2. Security Guidelines
+
+* **No Execution:** Parsers **MUST NOT** execute any data (no pickle/eval).
+* **Bounds Check:** `offset + length` MUST NOT exceed `FILE_SIZE`.
+* **Padding Integrity:** Parsers generally ignore padding bytes, but writers **MUST** set them to `0x00` to ensure identical file hashes for identical content.
+
 ```

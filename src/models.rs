@@ -1,95 +1,119 @@
-use crate::error::ZTensorError;
+//! Data models for zTensor v1.1 format.
+
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-pub const MAGIC_NUMBER: &[u8; 8] = b"ZTEN1000";
+/// Magic number for zTensor files (header and footer).
+pub const MAGIC: &[u8; 8] = b"ZTEN1000";
+
+/// Required alignment for component data (64 bytes for AVX-512).
 pub const ALIGNMENT: u64 = 64;
 
-/// Data types supported by zTensor 1.0
+/// Maximum manifest size (1GB) to prevent DoS attacks.
+pub const MAX_MANIFEST_SIZE: u64 = 1_073_741_824;
+
+/// Supported data types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")] // Use lowercase for serialization as per spec examples
+#[serde(rename_all = "lowercase")]
 pub enum DType {
-    Float64,
-    Float32,
-    Float16,
-    BFloat16,
-    Int64,
-    Int32,
-    Int16,
-    Int8,
-    Uint64,
-    Uint32,
-    Uint16,
-    Uint8,
+    F64,
+    F32,
+    F16,
+    #[serde(rename = "bf16")]
+    BF16,
+    I64,
+    I32,
+    I16,
+    I8,
+    U64,
+    U32,
+    U16,
+    U8,
     Bool,
 }
 
 impl DType {
-    /// Returns the size of a single element of this data type in bytes.
-    pub fn byte_size(&self) -> Result<usize, ZTensorError> {
+    /// Returns the size of one element in bytes.
+    pub fn byte_size(&self) -> usize {
         match self {
-            DType::Float64 | DType::Int64 | DType::Uint64 => Ok(8),
-            DType::Float32 | DType::Int32 | DType::Uint32 => Ok(4),
-            DType::Float16 | DType::BFloat16 | DType::Int16 | DType::Uint16 => Ok(2),
-            DType::Int8 | DType::Uint8 | DType::Bool => Ok(1),
+            Self::F64 | Self::I64 | Self::U64 => 8,
+            Self::F32 | Self::I32 | Self::U32 => 4,
+            Self::F16 | Self::BF16 | Self::I16 | Self::U16 => 2,
+            Self::I8 | Self::U8 | Self::Bool => 1,
         }
     }
 
-    /// Checks if the data type is multi-byte.
+    /// Returns true if the type is multi-byte (needs endianness handling).
     pub fn is_multi_byte(&self) -> bool {
-        self.byte_size().map_or(false, |size| size > 1)
+        self.byte_size() > 1
     }
 
-    /// Returns the string representation of the DType.
-    pub fn to_string_key(&self) -> String {
+    /// Returns the string key for this dtype.
+    pub fn as_str(&self) -> &'static str {
         match self {
-            DType::Float64 => "float64".to_string(),
-            DType::Float32 => "float32".to_string(),
-            DType::Float16 => "float16".to_string(),
-            DType::BFloat16 => "bfloat16".to_string(),
-            DType::Int64 => "int64".to_string(),
-            DType::Int32 => "int32".to_string(),
-            DType::Int16 => "int16".to_string(),
-            DType::Int8 => "int8".to_string(),
-            DType::Uint64 => "uint64".to_string(),
-            DType::Uint32 => "uint32".to_string(),
-            DType::Uint16 => "uint16".to_string(),
-            DType::Uint8 => "uint8".to_string(),
-            DType::Bool => "bool".to_string(),
+            Self::F64 => "f64",
+            Self::F32 => "f32",
+            Self::F16 => "f16",
+            Self::BF16 => "bf16",
+            Self::I64 => "i64",
+            Self::I32 => "i32",
+            Self::I16 => "i16",
+            Self::I8 => "i8",
+            Self::U64 => "u64",
+            Self::U32 => "u32",
+            Self::U16 => "u16",
+            Self::U8 => "u8",
+            Self::Bool => "bool",
         }
     }
 }
 
-/// Tensor data encoding types.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// Data encoding for components.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum Encoding {
+    #[default]
     Raw,
     Zstd,
 }
 
-/// Describes a physical byte range in the file.
+/// Physical storage location and metadata for a data blob.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Component {
+    /// Data type of this component.
+    pub dtype: DType,
+    /// Absolute file offset (must be 64-byte aligned).
     pub offset: u64,
+    /// Size of stored data in bytes.
     pub length: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub encoding: Option<Encoding>,
+    /// Encoding method (default: raw).
+    #[serde(default, skip_serializing_if = "is_default_encoding")]
+    pub encoding: Encoding,
+    /// Optional checksum (e.g., "sha256:..." or "crc32c:0x...").
     #[serde(skip_serializing_if = "Option::is_none")]
     pub digest: Option<String>,
 }
 
-/// Logical Tensor definition.
+fn is_default_encoding(enc: &Encoding) -> bool {
+    *enc == Encoding::Raw
+}
+
+/// Logical object (tensor) definition.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Tensor {
-    pub dtype: DType,
+pub struct Object {
+    /// Logical dimensions (e.g., [1024, 768]).
     pub shape: Vec<u64>,
-    pub format: String, // e.g., "dense", "sparse_csr", "sparse_coo"
+    /// Layout schema (dense, sparse_csr, sparse_coo, quantized_group, etc.).
+    pub format: String,
+    /// Object-level attributes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attributes: Option<BTreeMap<String, serde_cbor::Value>>,
+    /// Mapping of roles to component definitions.
     pub components: BTreeMap<String, Component>,
 }
 
-impl Tensor {
-    /// Calculates the expected number of elements from the shape.
+impl Object {
+    /// Calculates the number of elements from the shape.
     pub fn num_elements(&self) -> u64 {
         if self.shape.is_empty() {
             1
@@ -99,37 +123,38 @@ impl Tensor {
     }
 }
 
-/// The Manifest (Metadata) located at the end of the file.
+/// Root manifest structure.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Manifest {
+    /// zTensor spec version (e.g., "1.1.0").
     pub version: String,
-    pub generator: String,
-    pub attributes: BTreeMap<String, String>,
-    pub tensors: BTreeMap<String, Tensor>,
+    /// Global metadata key-value pairs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attributes: Option<BTreeMap<String, String>>,
+    /// Map of object names to definitions.
+    pub objects: BTreeMap<String, Object>,
 }
 
 impl Default for Manifest {
     fn default() -> Self {
         Self {
-            version: "1.0".to_string(),
-            generator: "zTensor-Rust v0.1.0".to_string(),
-            attributes: BTreeMap::new(),
-            tensors: BTreeMap::new(),
+            version: "1.1.0".to_string(),
+            attributes: None,
+            objects: BTreeMap::new(),
         }
     }
 }
 
-/// Data encoding types for Layout is replaced by String "format" in v1.0.
-/// We rely on string matching as per spec.
-
-/// Specifies the checksum algorithm to be used by the writer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Checksum algorithm for writing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ChecksumAlgorithm {
+    #[default]
     None,
     Crc32c,
+    Sha256,
 }
 
-/// In-memory representation for COO sparse tensors.
+/// In-memory COO sparse tensor.
 #[derive(Debug, Clone)]
 pub struct CooTensor<T> {
     pub shape: Vec<u64>,
@@ -138,13 +163,11 @@ pub struct CooTensor<T> {
     pub values: Vec<T>,
 }
 
-/// In-memory representation for CSR sparse tensors.
+/// In-memory CSR sparse tensor.
 #[derive(Debug, Clone)]
 pub struct CsrTensor<T> {
     pub shape: Vec<u64>,
     pub indptr: Vec<u64>,
-    /// Column indices for each non-zero value
     pub indices: Vec<u64>,
     pub values: Vec<T>,
 }
-
