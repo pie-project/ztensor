@@ -2725,6 +2725,7 @@ name = "ztensor-cli"
 version = "1.1.0"
 dependencies = [
  "anyhow",
+ "bytemuck",
  "clap",
  "comfy-table",
  "gguf-rs",
@@ -2733,7 +2734,9 @@ dependencies = [
  "indicatif",
  "memmap2",
  "safetensors",
+ "serde",
  "serde-pickle",
+ "serde_cbor",
  "tempfile",
  "ztensor",
 ]

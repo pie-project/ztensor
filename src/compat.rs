@@ -74,7 +74,7 @@ impl LegacyTensorMeta {
 /// Converts v0.1.0 format to v1.1 internal representation for unified API.
 pub struct LegacyReader<R: Read + Seek> {
     reader: R,
-    manifest: Manifest,
+    pub manifest: Manifest,
 }
 
 impl LegacyReader<BufReader<File>> {

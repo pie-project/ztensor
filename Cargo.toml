@@ -1,6 +1,6 @@
 [package]
 name = "ztensor"
-version = "1.1.0"
+version = "1.1.1"
 edition = "2021"
 authors = ["In Gim <in.gim@yale.edu>"]
 description = "zTensor file library - v1.1 spec"

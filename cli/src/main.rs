@@ -285,24 +285,48 @@ fn main() -> Result<()> {
             println!("Successfully migrated {} to {}", input, output);
         }
         Some(Commands::Info { file }) => {
-            let reader = ZTensorReader::open(file)
-                .map_err(|e| anyhow::anyhow!("Failed to open file '{}': {}", file, e))?;
-            let objects = reader.list_objects();
-            
-            println!("File: {}", file);
-            println!("Version: {}", reader.manifest.version);
-            println!("Attributes: {:?}", reader.manifest.attributes);
-            println!("Total Objects: {}", objects.len());
-            println!();
+            // Check for legacy format first
+            if ztensor::is_legacy_file(file)? {
+                let reader = ztensor::LegacyReader::open(file)
+                    .map_err(|e| anyhow::anyhow!("Failed to open legacy file '{}': {}", file, e))?;
+                
+                let objects = reader.list_objects();
+                
+                println!("File: {}", file);
+                println!("Version: {} (Legacy)", reader.manifest.version);
+                println!("Attributes: {:?}", reader.manifest.attributes);
+                println!("Total Objects: {}", objects.len());
+                println!();
 
-            if objects.len() < 20 {
-                for (name, obj) in objects {
-                   println!("--- Object: {} ---", name);
-                   print_tensor_metadata(name, obj);
-                   println!();
+                if objects.len() < 20 {
+                    for (name, obj) in objects {
+                       println!("--- Object: {} ---", name);
+                       print_tensor_metadata(name, obj);
+                       println!();
+                    }
+                } else {
+                    print_tensors_table(objects);
                 }
             } else {
-                print_tensors_table(objects);
+                let reader = ZTensorReader::open(file)
+                    .map_err(|e| anyhow::anyhow!("Failed to open file '{}': {}", file, e))?;
+                let objects = reader.list_objects();
+                
+                println!("File: {}", file);
+                println!("Version: {}", reader.manifest.version);
+                println!("Attributes: {:?}", reader.manifest.attributes);
+                println!("Total Objects: {}", objects.len());
+                println!();
+
+                if objects.len() < 20 {
+                    for (name, obj) in objects {
+                       println!("--- Object: {} ---", name);
+                       print_tensor_metadata(name, obj);
+                       println!();
+                    }
+                } else {
+                    print_tensors_table(objects);
+                }
             }
         }
         Some(Commands::Merge { inputs, output, delete_original }) => {
