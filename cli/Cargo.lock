@@ -2722,7 +2722,7 @@ dependencies = [
 
 [[package]]
 name = "ztensor-cli"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "clap",
