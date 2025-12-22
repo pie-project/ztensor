@@ -50,6 +50,8 @@ pub enum ZTensorError {
     },
     /// Manifest exceeds maximum allowed size (1GB).
     ManifestTooLarge { size: u64 },
+    /// Object exceeds maximum allowed size.
+    ObjectTooLarge { size: u64, limit: u64 },
     /// Other unspecified error.
     Other(String),
 }
@@ -101,6 +103,13 @@ impl fmt::Display for ZTensorError {
             ),
             Self::ManifestTooLarge { size } => {
                 write!(f, "Manifest size {} exceeds 1GB limit", size)
+            }
+            Self::ObjectTooLarge { size, limit } => {
+                write!(
+                    f,
+                    "Object size {} exceeds limit of {} (2GB)",
+                    size, limit
+                )
             }
             Self::Other(msg) => write!(f, "{}", msg),
         }

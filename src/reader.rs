@@ -12,6 +12,9 @@ use crate::error::ZTensorError;
 use crate::models::{Component, CooTensor, CsrTensor, DType, Encoding, Manifest, Object, ALIGNMENT, MAGIC, MAX_MANIFEST_SIZE};
 use crate::utils::swap_endianness_in_place;
 
+/// Max object size (1GB).
+const MAX_OBJECT_SIZE: u64 = 1 * 1024 * 1024 * 1024;
+
 /// Trait for types that can be safely read from bytes.
 pub trait Pod: Sized + Default + Clone {
     const SIZE: usize = std::mem::size_of::<Self>();
@@ -323,6 +326,13 @@ impl<R: Read + Seek> ZTensorReader<R> {
         let num_elements = obj.num_elements();
         let expected_size = num_elements * component.dtype.byte_size() as u64;
 
+        if expected_size > MAX_OBJECT_SIZE {
+            return Err(ZTensorError::ObjectTooLarge {
+                size: expected_size,
+                limit: MAX_OBJECT_SIZE,
+            });
+        }
+
         let mut data = vec![0u8; expected_size as usize];
         let ctx = ReadContext::new(name, "data");
         self.read_component_into(component, &mut data, &ctx, verify_checksum)?;
@@ -383,8 +393,16 @@ impl<R: Read + Seek> ZTensorReader<R> {
         let component = component.clone();
         let num_elements = if obj.shape.is_empty() { 1 } else { obj.shape.iter().product::<u64>() as usize };
 
-        let mut typed_data = vec![T::default(); num_elements];
         let byte_len = num_elements * T::SIZE;
+
+        if byte_len as u64 > MAX_OBJECT_SIZE {
+            return Err(ZTensorError::ObjectTooLarge {
+                size: byte_len as u64,
+                limit: MAX_OBJECT_SIZE,
+            });
+        }
+
+        let mut typed_data = vec![T::default(); num_elements];
         let output_slice = unsafe {
             std::slice::from_raw_parts_mut(typed_data.as_mut_ptr() as *mut u8, byte_len)
         };
@@ -407,6 +425,12 @@ impl<R: Read + Seek> ZTensorReader<R> {
         match component.encoding {
             Encoding::Zstd => {
                 let bytes = self.read_component(component)?;
+                if bytes.len() as u64 > MAX_OBJECT_SIZE {
+                    return Err(ZTensorError::ObjectTooLarge {
+                        size: bytes.len() as u64,
+                        limit: MAX_OBJECT_SIZE,
+                    });
+                }
                 let num_elements = bytes.len() / T::SIZE;
                 let mut values = vec![T::default(); num_elements];
                 unsafe {
@@ -416,6 +440,12 @@ impl<R: Read + Seek> ZTensorReader<R> {
                 Ok(values)
             }
             Encoding::Raw => {
+                if component.length > MAX_OBJECT_SIZE {
+                    return Err(ZTensorError::ObjectTooLarge {
+                        size: component.length,
+                        limit: MAX_OBJECT_SIZE,
+                    });
+                }
                 let num_elements = component.length as usize / T::SIZE;
                 let mut values = vec![T::default(); num_elements];
                 let byte_slice = unsafe {
@@ -438,6 +468,12 @@ impl<R: Read + Seek> ZTensorReader<R> {
         let mut bytes = match component.encoding {
             Encoding::Zstd => self.read_component(component)?,
             Encoding::Raw => {
+                if component.length > MAX_OBJECT_SIZE {
+                    return Err(ZTensorError::ObjectTooLarge {
+                        size: component.length,
+                        limit: MAX_OBJECT_SIZE,
+                    });
+                }
                 let mut buf = vec![0u8; component.length as usize];
                 self.read_component_into(component, &mut buf, ctx, true)?;
                 buf
@@ -547,5 +583,71 @@ impl<R: Read + Seek> ZTensorReader<R> {
         let indptr = self.read_u64_component(&ptr_comp, &ptr_ctx)?;
 
         Ok(CsrTensor { shape, indptr, indices, values })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+    use crate::models::{DType, Component, Encoding};
+
+    #[test]
+    fn test_oom_protection() {
+        // defined constant in reader.rs is 2GB
+        // Create an object that requires > 2GB
+        // 3 billion bytes > 2GB
+        let huge_size: u64 = 3_000_000_000;
+        
+        // Mock manifest components
+        let mut objects = BTreeMap::new();
+        let mut components = BTreeMap::new();
+        components.insert("data".to_string(), Component {
+            dtype: DType::U8,
+            encoding: Encoding::Raw,
+            offset: 0,
+            length: huge_size, // usage in read_component variants
+            digest: None,
+        });
+
+        objects.insert("huge_tensor".to_string(), Object {
+            format: "dense".to_string(),
+            shape: vec![huge_size], // usage for num_elements calculation
+            components,
+            attributes: None,
+        });
+
+        let manifest = Manifest {
+            version: "1.1.0".to_string(),
+            objects,
+            attributes: None,
+        };
+
+        // Mock reader (empty since we won't actually read 3GB)
+        let cursor = Cursor::new(vec![]);
+        let mut reader = ZTensorReader {
+            reader: cursor,
+            manifest,
+        };
+
+        // Test read_object_as
+        let result = reader.read_object_as::<u8>("huge_tensor");
+        match result {
+            Err(ZTensorError::ObjectTooLarge { size, limit }) => {
+                assert_eq!(size, huge_size);
+                assert_eq!(limit, MAX_OBJECT_SIZE);
+            }
+            _ => panic!("Expected ObjectTooLarge error, got {:?}", result),
+        }
+
+        // Test read_object (which uses read_dense_impl)
+        let result = reader.read_object("huge_tensor", false);
+        match result {
+            Err(ZTensorError::ObjectTooLarge { size, limit }) => {
+                assert_eq!(size, huge_size);
+                assert_eq!(limit, MAX_OBJECT_SIZE);
+            }
+            _ => panic!("Expected ObjectTooLarge error, got {:?}", result),
+        }
     }
 }
