@@ -324,24 +324,52 @@ class Reader:
         layout = metadata.layout
 
         if layout == "dense":
+            # Optimization: Try zero-copy for raw tensors
             name_bytes = name.encode('utf-8')
-            view_ptr = lib.ztensor_reader_read_tensor(self._ptr, name_bytes, 1 if verify_checksum else 0)
-            _check_ptr(view_ptr, f"read_tensor: {name}")
+            view_ptr = ffi.NULL
+            is_zero_copy = False
+            
+            if metadata.encoding == 'raw':
+                # Try to get a zero-copy slice
+                try:
+                    view_ptr = lib.ztensor_reader_get_tensor_slice(self._ptr, name_bytes)
+                except AttributeError:
+                    # Fallback if library doesn't have the function yet (e.g. old build)
+                    pass
+                
+                if view_ptr != ffi.NULL:
+                    is_zero_copy = True
+
+            if not is_zero_copy:
+                # Fallback to standard read (copy)
+                view_ptr = lib.ztensor_reader_read_tensor(self._ptr, name_bytes, 1 if verify_checksum else 0)
+                _check_ptr(view_ptr, f"read_tensor: {name}")
+
             view_ptr = ffi.gc(view_ptr, lib.ztensor_free_tensor_view)
 
             if to == 'numpy':
-                return _ZTensorView(
+                arr = _ZTensorView(
                     buffer=ffi.buffer(view_ptr.data, view_ptr.len),
                     dtype=metadata.dtype,
                     shape=metadata.shape,
                     view_ptr=view_ptr
                 )
+                if is_zero_copy:
+                    arr._reader_ref = self
+                return arr
+                
             elif to == 'torch':
                 if not TORCH_AVAILABLE: raise ZTensorError("PyTorch not installed.")
                 torch_dtype = DTYPE_ZT_TO_TORCH.get(metadata.dtype_str)
                 buffer = ffi.buffer(view_ptr.data, view_ptr.len)
+                
+                # Note: frombuffer normally shares memory.
+                # If the buffer is read-only (which mmap might be), PyTorch might copy if it needs mutable tensor.
+                # zTensor mmap is read-only usually, so this should be fine for inference.
                 torch_tensor = _torch.frombuffer(buffer, dtype=torch_dtype).reshape(metadata.shape)
                 torch_tensor._owner = view_ptr
+                if is_zero_copy:
+                    torch_tensor._reader_ref = self
                 return torch_tensor
 
         elif layout == "sparse_csr":
@@ -448,18 +476,25 @@ class Reader:
                 
                 if to == 'numpy':
                     # Zero-copy: _ZTensorView keeps arr_ptr alive via view_ptr reference
-                    dense_results[name] = _ZTensorView(
+                    arr = _ZTensorView(
                         buffer=ffi.buffer(view.data, view.len),
                         dtype=meta.dtype,
                         shape=meta.shape,
                         view_ptr=arr_ptr  # Keep the batch array alive
                     )
+                    # If this is a zero-copy view (owner is null), we must keep Reader alive
+                    if view._owner == ffi.NULL:
+                        arr._reader_ref = self
+                    dense_results[name] = arr
                 elif to == 'torch':
                     if not TORCH_AVAILABLE: raise ZTensorError("PyTorch not installed.")
                     torch_dtype = DTYPE_ZT_TO_TORCH.get(meta.dtype_str)
                     buffer = ffi.buffer(view.data, view.len)
                     tensor = _torch.frombuffer(buffer, dtype=torch_dtype).reshape(meta.shape)
                     tensor._owner = arr_ptr  # Keep the batch array alive
+                    
+                    if view._owner == ffi.NULL:
+                        tensor._reader_ref = self
                     dense_results[name] = tensor
         
         # Assemble final results

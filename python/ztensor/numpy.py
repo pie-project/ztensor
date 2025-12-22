@@ -113,13 +113,24 @@ def load_file(
         >>> file_path = "./my_folder/bert.zt"
         >>> loaded = load_file(file_path)
     """
-    with Reader(str(filename)) as reader:
+    # Create Reader instance directly without context manager
+    # This is crucial for zero-copy views: if the reader is closed (via __exit__),
+    # the memory-mapped data becomes invalid.
+    # The reader is kept alive by the returned arrays via their `_reader_ref`.
+    reader = Reader(str(filename))
+    try:
         names = reader.tensor_names
         if not names:
             return {}
-        # Use batch API for efficiency (already returns owned copies)
+        # Use batch API for efficiency
         tensors = reader.read_tensors(names, to='numpy')
         return dict(zip(names, tensors))
+    except Exception:
+        # If an error occurs during loading, we should close the reader
+        # to prevent resource leaks (though GC would eventually do it).
+        lib.ztensor_reader_free(reader._ptr)
+        reader._ptr = None
+        raise
 
 
 def load(data: bytes) -> Dict[str, np.ndarray]:

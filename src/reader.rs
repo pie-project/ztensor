@@ -127,6 +127,97 @@ impl ZTensorReader<Cursor<Mmap>> {
         let mmap = unsafe { Mmap::map(&file)? };
         Self::new(Cursor::new(mmap))
     }
+
+    /// Gets a zero-copy reference to an object's data.
+    ///
+    /// This is only available for:
+    /// - Memory-mapped readers
+    /// - Dense objects
+    /// - Raw encoding (not compressed)
+    pub fn get_object_slice(&self, name: &str) -> Result<&[u8], ZTensorError> {
+        let obj = self.manifest.objects.get(name)
+            .ok_or_else(|| ZTensorError::ObjectNotFound(name.to_string()))?;
+
+        if obj.format != "dense" {
+            return Err(ZTensorError::TypeMismatch {
+                expected: "dense".to_string(),
+                found: obj.format.clone(),
+                context: format!("object '{}'", name),
+            });
+        }
+
+        let component = obj.components.get("data").ok_or_else(|| {
+            ZTensorError::InvalidFileStructure(format!(
+                "Dense object '{}' missing 'data' component",
+                name
+            ))
+        })?;
+
+        if component.encoding != Encoding::Raw {
+            return Err(ZTensorError::Other(format!(
+                "Zero-copy not supported for compressed component in '{}'", name
+            )));
+        }
+
+        // Validate alignment
+        if component.offset % ALIGNMENT != 0 {
+            return Err(ZTensorError::InvalidAlignment {
+                offset: component.offset,
+                alignment: ALIGNMENT,
+            });
+        }
+
+        let mmap = self.reader.get_ref();
+        let start = component.offset as usize;
+        let end = start + component.length as usize;
+
+        if end > mmap.len() {
+            return Err(ZTensorError::InvalidFileStructure(format!(
+                "Component '{}' out of bounds (end={} > file_len={})",
+                name, end, mmap.len()
+            )));
+        }
+
+        Ok(&mmap[start..end])
+    }
+
+    /// Gets a typed zero-copy reference to an object's data.
+    pub fn get_object_slice_as<T: Pod>(&self, name: &str) -> Result<&[T], ZTensorError> {
+        let obj = self.manifest.objects.get(name)
+            .ok_or_else(|| ZTensorError::ObjectNotFound(name.to_string()))?;
+        
+        let component = obj.components.get("data").ok_or_else(|| {
+            ZTensorError::InvalidFileStructure(format!("Missing 'data' component for {}", name))
+        })?;
+
+        if !T::dtype_matches(&component.dtype) {
+             return Err(ZTensorError::TypeMismatch {
+                expected: component.dtype.as_str().to_string(),
+                found: std::any::type_name::<T>().to_string(),
+                context: format!("object '{}'", name),
+            });
+        }
+
+        let bytes = self.get_object_slice(name)?;
+        
+        // Safety checks for casting
+        if bytes.len() % T::SIZE != 0 {
+            return Err(ZTensorError::InvalidFileStructure(format!(
+                "Byte length {} is not a multiple of type size {}",
+                bytes.len(), T::SIZE
+            )));
+        }
+        
+        let ptr = bytes.as_ptr();
+        if (ptr as usize) % std::mem::align_of::<T>() != 0 {
+            return Err(ZTensorError::Other(format!(
+                "Memory not aligned for type {}", std::any::type_name::<T>()
+            )));
+        }
+
+        let len = bytes.len() / T::SIZE;
+        Ok(unsafe { std::slice::from_raw_parts(ptr as *const T, len) })
+    }
 }
 
 impl<R: Read + Seek> ZTensorReader<R> {

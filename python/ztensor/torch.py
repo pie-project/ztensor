@@ -135,7 +135,9 @@ def load_file(
         device = f"cuda:{device}"
     target_device = torch.device(device)
     
-    with Reader(str(filename)) as reader:
+    # Create Reader instance directly without context manager to support zero-copy
+    reader = Reader(str(filename))
+    try:
         names = reader.tensor_names
         if not names:
             return {}
@@ -143,11 +145,15 @@ def load_file(
         tensors = reader.read_tensors(names, to='torch')
         result = {}
         for name, tensor in zip(names, tensors):
-            # Clone is already done by read_tensors
             if target_device.type != "cpu":
+                # This performs a copy to the device
                 tensor = tensor.to(target_device)
             result[name] = tensor
         return result
+    except Exception:
+        lib.ztensor_reader_free(reader._ptr)
+        reader._ptr = None
+        raise
 
 
 def load(data: bytes) -> Dict[str, torch.Tensor]:

@@ -30,6 +30,7 @@ pub type CObjectMetadata = (String, Object);
 
 /// View into tensor data without copying.
 /// The data is owned by the _owner Vec and must be freed via ztensor_free_tensor_view.
+/// If _owner is null, the data is a view into the memory-mapped file and the reader must outlive this view.
 #[repr(C)]
 pub struct CTensorDataView {
     pub data: *const c_uchar,
@@ -282,29 +283,50 @@ pub extern "C" fn ztensor_reader_read_tensors(
         }
     };
 
-    match reader.read_objects(&name_strs, verify_checksum != 0) {
-        Ok(data_vecs) => {
-            let mut views: Vec<CTensorDataView> = data_vecs
-                .into_iter()
-                .map(|data_vec| CTensorDataView {
+    let mut views = Vec::with_capacity(name_strs.len());
+    let should_verify = verify_checksum != 0;
+
+    for name in name_strs {
+        // Try zero-copy first if verification is not requested
+        if !should_verify {
+             if let Ok(slice) = reader.get_object_slice(name) {
+                 views.push(CTensorDataView {
+                     data: slice.as_ptr(),
+                     len: slice.len(),
+                     _owner: ptr::null_mut(),
+                 });
+                 continue;
+             }
+        }
+
+        // Fallback to copy (standard read)
+        match reader.read_object(name, should_verify) {
+            Ok(data_vec) => {
+                 views.push(CTensorDataView {
                     data: data_vec.as_ptr(),
                     len: data_vec.len(),
                     _owner: Box::into_raw(Box::new(data_vec)) as *mut c_void,
-                })
-                .collect();
-
-            let result = Box::new(CTensorDataViewArray {
-                views: views.as_mut_ptr(),
-                len: views.len(),
-            });
-            std::mem::forget(views);
-            Box::into_raw(result)
-        }
-        Err(e) => {
-            update_last_error(e);
-            ptr::null_mut()
+                });
+            },
+            Err(e) => {
+                update_last_error(e);
+                // Cleanup already allocated views
+                for view in views {
+                    if !view._owner.is_null() {
+                        unsafe { let _ = Box::from_raw(view._owner as *mut Vec<u8>); }
+                    }
+                }
+                return ptr::null_mut();
+            }
         }
     }
+
+    let result = Box::new(CTensorDataViewArray {
+        views: views.as_mut_ptr(),
+        len: views.len(),
+    });
+    std::mem::forget(views);
+    Box::into_raw(result)
 }
 
 /// Reads a specific component from an object.
@@ -354,6 +376,39 @@ pub extern "C" fn ztensor_reader_read_tensor_component(
                 data: data_vec.as_ptr(),
                 len: data_vec.len(),
                 _owner: Box::into_raw(Box::new(data_vec)) as *mut c_void,
+            });
+            Box::into_raw(view)
+        }
+        Err(e) => {
+            update_last_error(e);
+            ptr::null_mut()
+        }
+    }
+}
+
+/// Reads a zero-copy slice of a tensor.
+/// Returns a view that must be freed with ztensor_free_tensor_view.
+/// The returned view has no owner (null), so the reader must outlive the view.
+#[unsafe(no_mangle)]
+pub extern "C" fn ztensor_reader_get_tensor_slice(
+    reader_ptr: *const CZTensorReader,
+    name_str: *const c_char,
+) -> *mut CTensorDataView {
+    let reader = ztensor_handle!(reader_ptr);
+    let name = match parse_cstr(name_str) {
+        Ok(s) => s,
+        Err(_) => {
+            set_error("Invalid UTF-8 name");
+            return ptr::null_mut();
+        }
+    };
+
+    match reader.get_object_slice(name) {
+        Ok(slice) => {
+            let view = Box::new(CTensorDataView {
+                data: slice.as_ptr(),
+                len: slice.len(),
+                _owner: ptr::null_mut(),
             });
             Box::into_raw(view)
         }
@@ -644,7 +699,9 @@ pub extern "C" fn ztensor_free_tensor_view(view_ptr: *mut CTensorDataView) {
     if !view_ptr.is_null() {
         unsafe {
             let view = Box::from_raw(view_ptr);
-            let _ = Box::from_raw(view._owner as *mut Vec<u8>);
+            if !view._owner.is_null() {
+                let _ = Box::from_raw(view._owner as *mut Vec<u8>);
+            }
         }
     }
 }
@@ -658,7 +715,9 @@ pub extern "C" fn ztensor_free_tensor_view_array(arr_ptr: *mut CTensorDataViewAr
         let arr = Box::from_raw(arr_ptr);
         let views = Vec::from_raw_parts(arr.views, arr.len, arr.len);
         for view in views {
-            let _ = Box::from_raw(view._owner as *mut Vec<u8>);
+            if !view._owner.is_null() {
+                let _ = Box::from_raw(view._owner as *mut Vec<u8>);
+            }
         }
     }
 }
