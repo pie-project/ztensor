@@ -62,7 +62,7 @@ pub fn try_parse_pickle_tensor(
                 if current_depth == 0 && items.is_empty() {
                     shape.push(0);
                     if dtype.is_none() {
-                        *dtype = Some(ztensor::DType::Float32);
+                        *dtype = Some(ztensor::DType::F32);
                     }
                     return Ok(());
                 }
@@ -89,9 +89,9 @@ pub fn try_parse_pickle_tensor(
             }
             PickleValue::F64(f) => {
                 if dtype.is_none() {
-                    *dtype = Some(ztensor::DType::Float64);
+                    *dtype = Some(ztensor::DType::F64);
                 }
-                if *dtype != Some(ztensor::DType::Float64) {
+                if *dtype != Some(ztensor::DType::F64) {
                     return Err("Mixed data types: expected Float64".to_string());
                 }
                 ensure_shape_depth(shape, current_depth)?;
@@ -100,9 +100,9 @@ pub fn try_parse_pickle_tensor(
             }
             PickleValue::I64(i) => {
                 if dtype.is_none() {
-                    *dtype = Some(ztensor::DType::Int64);
+                    *dtype = Some(ztensor::DType::I64);
                 }
-                if *dtype != Some(ztensor::DType::Int64) {
+                if *dtype != Some(ztensor::DType::I64) {
                     return Err("Mixed data types: expected Int64". to_string());
                 }
                 ensure_shape_depth(shape, current_depth)?;
@@ -232,7 +232,7 @@ mod tests {
         assert!(result.is_some());
         let (shape, dtype, data) = result.unwrap();
         assert_eq!(shape, vec![3]);
-        assert_eq!(dtype, ztensor::DType::Float64);
+        assert_eq!(dtype, ztensor::DType::F64);
         assert_eq!(data.len(), 24);
     }
 
@@ -257,7 +257,7 @@ mod tests {
         assert!(result.is_some());
         let (shape, dtype, data) = result.unwrap();
         assert_eq!(shape, vec![0]);
-        assert_eq!(dtype, ztensor::DType::Float32);
+        assert_eq!(dtype, ztensor::DType::F32);
         assert!(data.is_empty());
     }
 

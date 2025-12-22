@@ -12,7 +12,7 @@ use std::path::Path;
 
 use commands::{
     compress_ztensor, decompress_ztensor, download_hf, merge_ztensor_files,
-    print_tensor_metadata, print_tensors_table, run_conversion,
+    migrate_ztensor, print_tensor_metadata, print_tensors_table, run_conversion,
 };
 use extractors::{GgufExtractor, PickleExtractor, SafeTensorExtractor};
 use ztensor::ZTensorReader;
@@ -107,6 +107,25 @@ enum Commands {
         /// Output .zt file (uncompressed)
         #[arg(short = 'o', long, required = true)]
         output: String,
+    },
+
+    /// Migrate a v0.1.0 ztensor file to v1.1.0 format
+    #[command(
+        about = "Migrate a zTensor file from version 0.1.0 to 1.1.0.",
+        long_about = "Migrate a legacy zTensor file (v0.1.0) to the current format (v1.1.0).\n\n\
+            Example:\n  ztensor migrate old_model.zt -o new_model.zt\n"
+    )]
+    Migrate {
+        /// Input .zt file (v0.1.0)
+        input: String,
+
+        /// Output .zt file (v1.1.0)
+        #[arg(short = 'o', long, required = true)]
+        output: String,
+
+        /// Compress tensor data with zstd
+        #[arg(short = 'c', long)]
+        compress: bool,
     },
 
     /// Show metadata and stats for a zTensor file
@@ -239,26 +258,32 @@ fn main() -> Result<()> {
             decompress_ztensor(input, output)?;
             println!("Successfully decompressed {} to {}", input, output);
         }
+        Some(Commands::Migrate { input, output, compress }) => {
+            if Path::new(output).exists() {
+                bail!("Output file '{}' already exists. Please remove it or choose a different name.", output);
+            }
+            migrate_ztensor(input, output, *compress)?;
+            println!("Successfully migrated {} to {}", input, output);
+        }
         Some(Commands::Info { file }) => {
             let reader = ZTensorReader::open(file)
                 .map_err(|e| anyhow::anyhow!("Failed to open file '{}': {}", file, e))?;
-            let tensors = reader.list_tensors();
+            let objects = reader.list_objects();
             
             println!("File: {}", file);
             println!("Version: {}", reader.manifest.version);
-            println!("Generator: {}", reader.manifest.generator);
             println!("Attributes: {:?}", reader.manifest.attributes);
-            println!("Total Tensors: {}", tensors.len());
+            println!("Total Objects: {}", objects.len());
             println!();
 
-            if tensors.len() < 20 {
-                for (name, tensor) in tensors {
-                   println!("--- Tensor: {} ---", name);
-                   print_tensor_metadata(name, tensor);
+            if objects.len() < 20 {
+                for (name, obj) in objects {
+                   println!("--- Object: {} ---", name);
+                   print_tensor_metadata(name, obj);
                    println!();
                 }
             } else {
-                print_tensors_table(tensors);
+                print_tensors_table(objects);
             }
         }
         Some(Commands::Merge { inputs, output, delete_original }) => {

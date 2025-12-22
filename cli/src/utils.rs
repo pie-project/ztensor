@@ -6,28 +6,28 @@ use indicatif::{ProgressBar, ProgressStyle};
 /// Get the byte size of a dtype
 pub fn dtype_size(dtype: ztensor::DType) -> u64 {
     match dtype {
-        ztensor::DType::Float64 | ztensor::DType::Int64 | ztensor::DType::Uint64 => 8,
-        ztensor::DType::Float32 | ztensor::DType::Int32 | ztensor::DType::Uint32 => 4,
-        ztensor::DType::BFloat16 | ztensor::DType::Float16 | ztensor::DType::Int16 | ztensor::DType::Uint16 => 2,
-        ztensor::DType::Int8 | ztensor::DType::Uint8 | ztensor::DType::Bool => 1,
+        ztensor::DType::F64 | ztensor::DType::I64 | ztensor::DType::U64 => 8,
+        ztensor::DType::F32 | ztensor::DType::I32 | ztensor::DType::U32 => 4,
+        ztensor::DType::BF16 | ztensor::DType::F16 | ztensor::DType::I16 | ztensor::DType::U16 => 2,
+        ztensor::DType::I8 | ztensor::DType::U8 | ztensor::DType::Bool => 1,
     }
 }
 
 /// Convert SafeTensor dtype to zTensor dtype
 pub fn safetensor_dtype_to_ztensor(dtype: &safetensors::tensor::Dtype) -> Option<ztensor::DType> {
     match dtype {
-        safetensors::tensor::Dtype::F64 => Some(ztensor::DType::Float64),
-        safetensors::tensor::Dtype::F32 => Some(ztensor::DType::Float32),
-        safetensors::tensor::Dtype::F16 => Some(ztensor::DType::Float16),
-        safetensors::tensor::Dtype::BF16 => Some(ztensor::DType::BFloat16),
-        safetensors::tensor::Dtype::I64 => Some(ztensor::DType::Int64),
-        safetensors::tensor::Dtype::I32 => Some(ztensor::DType::Int32),
-        safetensors::tensor::Dtype::I16 => Some(ztensor::DType::Int16),
-        safetensors::tensor::Dtype::I8 => Some(ztensor::DType::Int8),
-        safetensors::tensor::Dtype::U64 => Some(ztensor::DType::Uint64),
-        safetensors::tensor::Dtype::U32 => Some(ztensor::DType::Uint32),
-        safetensors::tensor::Dtype::U16 => Some(ztensor::DType::Uint16),
-        safetensors::tensor::Dtype::U8 => Some(ztensor::DType::Uint8),
+        safetensors::tensor::Dtype::F64 => Some(ztensor::DType::F64),
+        safetensors::tensor::Dtype::F32 => Some(ztensor::DType::F32),
+        safetensors::tensor::Dtype::F16 => Some(ztensor::DType::F16),
+        safetensors::tensor::Dtype::BF16 => Some(ztensor::DType::BF16),
+        safetensors::tensor::Dtype::I64 => Some(ztensor::DType::I64),
+        safetensors::tensor::Dtype::I32 => Some(ztensor::DType::I32),
+        safetensors::tensor::Dtype::I16 => Some(ztensor::DType::I16),
+        safetensors::tensor::Dtype::I8 => Some(ztensor::DType::I8),
+        safetensors::tensor::Dtype::U64 => Some(ztensor::DType::U64),
+        safetensors::tensor::Dtype::U32 => Some(ztensor::DType::U32),
+        safetensors::tensor::Dtype::U16 => Some(ztensor::DType::U16),
+        safetensors::tensor::Dtype::U8 => Some(ztensor::DType::U8),
         safetensors::tensor::Dtype::BOOL => Some(ztensor::DType::Bool),
         _ => None,
     }
@@ -36,14 +36,14 @@ pub fn safetensor_dtype_to_ztensor(dtype: &safetensors::tensor::Dtype) -> Option
 /// Convert GGUF dtype to zTensor dtype
 pub fn gguf_dtype_to_ztensor(dtype: &gguf_rs::GGMLType) -> Option<ztensor::DType> {
     match dtype {
-        gguf_rs::GGMLType::F64 => Some(ztensor::DType::Float64),
-        gguf_rs::GGMLType::F32 => Some(ztensor::DType::Float32),
-        gguf_rs::GGMLType::F16 => Some(ztensor::DType::Float16),
-        gguf_rs::GGMLType::BF16 => Some(ztensor::DType::BFloat16),
-        gguf_rs::GGMLType::I64 => Some(ztensor::DType::Int64),
-        gguf_rs::GGMLType::I32 => Some(ztensor::DType::Int32),
-        gguf_rs::GGMLType::I16 => Some(ztensor::DType::Int16),
-        gguf_rs::GGMLType::I8 => Some(ztensor::DType::Int8),
+        gguf_rs::GGMLType::F64 => Some(ztensor::DType::F64),
+        gguf_rs::GGMLType::F32 => Some(ztensor::DType::F32),
+        gguf_rs::GGMLType::F16 => Some(ztensor::DType::F16),
+        gguf_rs::GGMLType::BF16 => Some(ztensor::DType::BF16),
+        gguf_rs::GGMLType::I64 => Some(ztensor::DType::I64),
+        gguf_rs::GGMLType::I32 => Some(ztensor::DType::I32),
+        gguf_rs::GGMLType::I16 => Some(ztensor::DType::I16),
+        gguf_rs::GGMLType::I8 => Some(ztensor::DType::I8),
         _ => None,
     }
 }
@@ -125,30 +125,30 @@ mod tests {
 
     #[test]
     fn test_dtype_size_64bit() {
-        assert_eq!(dtype_size(ztensor::DType::Float64), 8);
-        assert_eq!(dtype_size(ztensor::DType::Int64), 8);
-        assert_eq!(dtype_size(ztensor::DType::Uint64), 8);
+        assert_eq!(dtype_size(ztensor::DType::F64), 8);
+        assert_eq!(dtype_size(ztensor::DType::I64), 8);
+        assert_eq!(dtype_size(ztensor::DType::U64), 8);
     }
 
     #[test]
     fn test_dtype_size_32bit() {
-        assert_eq!(dtype_size(ztensor::DType::Float32), 4);
-        assert_eq!(dtype_size(ztensor::DType::Int32), 4);
-        assert_eq!(dtype_size(ztensor::DType::Uint32), 4);
+        assert_eq!(dtype_size(ztensor::DType::F32), 4);
+        assert_eq!(dtype_size(ztensor::DType::I32), 4);
+        assert_eq!(dtype_size(ztensor::DType::U32), 4);
     }
 
     #[test]
     fn test_dtype_size_16bit() {
-        assert_eq!(dtype_size(ztensor::DType::Float16), 2);
-        assert_eq!(dtype_size(ztensor::DType::BFloat16), 2);
-        assert_eq!(dtype_size(ztensor::DType::Int16), 2);
-        assert_eq!(dtype_size(ztensor::DType::Uint16), 2);
+        assert_eq!(dtype_size(ztensor::DType::F16), 2);
+        assert_eq!(dtype_size(ztensor::DType::BF16), 2);
+        assert_eq!(dtype_size(ztensor::DType::I16), 2);
+        assert_eq!(dtype_size(ztensor::DType::U16), 2);
     }
 
     #[test]
     fn test_dtype_size_8bit() {
-        assert_eq!(dtype_size(ztensor::DType::Int8), 1);
-        assert_eq!(dtype_size(ztensor::DType::Uint8), 1);
+        assert_eq!(dtype_size(ztensor::DType::I8), 1);
+        assert_eq!(dtype_size(ztensor::DType::U8), 1);
         assert_eq!(dtype_size(ztensor::DType::Bool), 1);
     }
 
@@ -193,13 +193,13 @@ mod tests {
 
     #[test]
     fn test_safetensor_dtype_to_ztensor() {
-        assert_eq!(safetensor_dtype_to_ztensor(&safetensors::tensor::Dtype::F32), Some(ztensor::DType::Float32));
-        assert_eq!(safetensor_dtype_to_ztensor(&safetensors::tensor::Dtype::I64), Some(ztensor::DType::Int64));
+        assert_eq!(safetensor_dtype_to_ztensor(&safetensors::tensor::Dtype::F32), Some(ztensor::DType::F32));
+        assert_eq!(safetensor_dtype_to_ztensor(&safetensors::tensor::Dtype::I64), Some(ztensor::DType::I64));
     }
 
     #[test]
     fn test_gguf_dtype_to_ztensor() {
-        assert_eq!(gguf_dtype_to_ztensor(&gguf_rs::GGMLType::F32), Some(ztensor::DType::Float32));
-        assert_eq!(gguf_dtype_to_ztensor(&gguf_rs::GGMLType::I64), Some(ztensor::DType::Int64));
+        assert_eq!(gguf_dtype_to_ztensor(&gguf_rs::GGMLType::F32), Some(ztensor::DType::F32));
+        assert_eq!(gguf_dtype_to_ztensor(&gguf_rs::GGMLType::I64), Some(ztensor::DType::I64));
     }
 }

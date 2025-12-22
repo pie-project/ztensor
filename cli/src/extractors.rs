@@ -162,7 +162,7 @@ mod tests {
         let tensor = ExtractedTensor {
             name: "test".to_string(),
             shape: vec![2, 3],
-            dtype: ztensor::DType::Float32,
+            dtype: ztensor::DType::F32,
             data: vec![1, 2, 3, 4],
         };
         let cloned = tensor.clone();
