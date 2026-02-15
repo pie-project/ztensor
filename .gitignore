@@ -46,6 +46,10 @@ python/ztensor/ztensor/
 
 *.tmp
 bench_out/
+benchmark/bench_out/
+benchmark/*.npz
+benchmark/*.png
+.pytest_cache/
 
 # Docusaurus
 website/node_modules/
