@@ -1,6 +1,6 @@
 # zTensor Specification
 
-**Version:** 1.1.0  
+**Version:** 1.2.0  
 **Extension:** `.zt`
 
 ## Part I: The Container (Physical Layer)
@@ -54,7 +54,7 @@ The Manifest is a **CBOR-encoded Map** located at `EOF - 16 - manifest_size`.
 
 ```json
 {
-  "version": "1.1.0",
+  "version": "1.2.0",
   "attributes": {
     "framework": "PyTorch",
     "license": "Apache-2.0"

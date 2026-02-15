@@ -1,4 +1,4 @@
-//! FFI bindings for Python/C interop.
+//! FFI bindings for C interop.
 //!
 //! This module exposes a C-compatible API for the zTensor library.
 //! Memory management follows these rules:
@@ -15,22 +15,15 @@ use std::sync::Mutex;
 
 use memmap2::Mmap;
 
-use crate::error::ZTensorError;
-use crate::models::{ChecksumAlgorithm, DType, Encoding, Object};
-use crate::reader::ZTensorReader;
-use crate::writer::ZTensorWriter;
+use crate::error::Error;
+use crate::models::{Checksum, DType, Object};
+use crate::reader::Reader;
+use crate::writer::Writer;
 
 // --- Type Aliases ---
 
-use crate::compat::{LegacyReader, is_legacy_file};
-
-// --- Type Aliases ---
-
-pub enum CZTensorReader {
-    V1(ZTensorReader<Cursor<Mmap>>),
-    Legacy(LegacyReader<Cursor<Mmap>>),
-}
-pub type CZTensorWriter = ZTensorWriter<BufWriter<std::fs::File>>;
+pub type CZTensorReader = Reader<Cursor<Mmap>>;
+pub type CZTensorWriter = Writer<BufWriter<std::fs::File>>;
 pub type CObjectMetadata = (String, Object);
 
 // --- C-Compatible Structs ---
@@ -61,7 +54,7 @@ pub struct CTensorDataViewArray {
 
 static LAST_ERROR: Mutex<Option<CString>> = Mutex::new(None);
 
-fn update_last_error(err: ZTensorError) {
+fn update_last_error(err: Error) {
     let msg = CString::new(err.to_string())
         .unwrap_or_else(|_| CString::new("FFI: Unknown error").unwrap());
     *LAST_ERROR.lock().unwrap() = Some(msg);
@@ -159,26 +152,8 @@ pub extern "C" fn ztensor_reader_open(path_str: *const c_char) -> *mut CZTensorR
         }
     };
 
-    // Check version
-    match is_legacy_file(path) {
-        Ok(true) => {
-             match LegacyReader::open_mmap(path) {
-                Ok(reader) => Box::into_raw(Box::new(CZTensorReader::Legacy(reader))),
-                Err(e) => {
-                    update_last_error(e);
-                    ptr::null_mut()
-                }
-            }
-        },
-        Ok(false) => {
-            match ZTensorReader::open_mmap(path) {
-                Ok(reader) => Box::into_raw(Box::new(CZTensorReader::V1(reader))),
-                Err(e) => {
-                    update_last_error(e);
-                    ptr::null_mut()
-                }
-            }
-        },
+    match Reader::open_mmap_shared_any(path) {
+        Ok(reader) => Box::into_raw(Box::new(reader)),
         Err(e) => {
             update_last_error(e);
             ptr::null_mut()
@@ -189,10 +164,7 @@ pub extern "C" fn ztensor_reader_open(path_str: *const c_char) -> *mut CZTensorR
 #[unsafe(no_mangle)]
 pub extern "C" fn ztensor_reader_get_metadata_count(reader_ptr: *const CZTensorReader) -> size_t {
     let reader = ztensor_handle!(reader_ptr, 0);
-    match reader {
-        CZTensorReader::V1(r) => r.list_objects().len(),
-        CZTensorReader::Legacy(r) => r.list_objects().len(),
-    }
+    reader.tensors().len()
 }
 
 #[unsafe(no_mangle)]
@@ -209,15 +181,10 @@ pub extern "C" fn ztensor_reader_get_metadata_by_name(
         }
     };
 
-    let object = match reader {
-        CZTensorReader::V1(r) => r.get_object(name),
-        CZTensorReader::Legacy(r) => r.get_object(name),
-    };
-
-    match object {
+    match reader.get(name) {
         Some(obj) => Box::into_raw(Box::new((name.to_string(), obj.clone()))),
         None => {
-            update_last_error(ZTensorError::ObjectNotFound(name.to_string()));
+            update_last_error(Error::ObjectNotFound(name.to_string()));
             ptr::null_mut()
         }
     }
@@ -229,10 +196,7 @@ pub extern "C" fn ztensor_reader_get_metadata_by_index(
     index: size_t,
 ) -> *mut CObjectMetadata {
     let reader = ztensor_handle!(reader_ptr);
-    let objects = match reader {
-        CZTensorReader::V1(r) => r.list_objects(),
-        CZTensorReader::Legacy(r) => r.list_objects(),
-    };
+    let objects = reader.tensors();
     match objects.iter().nth(index) {
         Some((name, obj)) => Box::into_raw(Box::new((name.clone(), obj.clone()))),
         None => {
@@ -247,10 +211,7 @@ pub extern "C" fn ztensor_reader_get_all_tensor_names(
     reader_ptr: *const CZTensorReader,
 ) -> *mut CStringArray {
     let reader = ztensor_handle!(reader_ptr);
-    let names: Vec<CString> = match reader {
-        CZTensorReader::V1(r) => r.list_objects().keys(),
-        CZTensorReader::Legacy(r) => r.list_objects().keys(),
-    }
+    let names: Vec<CString> = reader.tensors().keys()
         .filter_map(|name| CString::new(name.as_str()).ok())
         .collect();
 
@@ -271,7 +232,7 @@ pub extern "C" fn ztensor_reader_read_tensor(
     name_str: *const c_char,
     verify_checksum: c_int,
 ) -> *mut CTensorDataView {
-    let reader = ztensor_handle!(mut reader_ptr);
+    let reader = ztensor_handle!(reader_ptr as *const CZTensorReader);
     let name = match parse_cstr(name_str) {
         Ok(s) => s,
         Err(_) => {
@@ -280,12 +241,7 @@ pub extern "C" fn ztensor_reader_read_tensor(
         }
     };
 
-    let res = match reader {
-        CZTensorReader::V1(r) => r.read_object(name, verify_checksum != 0),
-        CZTensorReader::Legacy(r) => r.read_object(name, verify_checksum != 0),
-    };
-
-    match res {
+    match reader.read(name, verify_checksum != 0) {
         Ok(data_vec) => {
             let view = Box::new(CTensorDataView {
                 data: data_vec.as_ptr(),
@@ -309,12 +265,12 @@ pub extern "C" fn ztensor_reader_read_tensors(
     names_len: size_t,
     verify_checksum: c_int,
 ) -> *mut CTensorDataViewArray {
-    let reader = ztensor_handle!(mut reader_ptr);
+    let reader = ztensor_handle!(reader_ptr as *const CZTensorReader);
 
     let name_strs: Vec<&str> = match (0..names_len)
         .map(|i| {
             let name_ptr = unsafe { *names.add(i) };
-            parse_cstr(name_ptr).map_err(|_| ZTensorError::Other("Invalid UTF-8".into()))
+            parse_cstr(name_ptr).map_err(|_| Error::Other("Invalid UTF-8".into()))
         })
         .collect::<Result<Vec<_>, _>>()
     {
@@ -331,29 +287,20 @@ pub extern "C" fn ztensor_reader_read_tensors(
     for name in name_strs {
         // Try zero-copy first if verification is not requested
         if !should_verify {
-             let res = match reader {
-                 CZTensorReader::V1(r) => r.get_object_slice(name),
-                 CZTensorReader::Legacy(r) => r.get_object_slice(name),
-             };
-             if let Ok(slice) = res {
-                 views.push(CTensorDataView {
-                     data: slice.as_ptr(),
-                     len: slice.len(),
-                     _owner: ptr::null_mut(),
-                 });
-                 continue;
-             }
+            if let Ok(slice) = reader.view(name) {
+                views.push(CTensorDataView {
+                    data: slice.as_ptr(),
+                    len: slice.len(),
+                    _owner: ptr::null_mut(),
+                });
+                continue;
+            }
         }
 
         // Fallback to copy (standard read)
-        let res = match reader {
-            CZTensorReader::V1(r) => r.read_object(name, should_verify),
-            CZTensorReader::Legacy(r) => r.read_object(name, should_verify),
-        };
-
-        match res {
+        match reader.read(name, should_verify) {
             Ok(data_vec) => {
-                 views.push(CTensorDataView {
+                views.push(CTensorDataView {
                     data: data_vec.as_ptr(),
                     len: data_vec.len(),
                     _owner: Box::into_raw(Box::new(data_vec)) as *mut c_void,
@@ -387,7 +334,7 @@ pub extern "C" fn ztensor_reader_read_tensor_component(
     name_str: *const c_char,
     component_name_str: *const c_char,
 ) -> *mut CTensorDataView {
-    let reader = ztensor_handle!(mut reader_ptr);
+    let reader = ztensor_handle!(reader_ptr as *const CZTensorReader);
 
     let name = match parse_cstr(name_str) {
         Ok(s) => s,
@@ -405,15 +352,10 @@ pub extern "C" fn ztensor_reader_read_tensor_component(
         }
     };
 
-    let obj_opt = match reader {
-        CZTensorReader::V1(r) => r.get_object(name),
-        CZTensorReader::Legacy(r) => r.get_object(name),
-    };
-
-    let obj = match obj_opt {
+    let obj = match reader.get(name) {
         Some(o) => o.clone(),
         None => {
-            update_last_error(ZTensorError::ObjectNotFound(name.to_string()));
+            update_last_error(Error::ObjectNotFound(name.to_string()));
             return ptr::null_mut();
         }
     };
@@ -426,12 +368,7 @@ pub extern "C" fn ztensor_reader_read_tensor_component(
         }
     };
 
-    let res = match reader {
-        CZTensorReader::V1(r) => r.read_component(&component),
-        CZTensorReader::Legacy(r) => r.read_component(&component),
-    };
-
-    match res {
+    match reader.read_component(&component) {
         Ok(data_vec) => {
             let view = Box::new(CTensorDataView {
                 data: data_vec.as_ptr(),
@@ -464,12 +401,7 @@ pub extern "C" fn ztensor_reader_get_tensor_slice(
         }
     };
 
-    let res = match reader {
-        CZTensorReader::V1(r) => r.get_object_slice(name),
-        CZTensorReader::Legacy(r) => r.get_object_slice(name),
-    };
-
-    match res {
+    match reader.view(name) {
         Ok(slice) => {
             let view = Box::new(CTensorDataView {
                 data: slice.as_ptr(),
@@ -497,7 +429,7 @@ pub extern "C" fn ztensor_writer_create(path_str: *const c_char) -> *mut CZTenso
         }
     };
 
-    match ZTensorWriter::create(path) {
+    match Writer::create(path) {
         Ok(writer) => Box::into_raw(Box::new(writer)),
         Err(e) => {
             update_last_error(e);
@@ -540,7 +472,7 @@ pub extern "C" fn ztensor_writer_add_tensor(
     let dtype = match parse_dtype(dtype_s) {
         Some(d) => d,
         None => {
-            update_last_error(ZTensorError::UnsupportedDType(dtype_s.to_string()));
+            update_last_error(Error::UnsupportedDType(dtype_s.to_string()));
             return -1;
         }
     };
@@ -548,7 +480,7 @@ pub extern "C" fn ztensor_writer_add_tensor(
     let data = unsafe { slice::from_raw_parts(data_ptr, data_len) };
     let compression = if compress == 0 { crate::writer::Compression::Raw } else { crate::writer::Compression::Zstd(compress) };
 
-    match writer.add_object_bytes(name, shape.to_vec(), dtype, compression, data, ChecksumAlgorithm::None) {
+    match writer.add_bytes(name, shape.to_vec(), dtype, compression, data, Checksum::None) {
         Ok(_) => 0,
         Err(e) => {
             update_last_error(e);
@@ -586,14 +518,14 @@ pub extern "C" fn ztensor_writer_add_sparse_csr(
 
     let dtype = match parse_dtype(dtype_s) {
         Some(d) => d,
-        None => { update_last_error(ZTensorError::UnsupportedDType(dtype_s.to_string())); return -1; }
+        None => { update_last_error(Error::UnsupportedDType(dtype_s.to_string())); return -1; }
     };
 
     let values = unsafe { slice::from_raw_parts(values_ptr, values_len) };
     let indices = unsafe { slice::from_raw_parts(indices_ptr, indices_len) };
     let indptr = unsafe { slice::from_raw_parts(indptr_ptr, indptr_len) };
 
-    match writer.add_csr_object_bytes(name, shape.to_vec(), dtype, values, indices, indptr, crate::writer::Compression::Raw, ChecksumAlgorithm::None) {
+    match writer.add_csr_bytes(name, shape.to_vec(), dtype, values, indices, indptr, crate::writer::Compression::Raw, Checksum::None) {
         Ok(_) => 0,
         Err(e) => { update_last_error(e); -1 }
     }
@@ -626,13 +558,13 @@ pub extern "C" fn ztensor_writer_add_sparse_coo(
 
     let dtype = match parse_dtype(dtype_s) {
         Some(d) => d,
-        None => { update_last_error(ZTensorError::UnsupportedDType(dtype_s.to_string())); return -1; }
+        None => { update_last_error(Error::UnsupportedDType(dtype_s.to_string())); return -1; }
     };
 
     let values = unsafe { slice::from_raw_parts(values_ptr, values_len) };
     let coords = unsafe { slice::from_raw_parts(indices_ptr, indices_len) };
 
-    match writer.add_coo_object_bytes(name, shape.to_vec(), dtype, values, coords, crate::writer::Compression::Raw, ChecksumAlgorithm::None) {
+    match writer.add_coo_bytes(name, shape.to_vec(), dtype, values, coords, crate::writer::Compression::Raw, Checksum::None) {
         Ok(_) => 0,
         Err(e) => { update_last_error(e); -1 }
     }
@@ -644,7 +576,7 @@ pub extern "C" fn ztensor_writer_finalize(writer_ptr: *mut CZTensorWriter) -> c_
         return -1;
     }
     let writer = unsafe { Box::from_raw(writer_ptr) };
-    match writer.finalize() {
+    match writer.finish() {
         Ok(_) => 0,
         Err(e) => { update_last_error(e); -1 }
     }
@@ -699,7 +631,7 @@ pub extern "C" fn ztensor_metadata_get_size(metadata_ptr: *const CObjectMetadata
 #[unsafe(no_mangle)]
 pub extern "C" fn ztensor_metadata_get_layout_str(metadata_ptr: *const CObjectMetadata) -> *mut c_char {
     let (_, obj) = ztensor_handle!(metadata_ptr);
-    to_cstring(obj.format.clone())
+    to_cstring(obj.format.as_str().to_string())
 }
 
 #[unsafe(no_mangle)]

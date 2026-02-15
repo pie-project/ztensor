@@ -76,7 +76,7 @@ def main():
     os.chdir(TEST_DIR)
     
     try:
-        # 1. Test Migrate (v0.1.0 -> v1.1.0)
+        # 1. Test Migrate (v0.1.0 -> v1.2.0)
         print("\n--- Testing 'migrate' ---")
         create_legacy_file("legacy.zt")
         run_cmd([CLI_PATH, "migrate", "legacy.zt", "-o", "migrated.zt"])
@@ -137,10 +137,6 @@ def main():
         print("\nALL INTEGRATION TESTS PASSED!")
 
     finally:
-        # Cleanup
-        # os.chdir("..")
-        # import shutil
-        # shutil.rmtree(TEST_DIR)
         pass
 
 if __name__ == "__main__":

@@ -46,3 +46,8 @@ python/ztensor/ztensor/
 
 *.tmp
 bench_out/
+
+# Docusaurus
+website/node_modules/
+website/build/
+website/.docusaurus/

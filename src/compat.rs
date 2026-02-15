@@ -1,423 +1,23 @@
-//! Read-only backwards compatibility with zTensor v0.1.0 format.
+//! Backwards compatibility with zTensor v0.1.0 format.
 //!
-//! This module provides legacy support for reading v0.1.0 files.
-//! To drop legacy support, simply remove this file and the `pub mod compat;` line from lib.rs.
-//!
-//! v0.1.0 differences:
-//! - Magic: "ZTEN0001" (vs "ZTEN1000" in v1.1)
-//! - No footer magic
-//! - Manifest is a CBOR array (not map with "objects")
-//! - Each tensor has: name, offset, size, dtype, shape, encoding, layout
-//! - dtype strings: "float32" vs "f32"
+//! The unified `Reader` now handles both v0.1.0 and v1.2 files.
+//! This module provides a type alias for backwards compatibility and
+//! utility functions for format detection.
 
-use byteorder::{LittleEndian, ReadBytesExt};
-use serde::Deserialize;
-use memmap2::Mmap;
-use std::collections::BTreeMap;
 use std::fs::File;
-use std::io::{BufReader, Cursor, Read, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
-use crate::error::ZTensorError;
-use crate::models::{Component, DType, Encoding, Manifest, Object, ALIGNMENT};
-use crate::utils::swap_endianness_in_place;
-use crate::reader::Pod;
+use crate::error::Error;
+use crate::models::MAGIC_V01;
+use crate::reader::Reader;
 
-/// Magic number for v0.1.0 files.
-const MAGIC_V01: &[u8; 8] = b"ZTEN0001";
+/// Type alias for backwards compatibility.
+/// `LegacyReader` is now just `Reader`.
+pub type LegacyReader<R> = Reader<R>;
 
-/// v0.1.0 tensor metadata (from CBOR array).
-#[derive(Debug, Clone, Deserialize)]
-struct LegacyTensorMeta {
-    name: String,
-    offset: u64,
-    size: u64,
-    dtype: String,
-    shape: Vec<u64>,
-    encoding: String,
-    #[serde(default)]
-    layout: String,
-    #[serde(default)]
-    checksum: Option<String>,
-}
-
-impl LegacyTensorMeta {
-    fn to_dtype(&self) -> Result<DType, ZTensorError> {
-        match self.dtype.as_str() {
-            "float64" => Ok(DType::F64),
-            "float32" => Ok(DType::F32),
-            "float16" => Ok(DType::F16),
-            "bfloat16" => Ok(DType::BF16),
-            "int64" => Ok(DType::I64),
-            "int32" => Ok(DType::I32),
-            "int16" => Ok(DType::I16),
-            "int8" => Ok(DType::I8),
-            "uint64" => Ok(DType::U64),
-            "uint32" => Ok(DType::U32),
-            "uint16" => Ok(DType::U16),
-            "uint8" => Ok(DType::U8),
-            "bool" => Ok(DType::Bool),
-            other => Err(ZTensorError::UnsupportedDType(other.to_string())),
-        }
-    }
-
-    fn to_encoding(&self) -> Encoding {
-        match self.encoding.as_str() {
-            "zstd" => Encoding::Zstd,
-            _ => Encoding::Raw,
-        }
-    }
-}
-
-/// Reader for legacy v0.1.0 zTensor files.
-///
-/// Converts v0.1.0 format to v1.1 internal representation for unified API.
-pub struct LegacyReader<R: Read + Seek> {
-    reader: R,
-    pub manifest: Manifest,
-}
-
-impl LegacyReader<BufReader<File>> {
-    /// Opens a legacy v0.1.0 file from path.
-    pub fn open(path: impl AsRef<Path>) -> Result<Self, ZTensorError> {
-        let file = File::open(path)?;
-        Self::new(BufReader::new(file))
-    }
-}
-
-impl LegacyReader<Cursor<Mmap>> {
-    /// Opens a legacy v0.1.0 file using memory mapping.
-    pub fn open_mmap(path: impl AsRef<Path>) -> Result<Self, ZTensorError> {
-        let file = File::open(path)?;
-        let mmap = unsafe { Mmap::map(&file)? };
-        Self::new(Cursor::new(mmap))
-    }
-
-    /// Gets a zero-copy reference to an object's data.
-    pub fn get_object_slice(&self, name: &str) -> Result<&[u8], ZTensorError> {
-        let obj = self.manifest.objects.get(name)
-            .ok_or_else(|| ZTensorError::ObjectNotFound(name.to_string()))?;
-
-        // Logic similar to ZTensorReader::get_object_slice
-        let component = obj.components.get("data").ok_or_else(|| {
-            ZTensorError::InvalidFileStructure(format!(
-                "Dense object '{}' missing 'data' component",
-                name
-            ))
-        })?;
-
-        if component.encoding != Encoding::Raw {
-            return Err(ZTensorError::Other(format!(
-                "Zero-copy not supported for compressed component in '{}'", name
-            )));
-        }
-
-        // Validate alignment
-        if component.offset % ALIGNMENT != 0 {
-            return Err(ZTensorError::InvalidAlignment {
-                offset: component.offset,
-                alignment: ALIGNMENT,
-            });
-        }
-
-        let mmap = self.reader.get_ref();
-        let start = component.offset as usize;
-        let end = start + component.length as usize;
-
-        if end > mmap.len() {
-            return Err(ZTensorError::InvalidFileStructure(format!(
-                "Component '{}' out of bounds (end={} > file_len={})",
-                name, end, mmap.len()
-            )));
-        }
-
-        Ok(&mmap[start..end])
-    }
-
-    /// Gets a typed zero-copy reference to an object's data.
-    pub fn get_object_slice_as<T: Pod>(&self, name: &str) -> Result<&[T], ZTensorError> {
-        let obj = self.manifest.objects.get(name)
-            .ok_or_else(|| ZTensorError::ObjectNotFound(name.to_string()))?;
-        
-        let component = obj.components.get("data").ok_or_else(|| {
-            ZTensorError::InvalidFileStructure(format!("Missing 'data' component for {}", name))
-        })?;
-
-        if !T::dtype_matches(&component.dtype) {
-             return Err(ZTensorError::TypeMismatch {
-                expected: component.dtype.as_str().to_string(),
-                found: std::any::type_name::<T>().to_string(),
-                context: format!("object '{}'", name),
-            });
-        }
-
-        let bytes = self.get_object_slice(name)?;
-        
-        // Safety checks for casting
-        if bytes.len() % T::SIZE != 0 {
-            return Err(ZTensorError::InvalidFileStructure(format!(
-                "Byte length {} is not a multiple of type size {}",
-                bytes.len(), T::SIZE
-            )));
-        }
-        
-        let ptr = bytes.as_ptr();
-        if (ptr as usize) % std::mem::align_of::<T>() != 0 {
-            return Err(ZTensorError::Other(format!(
-                "Memory not aligned for type {}", std::any::type_name::<T>()
-            )));
-        }
-
-        let len = bytes.len() / T::SIZE;
-        Ok(unsafe { std::slice::from_raw_parts(ptr as *const T, len) })
-    }
-}
-
-impl<R: Read + Seek> LegacyReader<R> {
-    /// Creates a new legacy reader.
-    ///
-    /// v0.1.0 parsing:
-    /// 1. Read magic "ZTEN0001"
-    /// 2. Read last 8 bytes for CBOR array size
-    /// 3. Seek to (EOF - 8 - size) for CBOR array
-    /// 4. Decode array of tensor metadata
-    pub fn new(mut reader: R) -> Result<Self, ZTensorError> {
-        // Verify magic
-        let mut magic = [0u8; 8];
-        reader.read_exact(&mut magic)?;
-        if magic != *MAGIC_V01 {
-            return Err(ZTensorError::InvalidMagicNumber { found: magic.to_vec() });
-        }
-
-        // Read CBOR size from last 8 bytes
-        reader.seek(SeekFrom::End(-8))?;
-        let cbor_size = reader.read_u64::<LittleEndian>()?;
-
-        // Read CBOR array
-        reader.seek(SeekFrom::End(-8 - cbor_size as i64))?;
-        let mut cbor_buf = vec![0u8; cbor_size as usize];
-        reader.read_exact(&mut cbor_buf)?;
-
-        // Decode as array of tensor metadata
-        let tensors: Vec<LegacyTensorMeta> = serde_cbor::from_slice(&cbor_buf)
-            .map_err(ZTensorError::CborDeserialize)?;
-
-        // Convert to v1.1 Manifest format
-        let mut objects = BTreeMap::new();
-        for t in tensors {
-            // Only support dense layout
-            if !t.layout.is_empty() && t.layout != "dense" {
-                continue; // Skip non-dense
-            }
-
-            let dtype = t.to_dtype()?;
-            let encoding = t.to_encoding();
-
-            let component = Component {
-                dtype,
-                offset: t.offset,
-                length: t.size,
-                encoding,
-                digest: t.checksum.clone(),
-            };
-
-            let mut components = BTreeMap::new();
-            components.insert("data".to_string(), component);
-
-            let obj = Object {
-                shape: t.shape,
-                format: "dense".to_string(),
-                attributes: None,
-                components,
-            };
-
-            objects.insert(t.name, obj);
-        }
-
-        let manifest = Manifest {
-            version: "0.1.0".to_string(),
-            attributes: None,
-            objects,
-        };
-
-        Ok(Self { reader, manifest })
-    }
-
-    /// Lists all objects (dense tensors only).
-    pub fn list_objects(&self) -> &BTreeMap<String, Object> {
-        &self.manifest.objects
-    }
-
-    /// Gets object metadata by name.
-    pub fn get_object(&self, name: &str) -> Option<&Object> {
-        self.manifest.objects.get(name)
-    }
-
-    /// Reads raw byte data of a dense object.
-    pub fn read_object(&mut self, name: &str, verify_checksum: bool) -> Result<Vec<u8>, ZTensorError> {
-        let obj = self.manifest.objects.get(name)
-            .ok_or_else(|| ZTensorError::ObjectNotFound(name.to_string()))?
-            .clone();
-
-        let component = obj.components.get("data")
-            .ok_or_else(|| ZTensorError::InvalidFileStructure("Missing data component".to_string()))?;
-
-        if component.offset % ALIGNMENT != 0 {
-            return Err(ZTensorError::InvalidAlignment {
-                offset: component.offset,
-                alignment: ALIGNMENT,
-            });
-        }
-
-        self.reader.seek(SeekFrom::Start(component.offset))?;
-
-        let mut data = match component.encoding {
-            Encoding::Zstd => {
-                let mut compressed = vec![0u8; component.length as usize];
-                self.reader.read_exact(&mut compressed)?;
-
-                if verify_checksum {
-                    if let Some(ref digest) = component.digest {
-                        verify_checksum_impl(digest, &compressed, name)?;
-                    }
-                }
-
-                let mut decompressed = Vec::new();
-                zstd::stream::copy_decode(std::io::Cursor::new(compressed), &mut decompressed)
-                    .map_err(ZTensorError::ZstdDecompression)?;
-                decompressed
-            }
-            Encoding::Raw => {
-                let num_elements = obj.num_elements();
-                let expected_size = num_elements * component.dtype.byte_size() as u64;
-                let mut buf = vec![0u8; expected_size as usize];
-                self.reader.read_exact(&mut buf)?;
-
-                if verify_checksum {
-                    if let Some(ref digest) = component.digest {
-                        verify_checksum_impl(digest, &buf, name)?;
-                    }
-                }
-                buf
-            }
-        };
-
-        // Handle endianness
-        if cfg!(target_endian = "big") && component.dtype.is_multi_byte() {
-            swap_endianness_in_place(&mut data, component.dtype.byte_size());
-        }
-
-        Ok(data)
-    }
-
-    /// Reads raw component data.
-    pub fn read_component(&mut self, component: &Component) -> Result<Vec<u8>, ZTensorError> {
-        if component.offset % ALIGNMENT != 0 {
-            return Err(ZTensorError::InvalidAlignment {
-                offset: component.offset,
-                alignment: ALIGNMENT,
-            });
-        }
-
-        self.reader.seek(SeekFrom::Start(component.offset))?;
-
-        let mut data = match component.encoding {
-            Encoding::Zstd => {
-                let mut compressed = vec![0u8; component.length as usize];
-                self.reader.read_exact(&mut compressed)?;
-
-                if let Some(ref digest) = component.digest {
-                   // We don't have object name here easily for error context match, 
-                   // but verify_checksum_impl needs it.
-                   // We can pass a placeholder or change verify_checksum_impl.
-                   verify_checksum_impl(digest, &compressed, "component")?;
-                }
-
-                let mut decompressed = Vec::new();
-                zstd::stream::copy_decode(std::io::Cursor::new(compressed), &mut decompressed)
-                    .map_err(ZTensorError::ZstdDecompression)?;
-                decompressed
-            }
-            Encoding::Raw => {
-                let mut buf = vec![0u8; component.length as usize];
-                self.reader.read_exact(&mut buf)?;
-
-                if let Some(ref digest) = component.digest {
-                    verify_checksum_impl(digest, &buf, "component")?;
-                }
-                buf
-            }
-        };
-
-        // Handle endianness
-        if cfg!(target_endian = "big") && component.dtype.is_multi_byte() {
-            swap_endianness_in_place(&mut data, component.dtype.byte_size());
-        }
-
-        Ok(data)
-    }
-
-    /// Reads object as typed vector.
-    pub fn read_object_as<T: Pod>(&mut self, name: &str) -> Result<Vec<T>, ZTensorError> {
-        let obj = self.manifest.objects.get(name)
-            .ok_or_else(|| ZTensorError::ObjectNotFound(name.to_string()))?;
-
-        let component = obj.components.get("data")
-            .ok_or_else(|| ZTensorError::InvalidFileStructure("Missing data".to_string()))?;
-
-        if !T::dtype_matches(&component.dtype) {
-            return Err(ZTensorError::TypeMismatch {
-                expected: component.dtype.as_str().to_string(),
-                found: std::any::type_name::<T>().to_string(),
-                context: format!("object '{}'", name),
-            });
-        }
-
-        let bytes = self.read_object(name, true)?;
-        let num_elements = bytes.len() / T::SIZE;
-        let mut result = vec![T::default(); num_elements];
-
-        unsafe {
-            std::slice::from_raw_parts_mut(result.as_mut_ptr() as *mut u8, bytes.len())
-                .copy_from_slice(&bytes);
-        }
-
-        Ok(result)
-    }
-}
-
-fn verify_checksum_impl(digest: &str, data: &[u8], name: &str) -> Result<(), ZTensorError> {
-    if digest.starts_with("crc32c:0x") || digest.starts_with("crc32c:0X") {
-        let expected_hex = &digest[9..];
-        let expected = u32::from_str_radix(expected_hex, 16).map_err(|_| {
-            ZTensorError::ChecksumFormatError(format!("Invalid CRC32C: {}", expected_hex))
-        })?;
-        let calculated = crc32c::crc32c(data);
-        if calculated != expected {
-            return Err(ZTensorError::ChecksumMismatch {
-                object_name: name.to_string(),
-                component_name: "data".to_string(),
-                expected: format!("0x{:08X}", expected),
-                calculated: format!("0x{:08X}", calculated),
-            });
-        }
-    } else if digest.starts_with("sha256:") {
-        let expected_hex = &digest[7..];
-        let calculated = crate::utils::sha256_hex(data);
-        if calculated != expected_hex.to_lowercase() {
-            return Err(ZTensorError::ChecksumMismatch {
-                object_name: name.to_string(),
-                component_name: "data".to_string(),
-                expected: expected_hex.to_string(),
-                calculated,
-            });
-        }
-    }
-    Ok(())
-}
-
-/// Checks if a file is v0.1.0 format by reading magic.
-pub fn is_legacy_format<R: Read + Seek>(reader: &mut R) -> Result<bool, ZTensorError> {
+/// Checks if a reader contains v0.1.0 format by reading magic.
+pub fn is_legacy_format<R: Read + Seek>(reader: &mut R) -> Result<bool, Error> {
     let pos = reader.stream_position()?;
     let mut magic = [0u8; 8];
     reader.read_exact(&mut magic)?;
@@ -426,7 +26,7 @@ pub fn is_legacy_format<R: Read + Seek>(reader: &mut R) -> Result<bool, ZTensorE
 }
 
 /// Checks if a file at path is v0.1.0 format.
-pub fn is_legacy_file(path: impl AsRef<Path>) -> Result<bool, ZTensorError> {
+pub fn is_legacy_file(path: impl AsRef<Path>) -> Result<bool, Error> {
     let mut file = File::open(path)?;
     is_legacy_format(&mut file)
 }
@@ -461,9 +61,6 @@ mod tests {
         file.write_all(MAGIC_V01)?;
 
         // Padding to align to 64 bytes (ALIGNMENT)
-        // File pos is 8.
-        // We want data at 64.
-        // Padding bytes = 64 - 8 = 56.
         let padding = vec![0u8; 56];
         file.write_all(&padding)?;
 
@@ -475,8 +72,6 @@ mod tests {
         file.write_all(bytes)?;
 
         // 4. Create Manifest (CBOR)
-        // struct LegacyTensorMeta { ... }
-        // We need to construct this manually or use a helper struct for serialization
         #[derive(serde::Serialize)]
         struct LegacyTensorMetaSer {
             name: String,
@@ -495,11 +90,12 @@ mod tests {
             dtype: "float32".to_string(),
             shape: vec![4],
             encoding: "raw".to_string(),
-            layout: "dense".to_string(),
+            layout: "dense".to_owned(),
         };
-        
+
         let manifest = vec![meta];
-        let cbor_data = serde_cbor::to_vec(&manifest)?;
+        let mut cbor_data = Vec::new();
+        ciborium::into_writer(&manifest, &mut cbor_data)?;
         file.write_all(&cbor_data)?;
 
         // 5. Write Manifest Size
@@ -508,15 +104,15 @@ mod tests {
         // Flush
         file.flush()?;
 
-        // 6. Test Reader
-        let reader = LegacyReader::open_mmap(&path)?;
-        
+        // 6. Test Reader - now uses unified Reader via open_mmap_any
+        let reader = Reader::open_mmap_any(&path)?;
+
         // Test untyped
-        let slice = reader.get_object_slice("tensor1")?;
+        let slice = reader.view("tensor1")?;
         assert_eq!(slice, bytes);
 
         // Test typed
-        let typed_slice = reader.get_object_slice_as::<f32>("tensor1")?;
+        let typed_slice = reader.view_as::<f32>("tensor1")?;
         assert_eq!(typed_slice, &data);
 
         Ok(())

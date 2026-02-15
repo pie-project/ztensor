@@ -2,17 +2,27 @@
 
 use crate::models::ALIGNMENT;
 
+/// Aligns an offset up to the given alignment boundary.
+/// Returns (aligned_offset, padding_bytes).
+#[inline]
+pub fn align_offset_to(current_offset: u64, alignment: u64) -> (u64, u64) {
+    if alignment == 0 {
+        return (current_offset, 0);
+    }
+    let remainder = current_offset % alignment;
+    if remainder == 0 {
+        (current_offset, 0)
+    } else {
+        let padding = alignment - remainder;
+        (current_offset + padding, padding)
+    }
+}
+
 /// Calculates the aligned offset and required padding for 64-byte alignment.
 /// Returns (aligned_offset, padding_bytes).
 #[inline]
 pub fn align_offset(current_offset: u64) -> (u64, u64) {
-    let remainder = current_offset % ALIGNMENT;
-    if remainder == 0 {
-        (current_offset, 0)
-    } else {
-        let padding = ALIGNMENT - remainder;
-        (current_offset + padding, padding)
-    }
+    align_offset_to(current_offset, ALIGNMENT)
 }
 
 /// Returns true if the host system is little-endian.
@@ -38,32 +48,28 @@ pub fn sha256_hex(data: &[u8]) -> String {
     hex::encode(hash)
 }
 
-/// A writer that updates a checksum digest as it writes.
+/// A writer that updates a checksum digest and counts bytes as it writes.
 pub struct DigestWriter<W: std::io::Write> {
     inner: W,
     crc32: Option<crc32c::Crc32cHasher>,
     sha256: Option<sha2::Sha256>,
+    pub bytes_written: u64,
 }
 
 impl<W: std::io::Write> DigestWriter<W> {
-    pub fn new(inner: W, algorithm: crate::models::ChecksumAlgorithm) -> Self {
-        use crate::models::ChecksumAlgorithm;
+    pub fn new(inner: W, algorithm: crate::models::Checksum) -> Self {
+        use crate::models::Checksum;
         let (crc32, sha256) = match algorithm {
-            ChecksumAlgorithm::None => (None, None),
-            ChecksumAlgorithm::Crc32c => (Some(crc32c::Crc32cHasher::default()), None),
-            ChecksumAlgorithm::Sha256 => (None, Some(sha2::Sha256::default())),
+            Checksum::None => (None, None),
+            Checksum::Crc32c => (Some(crc32c::Crc32cHasher::default()), None),
+            Checksum::Sha256 => (None, Some(sha2::Sha256::default())),
         };
-        Self { inner, crc32, sha256 }
+        Self { inner, crc32, sha256, bytes_written: 0 }
     }
 
     pub fn finalize(self) -> Option<String> {
         use sha2::Digest;
         if let Some(hasher) = self.crc32 {
-            // crc32c crate hasher doesn't expose inner state easily in all versions, 
-            // but let's assume standard usage.
-            // Wait, crc32c::Crc32cHasher is not the main API, usually it's crc32c::crc32c(&data).
-            // But for streaming we need a hasher.
-            // The `crc32c` crate (0.6.5) has `Crc32cHasher` which implements `Hasher`.
             use std::hash::Hasher;
             Some(format!("crc32c:0x{:08X}", hasher.finish() as u32))
         } else if let Some(hasher) = self.sha256 {
@@ -78,8 +84,9 @@ impl<W: std::io::Write> DigestWriter<W> {
 impl<W: std::io::Write> std::io::Write for DigestWriter<W> {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         let n = self.inner.write(buf)?;
+        self.bytes_written += n as u64;
         let slice = &buf[..n];
-        
+
         if let Some(h) = &mut self.crc32 {
             use std::hash::Hasher;
             h.write(slice);
@@ -94,5 +101,29 @@ impl<W: std::io::Write> std::io::Write for DigestWriter<W> {
 
     fn flush(&mut self) -> std::io::Result<()> {
         self.inner.flush()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_align_offset_to() {
+        assert_eq!(align_offset_to(0, 32), (0, 0));
+        assert_eq!(align_offset_to(1, 32), (32, 31));
+        assert_eq!(align_offset_to(31, 32), (32, 1));
+        assert_eq!(align_offset_to(32, 32), (32, 0));
+        assert_eq!(align_offset_to(33, 32), (64, 31));
+        assert_eq!(align_offset_to(64, 32), (64, 0));
+        assert_eq!(align_offset_to(0, 0), (0, 0));
+    }
+
+    #[test]
+    fn test_align_offset_64() {
+        assert_eq!(align_offset(0), (0, 0));
+        assert_eq!(align_offset(1), (64, 63));
+        assert_eq!(align_offset(64), (64, 0));
+        assert_eq!(align_offset(65), (128, 63));
     }
 }

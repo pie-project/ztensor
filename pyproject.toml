@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "ztensor"
-version = "1.1.1"
+version = "1.2.0"
 description = "Python bindings for the zTensor library."
 readme = "README.md" 
 authors = [
@@ -21,9 +21,9 @@ classifiers = [
 ]
 dependencies = [
     "numpy",
-    "cffi",
-    "ml_dtypes"
 ]
+[project.optional-dependencies]
+bfloat16 = ["ml_dtypes"]
 
 [project.urls]
 Homepage = "https://github.com/pie-project/ztensor"
@@ -31,5 +31,7 @@ Source = "https://github.com/pie-project/ztensor"
 
 [tool.maturin]
 profile = "release"
-bindings = "cffi"
+bindings = "pyo3"
 python-source = "python"
+features = ["python"]
+module-name = "ztensor._ztensor"

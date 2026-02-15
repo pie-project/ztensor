@@ -1,10 +1,6 @@
 //! zTensor CLI: inspect, convert, and compress tensor files
 
-
-
 mod commands;
-mod extractors;
-mod pickle;
 mod utils;
 
 use anyhow::{Result, bail};
@@ -16,21 +12,27 @@ use commands::{
     compress_ztensor, decompress_ztensor, download_hf, merge_ztensor_files,
     migrate_ztensor, print_tensor_metadata, print_tensors_table, run_conversion,
 };
-use extractors::{GgufExtractor, PickleExtractor, SafeTensorExtractor};
-use ztensor::ZTensorReader;
 
-/// Input format selection with auto-detection
+/// Checksum algorithm selection
 #[derive(ValueEnum, Clone, Debug, Default, PartialEq)]
-pub enum FormatArg {
-    /// Auto-detect from file extension
+pub enum ChecksumArg {
+    /// No checksum
     #[default]
-    Auto,
-    /// SafeTensor format (.safetensor, .safetensors)
-    Safetensor,
-    /// GGUF format (.gguf)
-    Gguf,
-    /// Pickle format (.pkl, .pickle)
-    Pickle,
+    None,
+    /// CRC-32C checksum
+    Crc32c,
+    /// SHA-256 checksum
+    Sha256,
+}
+
+impl ChecksumArg {
+    pub fn to_checksum(&self) -> ztensor::Checksum {
+        match self {
+            Self::None => ztensor::Checksum::None,
+            Self::Crc32c => ztensor::Checksum::Crc32c,
+            Self::Sha256 => ztensor::Checksum::Sha256,
+        }
+    }
 }
 
 #[derive(Parser)]
@@ -38,7 +40,7 @@ pub enum FormatArg {
     name = "ztensor",
     version,
     about = "zTensor CLI: inspect, convert, and compress tensor files",
-    long_about = "zTensor CLI is a tool for inspecting, converting, and compressing tensor files.\n\nSupported formats:\n  - SafeTensor (.safetensor, .safetensors)\n  - GGUF (.gguf)\n  - Pickle (.pkl, .pickle)\n  - zTensor (.zt)\n\nYou can convert between formats, compress/decompress zTensor files, and view metadata/stats.",
+    long_about = "zTensor CLI is a tool for inspecting, converting, and compressing tensor files.\n\nSupported formats:\n  - SafeTensors (.safetensors)\n  - GGUF (.gguf)\n  - PyTorch/Pickle (.pt, .bin, .pth, .pkl)\n  - NumPy (.npz)\n  - ONNX (.onnx)\n  - HDF5 (.h5, .hdf5)\n  - zTensor (.zt)\n\nYou can convert between formats, compress/decompress zTensor files, and view metadata/stats.",
     author,
     propagate_version = true
 )]
@@ -49,18 +51,19 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Convert tensor files (SafeTensor, GGUF, Pickle) to zTensor format
+    /// Convert tensor files to zTensor format
     #[command(
         about = "Convert one or more tensor files to a single zTensor file.",
         long_about = "Convert one or more tensor files to a single zTensor file.\n\n\
-            Supported input formats: SafeTensor, GGUF, Pickle.\n\n\
+            Supported input formats: SafeTensors, GGUF, PyTorch/Pickle, NumPy, ONNX, HDF5.\n\n\
             Examples:\n  \
-            ztensor convert model.safetensor -o model.zt\n  \
-            ztensor convert -f gguf model1.gguf model2.gguf -o model.zt\n  \
-            ztensor convert -c --delete-original *.pkl -o model.zt\n"
+            ztensor convert model.safetensors -o model.zt\n  \
+            ztensor convert model.gguf -o model.zt -c\n  \
+            ztensor convert --checksum crc32c *.npz -o model.zt\n  \
+            ztensor convert -c --delete-original *.pt -o model.zt\n"
     )]
     Convert {
-        /// Input files (.safetensor, .gguf, .pkl, etc)
+        /// Input files (.safetensors, .gguf, .pt, .pkl, .npz, .onnx, .h5, etc)
         #[arg(required = true)]
         inputs: Vec<String>,
 
@@ -76,16 +79,16 @@ enum Commands {
         #[arg(short = 'l', long)]
         level: Option<i32>,
 
-        /// Input format (auto-detects from extension by default)
-        #[arg(short = 'f', long, value_enum, default_value_t = FormatArg::Auto)]
-        format: FormatArg,
+        /// Checksum algorithm for data integrity
+        #[arg(long, value_enum, default_value_t = ChecksumArg::None)]
+        checksum: ChecksumArg,
 
         /// Delete original files after successful conversion
         #[arg(long)]
         delete_original: bool,
     },
 
-    /// Compress a zTensor file (raw → zstd)
+    /// Compress a zTensor file (raw -> zstd)
     #[command(
         about = "Compress an uncompressed zTensor file using zstd encoding.",
         long_about = "Compress a zTensor file that uses raw encoding to zstd encoding.\n\n\
@@ -104,7 +107,7 @@ enum Commands {
         level: Option<i32>,
     },
 
-    /// Decompress a zTensor file (zstd → raw)
+    /// Decompress a zTensor file (zstd -> raw)
     #[command(
         about = "Decompress a compressed zTensor file to raw encoding.",
         long_about = "Decompress a zTensor file that uses zstd encoding to raw encoding.\n\n\
@@ -119,17 +122,17 @@ enum Commands {
         output: String,
     },
 
-    /// Migrate a v0.1.0 ztensor file to v1.1.0 format
+    /// Migrate a v0.1.0 ztensor file to v1.2.0 format
     #[command(
-        about = "Migrate a zTensor file from version 0.1.0 to 1.1.0.",
-        long_about = "Migrate a legacy zTensor file (v0.1.0) to the current format (v1.1.0).\n\n\
+        about = "Migrate a zTensor file from version 0.1.0 to 1.2.0.",
+        long_about = "Migrate a legacy zTensor file (v0.1.0) to the current format (v1.2.0).\n\n\
             Example:\n  ztensor migrate old_model.zt -o new_model.zt\n"
     )]
     Migrate {
         /// Input .zt file (v0.1.0)
         input: String,
 
-        /// Output .zt file (v1.1.0)
+        /// Output .zt file (v1.2.0)
         #[arg(short = 'o', long, required = true)]
         output: String,
 
@@ -142,15 +145,16 @@ enum Commands {
         level: Option<i32>,
     },
 
-    /// Show metadata and stats for a zTensor file
+    /// Show metadata and stats for a tensor file
     #[command(
-        about = "Display metadata and statistics for a zTensor file.",
-        long_about = "Display metadata and statistics for a zTensor file, including tensor names, \
+        about = "Display metadata and statistics for a tensor file.",
+        long_about = "Display metadata and statistics for a tensor file, including tensor names, \
             shapes, data types, encodings, and sizes.\n\n\
-            Example:\n  ztensor info model.zt\n"
+            Supports all formats: .zt, .safetensors, .gguf, .pt, .npz, .onnx, .h5\n\n\
+            Example:\n  ztensor info model.zt\n  ztensor info model.safetensors\n"
     )]
     Info {
-        /// Path to the .zt file
+        /// Path to the tensor file
         file: String,
     },
 
@@ -215,14 +219,14 @@ enum Commands {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    
+
     match &cli.command {
         Some(Commands::Convert {
             inputs,
             output,
             compress,
             level,
-            format,
+            checksum,
             delete_original,
         }) => {
             if inputs.is_empty() {
@@ -231,37 +235,12 @@ fn main() -> Result<()> {
             if Path::new(output).exists() {
                 bail!("Output file '{}' already exists. Please remove it or choose a different name.", output);
             }
-            
-            let detected_format = match format {
-                FormatArg::Auto => utils::detect_format_for_inputs_auto(inputs),
-                FormatArg::Safetensor => Some(utils::InputFormat::SafeTensor),
-                FormatArg::Gguf => Some(utils::InputFormat::GGUF),
-                FormatArg::Pickle => Some(utils::InputFormat::Pickle),
-            };
-            
-            // Invert delete_original to get preserve flag
+
+            let compression = commands::get_compression(*compress, *level);
             let preserve = !delete_original;
-            
-            match detected_format {
-                Some(utils::InputFormat::SafeTensor) => {
-                    run_conversion(SafeTensorExtractor, inputs, output, *compress, *level, preserve)?;
-                    println!("Successfully converted {} safetensor file(s) into {}", inputs.len(), output);
-                }
-                Some(utils::InputFormat::GGUF) => {
-                    run_conversion(GgufExtractor, inputs, output, *compress, *level, preserve)?;
-                    println!("Successfully converted {} GGUF file(s) into {}", inputs.len(), output);
-                }
-                Some(utils::InputFormat::Pickle) => {
-                    run_conversion(PickleExtractor, inputs, output, *compress, *level, preserve)?;
-                    println!("Successfully converted {} pickle file(s) into {}", inputs.len(), output);
-                }
-                None => {
-                    bail!(
-                        "Could not auto-detect input format. Files may have mixed or unsupported extensions.\n\
-                        Please specify --format [safetensor|gguf|pickle] and ensure all inputs are the same type."
-                    );
-                }
-            }
+
+            run_conversion(inputs, output, compression, checksum.to_checksum(), preserve)?;
+            println!("Successfully converted {} file(s) into {}", inputs.len(), output);
         }
         Some(Commands::Compress { input, output, level }) => {
             if Path::new(output).exists() {
@@ -285,48 +264,22 @@ fn main() -> Result<()> {
             println!("Successfully migrated {} to {}", input, output);
         }
         Some(Commands::Info { file }) => {
-            // Check for legacy format first
-            if ztensor::is_legacy_file(file)? {
-                let reader = ztensor::LegacyReader::open(file)
-                    .map_err(|e| anyhow::anyhow!("Failed to open legacy file '{}': {}", file, e))?;
-                
-                let objects = reader.list_objects();
-                
-                println!("File: {}", file);
-                println!("Version: {} (Legacy)", reader.manifest.version);
-                println!("Attributes: {:?}", reader.manifest.attributes);
-                println!("Total Objects: {}", objects.len());
-                println!();
+            let reader = ztensor::open(file)
+                .map_err(|e| anyhow::anyhow!("Failed to open file '{}': {}", file, e))?;
+            let objects = reader.tensors();
 
-                if objects.len() < 20 {
-                    for (name, obj) in objects {
-                       println!("--- Object: {} ---", name);
-                       print_tensor_metadata(name, obj);
-                       println!();
-                    }
-                } else {
-                    print_tensors_table(objects);
+            println!("File: {}", file);
+            println!("Total Objects: {}", objects.len());
+            println!();
+
+            if objects.len() < 20 {
+                for (name, obj) in objects {
+                    println!("--- Object: {} ---", name);
+                    print_tensor_metadata(name, obj);
+                    println!();
                 }
             } else {
-                let reader = ZTensorReader::open(file)
-                    .map_err(|e| anyhow::anyhow!("Failed to open file '{}': {}", file, e))?;
-                let objects = reader.list_objects();
-                
-                println!("File: {}", file);
-                println!("Version: {}", reader.manifest.version);
-                println!("Attributes: {:?}", reader.manifest.attributes);
-                println!("Total Objects: {}", objects.len());
-                println!();
-
-                if objects.len() < 20 {
-                    for (name, obj) in objects {
-                       println!("--- Object: {} ---", name);
-                       print_tensor_metadata(name, obj);
-                       println!();
-                    }
-                } else {
-                    print_tensors_table(objects);
-                }
+                print_tensors_table(objects);
             }
         }
         Some(Commands::Merge { inputs, output, delete_original }) => {
@@ -355,6 +308,6 @@ fn main() -> Result<()> {
             println!();
         }
     }
-    
+
     Ok(())
 }

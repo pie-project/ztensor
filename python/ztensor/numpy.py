@@ -22,7 +22,7 @@ from . import Reader, Writer, ZTensorError
 
 
 def save_file(
-    tensor_dict: Dict[str, np.ndarray],
+    tensors: Dict[str, np.ndarray],
     filename: Union[str, os.PathLike],
     metadata: Optional[Dict[str, str]] = None,
     compression: Union[bool, int] = False,
@@ -31,7 +31,7 @@ def save_file(
     Saves a dictionary of tensors into `filename` in ztensor format.
 
     Args:
-        tensor_dict: The incoming tensors. Tensors need to be contiguous and dense.
+        tensors: The incoming tensors. Tensors need to be contiguous and dense.
         filename: The filename we're saving into.
         metadata: Optional text only metadata you might want to save in your
             header. For instance it can be useful to specify more about the
@@ -52,16 +52,14 @@ def save_file(
         >>> tensors = {"embedding": np.zeros((512, 1024)), "attention": np.zeros((256, 256))}
         >>> save_file(tensors, "model.zt")
     """
-    _validate_tensors(tensor_dict)
-    
-    with Writer(str(filename)) as writer:
-        for name, tensor in tensor_dict.items():
-            tensor = np.ascontiguousarray(tensor)
-            writer.add_tensor(name, tensor, compress=compression)
+    _validate_tensors(tensors)
+
+    from ._ztensor import save_file as _native_save_file
+    _native_save_file(tensors, str(filename), compression=compression)
 
 
 def save(
-    tensor_dict: Dict[str, np.ndarray],
+    tensors: Dict[str, np.ndarray],
     metadata: Optional[Dict[str, str]] = None,
     compression: Union[bool, int] = False,
 ) -> bytes:
@@ -69,7 +67,7 @@ def save(
     Saves a dictionary of tensors into raw bytes in ztensor format.
 
     Args:
-        tensor_dict: The incoming tensors. Tensors need to be contiguous and dense.
+        tensors: The incoming tensors. Tensors need to be contiguous and dense.
         metadata: Optional text only metadata you might want to save in your
             header. This is purely informative and does not affect tensor loading.
             NOTE: ztensor does not currently support custom metadata; this
@@ -87,14 +85,13 @@ def save(
         >>> tensors = {"embedding": np.zeros((512, 1024)), "attention": np.zeros((256, 256))}
         >>> byte_data = save(tensors)
     """
-    _validate_tensors(tensor_dict)
-    
-    # Create a temporary file, write to it, read the bytes, then clean up
+    _validate_tensors(tensors)
+
     with tempfile.NamedTemporaryFile(delete=False, suffix=".zt") as tmp:
         tmp_path = tmp.name
-    
+
     try:
-        save_file(tensor_dict, tmp_path, metadata=metadata, compression=compression)
+        save_file(tensors, tmp_path, metadata=metadata, compression=compression)
         with open(tmp_path, "rb") as f:
             return f.read()
     finally:
@@ -104,39 +101,36 @@ def save(
 
 def load_file(
     filename: Union[str, os.PathLike],
+    copy: bool = False,
 ) -> Dict[str, np.ndarray]:
     """
-    Loads a ztensor file into numpy format.
+    Loads a tensor file into numpy format.
+
+    Supports multiple formats (auto-detected by extension):
+        - .zt: zTensor format
+        - .safetensors: HuggingFace SafeTensors format
+        - .pt, .bin, .pth: PyTorch format
 
     Args:
         filename: The name of the file which contains the tensors.
+        copy: If False (default), returns arrays backed by memory-mapped data
+            with copy-on-write semantics (zero-copy reads, much faster).
+            Arrays are writable — writes trigger per-page copies at the OS level.
+            If True, returns independent arrays by copying data.
 
     Returns:
         Dictionary that contains name as key, value as `np.ndarray`.
 
     Example:
         >>> from ztensor.numpy import load_file
-        >>> file_path = "./my_folder/bert.zt"
-        >>> loaded = load_file(file_path)
+        >>> loaded = load_file("model.zt")
+        >>> loaded = load_file("model.safetensors")
+        >>> loaded = load_file("model.pt")
+        >>> # For full independent copies:
+        >>> loaded = load_file("model.zt", copy=True)
     """
-    # Create Reader instance directly without context manager
-    # This is crucial for zero-copy views: if the reader is closed (via __exit__),
-    # the memory-mapped data becomes invalid.
-    # The reader is kept alive by the returned arrays via their `_reader_ref`.
     reader = Reader(str(filename))
-    try:
-        names = reader.tensor_names
-        if not names:
-            return {}
-        # Use batch API for efficiency
-        tensors = reader.read_tensors(names, to='numpy')
-        return dict(zip(names, tensors))
-    except Exception:
-        # If an error occurs during loading, we should close the reader
-        # to prevent resource leaks (though GC would eventually do it).
-        lib.ztensor_reader_free(reader._ptr)
-        reader._ptr = None
-        raise
+    return reader.load_numpy(copy=copy)
 
 
 def load(data: bytes) -> Dict[str, np.ndarray]:
@@ -156,11 +150,10 @@ def load(data: bytes) -> Dict[str, np.ndarray]:
         ...     data = f.read()
         >>> loaded = load(data)
     """
-    # Write bytes to a temporary file and then load
     with tempfile.NamedTemporaryFile(delete=False, suffix=".zt") as tmp:
         tmp.write(data)
         tmp_path = tmp.name
-    
+
     try:
         return load_file(tmp_path)
     finally:
@@ -170,14 +163,14 @@ def load(data: bytes) -> Dict[str, np.ndarray]:
 
 # --- Helper Functions ---
 
-def _validate_tensors(tensor_dict: Dict[str, np.ndarray]) -> None:
+def _validate_tensors(tensors: Dict[str, np.ndarray]) -> None:
     """Validates that all tensors are valid for saving."""
-    if not isinstance(tensor_dict, dict):
+    if not isinstance(tensors, dict):
         raise ValueError(
-            f"Expected a dict of [str, np.ndarray] but received {type(tensor_dict)}"
+            f"Expected a dict of [str, np.ndarray] but received {type(tensors)}"
         )
-    
-    for k, v in tensor_dict.items():
+
+    for k, v in tensors.items():
         if not isinstance(v, np.ndarray):
             raise ValueError(
                 f"Key `{k}` is invalid, expected np.ndarray but received {type(v)}"

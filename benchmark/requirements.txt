@@ -3,6 +3,7 @@ numpy
 safetensors
 h5py
 gguf
+onnx
 psutil
 pandas
 tqdm

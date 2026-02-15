@@ -1,31 +1,51 @@
 [package]
 name = "ztensor"
-version = "1.1.1"
+version = "1.2.0"
 edition = "2021"
 authors = ["In Gim <in.gim@yale.edu>"]
-description = "zTensor file library - v1.1 spec"
+description = "zTensor file library - v1.2 spec"
 license = "MIT"
 repository = "https://github.com/pie-project/ztensor"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[features]
+default = []
+safetensors = ["dep:safetensors"]
+pickle = ["dep:zip"]
+gguf = []
+npz = ["dep:zip"]
+onnx = []
+hdf5 = []
+all-formats = ["safetensors", "pickle", "gguf", "npz", "onnx", "hdf5"]
+cffi = ["dep:libc"]
+python = ["dep:pyo3", "dep:numpy", "all-formats"]
+
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
-serde_cbor = "0.11"
+ciborium = "0.2"
+thiserror = "2"
 zstd = "0.13"
-byteorder = "1.5"
 crc32c = "0.6.8"
-libc = "0.2"
+libc = { version = "0.2", optional = true }
 memmap2 = "0.9"
 bytemuck = { version = "1.16", features = ["derive"] }
 half = { version = "2.4", features = ["bytemuck"] }
 sha2 = "0.10"
 hex = "0.4"
+safetensors = { version = "0.4", optional = true }
+zip = { version = "2", optional = true, default-features = false, features = ["deflate"] }
+pyo3 = { version = "0.24", features = ["extension-module"], optional = true }
+numpy = { version = "0.24", optional = true }
 
-
-[build-dependencies]
-cbindgen = "0.29.0"
+[profile.release]
+lto = "fat"
+codegen-units = 1
 
 [dev-dependencies]
 tempfile = "3.8"
+safetensors = "0.4"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+bytemuck = { version = "1.16", features = ["derive"] }
+half = { version = "2.4", features = ["bytemuck"] }
