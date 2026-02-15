@@ -30,7 +30,7 @@ zTensor reads `.safetensors`, `.pt`, `.gguf`, `.npz`, `.onnx`, `.h5`, and `.zt` 
 Existing tensor formats each solve part of the problem, but none solve it cleanly:
 
 - **Pickle-based formats** (`.pt`, `.bin`) execute arbitrary code on load; a model file can run anything on the reader's machine.
-- **SafeTensors** is safe but treats every tensor as a flat, dense array of a fixed dtype. Sparse matrices, quantized weight groups, or FP8 can't be represented without a spec change.
+- **SafeTensors** is safe but treats every tensor as a flat, dense array of a fixed dtype. New formats can't be represented without a spec change.
 - **GGUF** handles quantization but bakes each scheme into the dtype enum, coupling the format to the llama.cpp ecosystem.
 - **NumPy `.npz`** has no alignment guarantees (no mmap), no compression beyond zip, and no structured metadata.
 
