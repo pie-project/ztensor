@@ -4,17 +4,17 @@
 [![PyPI](https://img.shields.io/pypi/v/ztensor.svg)](https://pypi.org/project/ztensor/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-Faster, safer, and unified reader for tensor formats.
+Unified, zero-copy, and safe I/O for deep learning formats.
 
 ## Reading
 
 zTensor reads `.safetensors`, `.pt`, `.gguf`, `.npz`, `.onnx`, `.h5`, and `.zt` files through a single API. Format detection is automatic. Because it uses memory-mapped I/O, it is often faster than each format's own reader. For `.pt` files, it parses pickle using a restricted VM in Rust that only extracts tensor metadata, so no arbitrary code can execute.
 
 <p align="center">
-  <img src="docs/charts/cross_format_read.svg" alt="Cross-format read throughput" width="700">
+  <img src="website/static/charts/cross_format_read.svg" alt="Cross-format read throughput" width="700">
 </p>
 
-| Source format | zTensor | Reference impl. | Speedup |
+| Format | zTensor | Reference impl. | Speedup |
 | :--- | :--- | :--- | :--- |
 | .safetensors | 2.27 GB/s | 1.48 GB/s ([safetensors](https://github.com/huggingface/safetensors)) | **+53%** |
 | .pt | 2.26 GB/s | 1.44 GB/s ([torch](https://github.com/pytorch/pytorch)) | **+57%** |
@@ -39,7 +39,7 @@ Most formats equate "tensor" with "flat array of one dtype." Once you need somet
 `.zt` models each tensor as a composite object with typed components, so dense, sparse, and quantized data all fit without extending the format. It also supports zero-copy mmap reads, zstd compression, integrity checksums, and streaming writes. Read the full [specification](https://pie-project.github.io/ztensor/spec).
 
 <p align="center">
-  <img src="docs/charts/write_throughput.svg" alt="Write throughput by workload" width="700">
+  <img src="website/static/charts/write_throughput.svg" alt="Write throughput by workload" width="700">
 </p>
 
 | Format | Large | Mixed | Small |
@@ -56,12 +56,16 @@ Most formats equate "tensor" with "flat array of one dtype." Once you need somet
 
 | Feature | .zt | .safetensors | .gguf | .pt (pickle) | .npz | .onnx | .h5 |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| Zero-copy read | ✓ | ✓ | ✓ | | | | |
+| Zero-copy read | ✓ | ✓ | ✓ | ~² | ~² | | |
 | Safe (no code exec) | ✓ | ✓ | ✓ | | ✓ | ✓ | ✓ |
-| Streaming / append | ✓ | | | | | | |
+| Streaming / append | ✓ | | | | ~³ | | ✓ |
 | Sparse tensors | ✓ | | | ✓ | | | |
-| Compression (zstd) | ✓ | | | | | | |
+| Per-tensor compression | ✓ | | | | ✗¹ | | ✓ |
 | Extensible types | ✓ | | | N/A | | ✓ | ✓ |
+
+¹ `.npz` uses archive-level zip/deflate, not per-tensor compression.
+² Partial support (requires specific alignment or uncompressed data).
+³ Zip append support (not standard API).
 
 ## Installation
 

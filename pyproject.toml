@@ -5,7 +5,7 @@ build-backend = "maturin"
 [project]
 name = "ztensor"
 version = "1.2.0"
-description = "Python bindings for the zTensor library."
+description = "Unified, zero-copy, and safe I/O for deep learning formats."
 readme = "README.md" 
 authors = [
     { name = "In Gim", email = "in.gim@yale.edu" },

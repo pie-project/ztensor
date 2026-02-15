@@ -3,7 +3,7 @@ name = "ztensor"
 version = "1.2.0"
 edition = "2021"
 authors = ["In Gim <in.gim@yale.edu>"]
-description = "zTensor file library - v1.2 spec"
+description = "Unified, zero-copy, and safe I/O for deep learning formats"
 license = "MIT"
 repository = "https://github.com/pie-project/ztensor"
 

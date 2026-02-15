@@ -2,7 +2,7 @@
 """Generate SVG benchmark charts for the README.
 
 Uses the same data as the website's BenchmarkCharts.jsx.
-Output goes to docs/charts/.
+Output goes to website/static/charts/.
 
 Usage:
     python scripts/generate_readme_charts.py
@@ -14,7 +14,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "..", "docs", "charts")
+OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "..", "website", "static", "charts")
 
 # ── Palette (matches website light theme) ──────────────────────────────
 
@@ -77,22 +77,12 @@ def draw_cross_format_read(path):
                          color=BASELINE_GRAY, edgecolor="white", linewidth=0.5,
                          zorder=3)
 
-    # Value labels
-    for bar in bars_zt:
-        h = bar.get_height()
-        ax.text(bar.get_x() + bar.get_width() / 2, h + 0.04,
-                f"{h:.2f}", ha="center", va="bottom", fontsize=8,
-                color=TEXT_COLOR, fontweight="bold")
-    for bar in bars_native:
-        h = bar.get_height()
-        ax.text(bar.get_x() + bar.get_width() / 2, h + 0.04,
-                f"{h:.2f}", ha="center", va="bottom", fontsize=8,
-                color=MUTED_COLOR)
 
     _style_ax(ax, "Read Throughput (GB/s)")
     ax.set_xticks(x)
     ax.set_xticklabels(labels, fontsize=10, color=TEXT_COLOR)
-    ax.legend(fontsize=9, frameon=False, loc="upper right")
+    ax.legend(fontsize=9, frameon=False, loc="upper center", ncol=2,
+              bbox_to_anchor=(0.5, 1.0))
     ax.set_ylim(0, max(zt_vals + native_vals) * 1.18)
 
     fig.tight_layout()
@@ -157,7 +147,7 @@ def draw_write_throughput(path):
         Patch(facecolor="#93C5FD", label="Small"),
     ]
     ax.legend(handles=legend_elements, fontsize=9, frameon=False,
-              loc="upper right")
+              loc="upper center", ncol=3, bbox_to_anchor=(0.5, 1.0))
     ax.set_ylim(0, max(large + mixed + small) * 1.12)
 
     fig.tight_layout()
