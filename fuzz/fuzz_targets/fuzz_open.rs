@@ -2,22 +2,14 @@
 use libfuzzer_sys::fuzz_target;
 use std::io::Write;
 
-const EXTENSIONS: &[&str] = &[
-    ".zt",
-    ".safetensors",
-    ".pt",
-    ".gguf",
-    ".npz",
-    ".onnx",
-    ".h5",
-];
+const EXTENSIONS: &[&str] = &[".zt", ".safetensors", ".pt", ".gguf", ".npz", ".onnx", ".h5"];
 
 fuzz_target!(|data: &[u8]| {
     if data.is_empty() {
         return;
     }
 
-    // Use the first byte to select the extension, remaining bytes as content.
+    // First byte selects the file extension; remaining bytes are the content.
     let ext_idx = data[0] as usize % EXTENSIONS.len();
     let content = &data[1..];
 

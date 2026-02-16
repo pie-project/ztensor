@@ -110,8 +110,18 @@ impl<W: Write + Seek> Writer<W> {
         data: &[u8],
         checksum: Checksum,
     ) -> Result<(), Error> {
-        let num_elements: u64 = if shape.is_empty() { 1 } else { shape.iter().product() };
-        let expected_size = num_elements * dtype.byte_size() as u64;
+        let num_elements: u64 = if shape.is_empty() {
+            1
+        } else {
+            shape.iter().try_fold(1u64, |acc, &d| {
+                acc.checked_mul(d).ok_or_else(|| {
+                    Error::InvalidFileStructure("Shape product overflows u64".into())
+                })
+            })?
+        };
+        let expected_size = num_elements.checked_mul(dtype.byte_size() as u64).ok_or_else(|| {
+            Error::InvalidFileStructure("Tensor byte size overflows u64".into())
+        })?;
 
         if data.len() as u64 != expected_size {
              return Err(Error::InconsistentDataSize {

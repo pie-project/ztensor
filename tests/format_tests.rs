@@ -12,8 +12,8 @@ use tempfile::NamedTempFile;
 
 use ztensor::writer::Compression;
 use ztensor::{
-    Checksum, DType, Encoding, Error, Format, PyTorchReader, SafeTensorsReader,
-    Reader, TensorReader, Writer, NpzReader, OnnxReader,
+    Checksum, DType, Encoding, Error, Format, GgufReader, Hdf5Reader, PyTorchReader,
+    SafeTensorsReader, Reader, TensorReader, Writer, NpzReader, OnnxReader,
 };
 
 // =========================================================================
@@ -1830,7 +1830,7 @@ fn npz_open_dispatch() {
 }
 
 #[test]
-fn npz_not_found() {
+fn npz_error_not_found() {
     let file = build_npz_file(vec![("a", "<f4", &[1], &[0, 0, 0, 0])]);
     let reader = NpzReader::open(file.path()).unwrap();
     match reader.read_as::<f32>("nonexistent") {
@@ -2037,7 +2037,7 @@ fn onnx_open_dispatch() {
 }
 
 #[test]
-fn onnx_not_found() {
+fn onnx_error_not_found() {
     let tensor = build_tensor_proto("a", 1, &[1], &[0, 0, 0, 0]);
     let file = build_onnx_file(vec![tensor]);
     let reader = OnnxReader::open(file.path()).unwrap();
@@ -2060,3 +2060,141 @@ fn onnx_large_tensor() {
     let result: Vec<f32> = reader.read_as("big").unwrap();
     assert_eq!(result, data);
 }
+
+// =========================================================================
+// Section: Robustness / Error-Path Tests
+// =========================================================================
+
+// --- Writer overflow tests ---
+
+#[test]
+fn writer_rejects_shape_overflow() {
+    let mut buf = Cursor::new(Vec::new());
+    let mut writer = Writer::new(&mut buf).unwrap();
+    let data = vec![0u8; 8];
+    let result = writer.add_bytes(
+        "t",
+        vec![u64::MAX, 2],
+        DType::U8,
+        Compression::Raw,
+        &data,
+        Checksum::None,
+    );
+    assert!(result.is_err(), "shape product should overflow");
+}
+
+#[test]
+fn writer_rejects_byte_size_overflow() {
+    let mut buf = Cursor::new(Vec::new());
+    let mut writer = Writer::new(&mut buf).unwrap();
+    let data = vec![0u8; 8];
+    // Shape product fits u64, but num_elements * dtype_size overflows
+    let result = writer.add_bytes(
+        "t",
+        vec![u64::MAX / 2],
+        DType::F64,
+        Compression::Raw,
+        &data,
+        Checksum::None,
+    );
+    assert!(result.is_err(), "byte size should overflow");
+}
+
+// --- GGUF corrupt file tests ---
+
+#[test]
+fn gguf_rejects_truncated_header() {
+    let mut tmp = NamedTempFile::new().unwrap();
+    // Just the magic, no version/counts
+    tmp.write_all(b"GGUF").unwrap();
+    tmp.flush().unwrap();
+    assert!(GgufReader::open(tmp.path()).is_err());
+}
+
+#[test]
+fn gguf_rejects_invalid_version() {
+    let mut tmp = NamedTempFile::new().unwrap();
+    let mut data = Vec::new();
+    data.extend_from_slice(b"GGUF");
+    data.extend_from_slice(&99u32.to_le_bytes()); // invalid version
+    data.extend_from_slice(&0u64.to_le_bytes()); // tensor_count
+    data.extend_from_slice(&0u64.to_le_bytes()); // metadata_kv_count
+    tmp.write_all(&data).unwrap();
+    tmp.flush().unwrap();
+    assert!(GgufReader::open(tmp.path()).is_err());
+}
+
+#[test]
+fn gguf_rejects_huge_tensor_count() {
+    let mut tmp = NamedTempFile::new().unwrap();
+    let mut data = Vec::new();
+    data.extend_from_slice(b"GGUF");
+    data.extend_from_slice(&3u32.to_le_bytes()); // version 3
+    data.extend_from_slice(&u64::MAX.to_le_bytes()); // absurd tensor_count
+    data.extend_from_slice(&0u64.to_le_bytes()); // metadata_kv_count
+    tmp.write_all(&data).unwrap();
+    tmp.flush().unwrap();
+    assert!(GgufReader::open(tmp.path()).is_err());
+}
+
+// --- ONNX corrupt file tests ---
+
+#[test]
+fn onnx_error_truncated_file() {
+    let mut tmp = NamedTempFile::new().unwrap();
+    tmp.write_all(&[0x08, 0x07]).unwrap(); // varint tag + value but no tensors
+    tmp.flush().unwrap();
+    // Truncated file: opens with empty manifest or returns error, must not panic.
+    if let Ok(reader) = OnnxReader::open(tmp.path()) {
+        assert!(reader.manifest.objects.is_empty());
+    }
+}
+
+#[test]
+fn onnx_error_empty_file() {
+    let tmp = NamedTempFile::new().unwrap();
+    // Empty file: opens with empty manifest or returns error, must not panic.
+    if let Ok(reader) = OnnxReader::open(tmp.path()) {
+        assert!(reader.manifest.objects.is_empty());
+    }
+}
+
+// --- HDF5 corrupt file tests ---
+
+#[test]
+fn hdf5_rejects_bad_magic() {
+    let mut tmp = NamedTempFile::new().unwrap();
+    tmp.write_all(b"NOT_HDF5_MAGIC_BYTES").unwrap();
+    tmp.flush().unwrap();
+    assert!(Hdf5Reader::open(tmp.path()).is_err());
+}
+
+#[test]
+fn hdf5_rejects_truncated_superblock() {
+    let mut tmp = NamedTempFile::new().unwrap();
+    // Real HDF5 signature but truncated
+    tmp.write_all(&[0x89, 0x48, 0x44, 0x46, 0x0d, 0x0a, 0x1a, 0x0a]).unwrap();
+    tmp.flush().unwrap();
+    assert!(Hdf5Reader::open(tmp.path()).is_err());
+}
+
+// --- NPZ corrupt file tests ---
+
+#[test]
+fn npz_rejects_invalid_npy_header() {
+    // Create a valid ZIP containing an invalid .npy file
+    let buf = Vec::new();
+    let cursor = Cursor::new(buf);
+    let mut zip = zip::ZipWriter::new(cursor);
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Stored);
+    zip.start_file("arr_0.npy", options).unwrap();
+    zip.write_all(b"NOT_A_NUMPY_ARRAY").unwrap();
+    let cursor = zip.finish().unwrap();
+
+    let mut tmp = NamedTempFile::new().unwrap();
+    tmp.write_all(cursor.get_ref()).unwrap();
+    tmp.flush().unwrap();
+    assert!(NpzReader::open(tmp.path()).is_err());
+}
+

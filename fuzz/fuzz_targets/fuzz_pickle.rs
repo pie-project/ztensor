@@ -1,20 +1,16 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 use std::io::Cursor;
-use ztensor::PyTorchReader;
+use ztensor::{PyTorchReader, TensorReader};
 
 fuzz_target!(|data: &[u8]| {
-    let cursor = Cursor::new(data.to_vec());
-
-    let reader = match PyTorchReader::from_reader(cursor) {
+    let reader = match PyTorchReader::from_reader(Cursor::new(data)) {
         Ok(r) => r,
         Err(_) => return,
     };
 
-    let names: Vec<String> = reader.manifest.objects.keys().cloned().collect();
-
-    for name in &names {
-        let _ = reader.read(name);
+    for name in reader.keys() {
+        let _ = reader.read_data(name);
         let _ = reader.read_as::<f32>(name);
     }
 });

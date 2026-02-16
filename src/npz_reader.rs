@@ -24,12 +24,13 @@ const NPY_MAGIC: &[u8; 6] = b"\x93NUMPY";
 // ---- NPY header parsing ----
 
 /// Parsed .npy array header.
-struct NpyHeader {
-    dtype: DType,
-    shape: Vec<u64>,
-    fortran_order: bool,
+#[doc(hidden)]
+pub struct NpyHeader {
+    pub dtype: DType,
+    pub shape: Vec<u64>,
+    pub fortran_order: bool,
     /// Byte offset where raw data starts (relative to start of .npy data).
-    data_offset: usize,
+    pub data_offset: usize,
 }
 
 /// Parse the numpy dtype descriptor string to a DType.
@@ -125,7 +126,8 @@ fn extract_fortran_order(header: &str) -> bool {
 }
 
 /// Parse an .npy header from raw bytes.
-fn parse_npy_header(data: &[u8]) -> Result<NpyHeader, Error> {
+#[doc(hidden)]
+pub fn parse_npy_header(data: &[u8]) -> Result<NpyHeader, Error> {
     if data.len() < 10 {
         return Err(Error::InvalidFileStructure(
             "Data too small for .npy header".to_string(),

@@ -23,6 +23,18 @@ const MAX_PICKLE_BYTES: usize = 256 * 1024 * 1024;
 /// Maximum recursion depth when extracting tensors from pickle values.
 const MAX_EXTRACT_DEPTH: usize = 128;
 
+/// Maximum number of items on the pickle stack.
+const MAX_STACK_SIZE: usize = 10_000_000;
+
+/// Maximum number of entries in the pickle memo table.
+const MAX_MEMO_SIZE: usize = 10_000_000;
+
+/// Maximum number of opcodes to execute before aborting.
+const MAX_OPCODES: usize = 50_000_000;
+
+/// Maximum number of items in a single list/tuple/dict.
+const MAX_CONTAINER_ITEMS: usize = 1_000_000;
+
 /// Information about a tensor found in a PyTorch pickle.
 #[derive(Debug, Clone)]
 pub struct PtTensorInfo {
@@ -64,6 +76,32 @@ struct TensorRef {
     storage_offset: usize,
     shape: Vec<u64>,
     dtype: DType,
+}
+
+/// Counts the total number of nodes in a PickleValue tree (iteratively to avoid stack overflow).
+/// Returns early once `limit` is exceeded.
+fn value_node_count(val: &PickleValue, limit: usize) -> usize {
+    let mut count = 0usize;
+    let mut work = vec![val];
+    while let Some(v) = work.pop() {
+        count += 1;
+        if count > limit {
+            return count;
+        }
+        match v {
+            PickleValue::List(items) | PickleValue::Tuple(items) => {
+                work.extend(items.iter());
+            }
+            PickleValue::Dict(pairs) => {
+                for (k, v) in pairs {
+                    work.push(k);
+                    work.push(v);
+                }
+            }
+            _ => {}
+        }
+    }
+    count
 }
 
 /// Parses a PyTorch pickle and extracts tensor information.
@@ -175,9 +213,17 @@ impl<'a> PickleVM<'a> {
     }
 
     fn execute(&mut self) -> Result<(), Error> {
+        let mut opcode_count: usize = 0;
         loop {
             if self.pos >= self.data.len() {
                 break;
+            }
+
+            opcode_count += 1;
+            if opcode_count > MAX_OPCODES {
+                return Err(Error::Other(
+                    "Pickle opcode limit exceeded".into(),
+                ));
             }
 
             let opcode = self.read_u8()?;
@@ -403,6 +449,9 @@ impl<'a> PickleVM<'a> {
                     let value = self.stack.pop().unwrap_or(PickleValue::None);
                     let key = self.stack.pop().unwrap_or(PickleValue::None);
                     if let Some(PickleValue::Dict(ref mut pairs)) = self.stack.last_mut() {
+                        if pairs.len() >= MAX_CONTAINER_ITEMS {
+                            return Err(Error::Other("Pickle dict size limit exceeded".into()));
+                        }
                         pairs.push((key, value));
                     }
                 }
@@ -411,6 +460,9 @@ impl<'a> PickleVM<'a> {
                     let items = self.pop_to_mark();
                     let pairs = items_to_pairs(items);
                     if let Some(PickleValue::Dict(ref mut existing)) = self.stack.last_mut() {
+                        if existing.len() + pairs.len() > MAX_CONTAINER_ITEMS {
+                            return Err(Error::Other("Pickle dict size limit exceeded".into()));
+                        }
                         existing.extend(pairs);
                     }
                 }
@@ -418,6 +470,9 @@ impl<'a> PickleVM<'a> {
                 0x61 => {
                     let value = self.stack.pop().unwrap_or(PickleValue::None);
                     if let Some(PickleValue::List(ref mut list)) = self.stack.last_mut() {
+                        if list.len() >= MAX_CONTAINER_ITEMS {
+                            return Err(Error::Other("Pickle list size limit exceeded".into()));
+                        }
                         list.push(value);
                     }
                 }
@@ -425,6 +480,9 @@ impl<'a> PickleVM<'a> {
                 0x65 => {
                     let items = self.pop_to_mark();
                     if let Some(PickleValue::List(ref mut list)) = self.stack.last_mut() {
+                        if list.len() + items.len() > MAX_CONTAINER_ITEMS {
+                            return Err(Error::Other("Pickle list size limit exceeded".into()));
+                        }
                         list.extend(items);
                     }
                 }
@@ -445,14 +503,30 @@ impl<'a> PickleVM<'a> {
                 // BINGET
                 0x68 => {
                     let idx = self.read_u8()? as u32;
-                    let val = self.memo.get(&idx).cloned().unwrap_or(PickleValue::None);
-                    self.stack.push(val);
+                    if let Some(val) = self.memo.get(&idx) {
+                        if value_node_count(val, MAX_CONTAINER_ITEMS) > MAX_CONTAINER_ITEMS {
+                            return Err(Error::Other(
+                                "Pickle memo value too large to retrieve".into(),
+                            ));
+                        }
+                        self.stack.push(val.clone());
+                    } else {
+                        self.stack.push(PickleValue::None);
+                    }
                 }
                 // LONG_BINGET
                 0x6a => {
                     let idx = self.read_u32_le()?;
-                    let val = self.memo.get(&idx).cloned().unwrap_or(PickleValue::None);
-                    self.stack.push(val);
+                    if let Some(val) = self.memo.get(&idx) {
+                        if value_node_count(val, MAX_CONTAINER_ITEMS) > MAX_CONTAINER_ITEMS {
+                            return Err(Error::Other(
+                                "Pickle memo value too large to retrieve".into(),
+                            ));
+                        }
+                        self.stack.push(val.clone());
+                    } else {
+                        self.stack.push(PickleValue::None);
+                    }
                 }
                 // MEMOIZE
                 0x94 => {
@@ -467,8 +541,13 @@ impl<'a> PickleVM<'a> {
                 }
                 // DUP
                 0x32 => {
-                    if let Some(val) = self.stack.last().cloned() {
-                        self.stack.push(val);
+                    if let Some(val) = self.stack.last() {
+                        if value_node_count(val, MAX_CONTAINER_ITEMS) > MAX_CONTAINER_ITEMS {
+                            return Err(Error::Other(
+                                "Pickle value too large to duplicate".into(),
+                            ));
+                        }
+                        self.stack.push(val.clone());
                     }
                 }
                 // POP_MARK
@@ -525,6 +604,13 @@ impl<'a> PickleVM<'a> {
                         self.pos - 1
                     )));
                 }
+            }
+
+            if self.stack.len() > MAX_STACK_SIZE {
+                return Err(Error::Other("Pickle stack size limit exceeded".into()));
+            }
+            if self.memo.len() > MAX_MEMO_SIZE {
+                return Err(Error::Other("Pickle memo size limit exceeded".into()));
             }
         }
 
@@ -673,13 +759,16 @@ fn long_from_bytes(bytes: &[u8]) -> i64 {
     if bytes.is_empty() {
         return 0;
     }
+    // Only read up to 8 bytes (i64 is 64 bits)
+    let usable = bytes.len().min(8);
     let mut val: i64 = 0;
-    for (i, &b) in bytes.iter().enumerate() {
+    for (i, &b) in bytes[..usable].iter().enumerate() {
         val |= (b as i64) << (i * 8);
     }
-    // Sign extend if negative
-    if bytes.last().is_some_and(|&b| b & 0x80 != 0) {
-        let bits = bytes.len() * 8;
+    // Sign extend if negative (based on the most significant usable byte)
+    let sign_byte = bytes[usable - 1];
+    if sign_byte & 0x80 != 0 {
+        let bits = usable * 8;
         if bits < 64 {
             val |= !0i64 << bits;
         }
@@ -741,7 +830,7 @@ fn extract_tensors_recursive(
                             shape: tref.shape.clone(),
                             storage_key: tref.storage_key.clone(),
                             storage_offset: tref.storage_offset,
-                            numel: tref.shape.iter().product::<u64>() as usize,
+                            numel: tref.shape.iter().try_fold(1u64, |a, &b| a.checked_mul(b)).unwrap_or(0) as usize,
                         });
                     }
                     _ => extract_tensors_recursive(&name, value, out, depth + 1)?,
@@ -755,7 +844,7 @@ fn extract_tensors_recursive(
                 shape: tref.shape.clone(),
                 storage_key: tref.storage_key.clone(),
                 storage_offset: tref.storage_offset,
-                numel: tref.shape.iter().product::<u64>() as usize,
+                numel: tref.shape.iter().try_fold(1u64, |a, &b| a.checked_mul(b)).unwrap_or(0) as usize,
             });
         }
         PickleValue::List(items) => {

@@ -201,11 +201,19 @@ pub struct Object {
 
 impl Object {
     /// Calculates the number of elements from the shape.
-    pub fn num_elements(&self) -> u64 {
+    ///
+    /// Returns an error if the product of dimensions overflows `u64`.
+    pub fn num_elements(&self) -> Result<u64, crate::error::Error> {
         if self.shape.is_empty() {
-            1
+            Ok(1)
         } else {
-            self.shape.iter().product()
+            self.shape.iter().try_fold(1u64, |acc, &d| {
+                acc.checked_mul(d).ok_or_else(|| {
+                    crate::error::Error::InvalidFileStructure(
+                        "Shape product overflows u64".into(),
+                    )
+                })
+            })
         }
     }
 

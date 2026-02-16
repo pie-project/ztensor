@@ -71,7 +71,8 @@ pub mod writer;
 pub mod safetensors_reader;
 
 #[cfg(feature = "pickle")]
-pub(crate) mod pickle_vm;
+#[doc(hidden)]
+pub mod pickle_vm;
 #[cfg(feature = "pickle")]
 pub mod pytorch_reader;
 

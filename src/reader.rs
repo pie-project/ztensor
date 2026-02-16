@@ -777,6 +777,13 @@ impl<R: Read + Seek> Reader<R> {
                 zstd::stream::copy_decode(Cursor::new(compressed), &mut decompressed)
                     .map_err(Error::ZstdDecompression)?;
 
+                if decompressed.len() as u64 > MAX_OBJECT_SIZE {
+                    return Err(Error::ObjectTooLarge {
+                        size: decompressed.len() as u64,
+                        limit: MAX_OBJECT_SIZE,
+                    });
+                }
+
                 if let Some(uc_len) = component.uncompressed_length {
                     if decompressed.len() as u64 != uc_len {
                         return Err(Error::InvalidFileStructure(format!(
@@ -861,7 +868,7 @@ impl<R: Read + Seek> Reader<R> {
             ))
         })?;
 
-        let num_elements = obj.num_elements();
+        let num_elements = obj.num_elements()?;
         let expected_size = num_elements * component.dtype.byte_size() as u64;
 
         if expected_size > MAX_OBJECT_SIZE {
@@ -950,11 +957,7 @@ impl<R: Read + Seek> Reader<R> {
         }
 
         let component = component.clone();
-        let num_elements = if obj.shape.is_empty() {
-            1
-        } else {
-            obj.shape.iter().product::<u64>() as usize
-        };
+        let num_elements = obj.num_elements()? as usize;
 
         let byte_len = num_elements * T::SIZE;
 
@@ -1055,6 +1058,12 @@ impl<R: Read + Seek> Reader<R> {
                 buf
             }
         };
+
+        if bytes.len() % 8 != 0 {
+            return Err(Error::InvalidFileStructure(
+                "Index component length not aligned to 8 bytes".into(),
+            ));
+        }
 
         Ok(bytes
             .chunks_exact(8)

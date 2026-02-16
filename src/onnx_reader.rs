@@ -123,7 +123,7 @@ impl<'a> ProtobufCursor<'a> {
         if end > self.data.len() {
             return Err(Error::UnexpectedEof);
         }
-        let abs_offset = self.base_offset + self.pos;
+        let abs_offset = self.base_offset.checked_add(self.pos).ok_or(Error::UnexpectedEof)?;
         let slice = &self.data[self.pos..end];
         self.pos = end;
         Ok((abs_offset, len, slice))
@@ -222,6 +222,11 @@ fn parse_tensor_proto<'a>(
             // field 4: float_data (packed repeated float)
             (4, WIRE_LENGTH_DELIMITED) => {
                 let bytes = cursor.read_bytes()?;
+                if bytes.len() % 4 != 0 {
+                    return Err(Error::InvalidFileStructure(
+                        "float_data field length not aligned to 4 bytes".into(),
+                    ));
+                }
                 for chunk in bytes.chunks_exact(4) {
                     float_data.push(f32::from_le_bytes(chunk.try_into().unwrap()));
                 }
@@ -229,6 +234,11 @@ fn parse_tensor_proto<'a>(
             // field 5: int32_data (packed repeated int32)
             (5, WIRE_LENGTH_DELIMITED) => {
                 let bytes = cursor.read_bytes()?;
+                if bytes.len() % 4 != 0 {
+                    return Err(Error::InvalidFileStructure(
+                        "int32_data field length not aligned to 4 bytes".into(),
+                    ));
+                }
                 for chunk in bytes.chunks_exact(4) {
                     int32_data.push(i32::from_le_bytes(chunk.try_into().unwrap()));
                 }
@@ -240,6 +250,11 @@ fn parse_tensor_proto<'a>(
             // field 7: int64_data (packed repeated int64)
             (7, WIRE_LENGTH_DELIMITED) => {
                 let bytes = cursor.read_bytes()?;
+                if bytes.len() % 8 != 0 {
+                    return Err(Error::InvalidFileStructure(
+                        "int64_data field length not aligned to 8 bytes".into(),
+                    ));
+                }
                 for chunk in bytes.chunks_exact(8) {
                     int64_data.push(i64::from_le_bytes(chunk.try_into().unwrap()));
                 }
@@ -258,6 +273,11 @@ fn parse_tensor_proto<'a>(
             // field 10: double_data (packed repeated double)
             (10, WIRE_LENGTH_DELIMITED) => {
                 let bytes = cursor.read_bytes()?;
+                if bytes.len() % 8 != 0 {
+                    return Err(Error::InvalidFileStructure(
+                        "double_data field length not aligned to 8 bytes".into(),
+                    ));
+                }
                 for chunk in bytes.chunks_exact(8) {
                     double_data.push(f64::from_le_bytes(chunk.try_into().unwrap()));
                 }
@@ -265,6 +285,11 @@ fn parse_tensor_proto<'a>(
             // field 11: uint64_data (packed repeated uint64)
             (11, WIRE_LENGTH_DELIMITED) => {
                 let bytes = cursor.read_bytes()?;
+                if bytes.len() % 8 != 0 {
+                    return Err(Error::InvalidFileStructure(
+                        "uint64_data field length not aligned to 8 bytes".into(),
+                    ));
+                }
                 for chunk in bytes.chunks_exact(8) {
                     uint64_data.push(u64::from_le_bytes(chunk.try_into().unwrap()));
                 }

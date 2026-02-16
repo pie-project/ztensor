@@ -100,14 +100,17 @@ fn gguf_type_to_dtype(type_id: u32) -> Result<(DType, Option<&'static str>), Err
 /// Calculates the total byte size of a tensor given its element count and GGUF type.
 fn gguf_tensor_byte_size(n_elements: u64, type_id: u32) -> Result<usize, Error> {
     let (block_size, bytes_per_block, _) = gguf_type_info(type_id)?;
+    let n_elements = usize::try_from(n_elements).map_err(|_| {
+        Error::InvalidFileStructure("GGUF tensor element count exceeds platform limit".into())
+    })?;
     if block_size == 1 {
-        (n_elements as usize).checked_mul(bytes_per_block)
+        n_elements.checked_mul(bytes_per_block)
             .ok_or_else(|| Error::InvalidFileStructure(
                 "GGUF tensor byte size overflows".into(),
             ))
     } else {
         // Quantized: elements must be divisible by block_size
-        let n_blocks = n_elements as usize / block_size;
+        let n_blocks = n_elements / block_size;
         n_blocks.checked_mul(bytes_per_block)
             .ok_or_else(|| Error::InvalidFileStructure(
                 "GGUF tensor byte size overflows".into(),
@@ -165,7 +168,12 @@ impl<'a> ParseCursor<'a> {
     }
 
     /// Skip a GGUF metadata value of the given type.
-    fn skip_meta_value(&mut self, value_type: u32) -> Result<(), Error> {
+    fn skip_meta_value(&mut self, value_type: u32, depth: u32) -> Result<(), Error> {
+        if depth > 32 {
+            return Err(Error::InvalidFileStructure(
+                "GGUF metadata nesting too deep".into(),
+            ));
+        }
         match value_type {
             GGUF_META_UINT8 | GGUF_META_INT8 | GGUF_META_BOOL => {
                 self.read_bytes(1)?;
@@ -186,7 +194,7 @@ impl<'a> ParseCursor<'a> {
                 let elem_type = self.read_u32_le()?;
                 let count = self.read_u64_le()?;
                 for _ in 0..count {
-                    self.skip_meta_value(elem_type)?;
+                    self.skip_meta_value(elem_type, depth + 1)?;
                 }
             }
             _ => {
@@ -274,7 +282,7 @@ impl GgufReader {
             if key == "general.alignment" && value_type == GGUF_META_UINT32 {
                 alignment = cursor.read_u32_le()? as usize;
             } else {
-                cursor.skip_meta_value(value_type)?;
+                cursor.skip_meta_value(value_type, 0)?;
             }
         }
 

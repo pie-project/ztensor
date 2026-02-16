@@ -137,6 +137,7 @@ fn bytes_to_numpy<'py>(
         let n_elements = bytes.len() / 2;
         let arr = unsafe { PyArray1::<u16>::new(py, [n_elements], false) };
         unsafe {
+            debug_assert_eq!(bytes.len(), n_elements * std::mem::size_of::<u16>());
             std::ptr::copy_nonoverlapping(bytes.as_ptr(), arr.data() as *mut u8, bytes.len());
         }
         let np = py.import("numpy")?;
@@ -159,6 +160,7 @@ fn bytes_to_numpy<'py>(
         let np_dtype = np.call_method1("dtype", (np_dtype_str,))?;
         let byte_array = unsafe { PyArray1::<u8>::new(py, [bytes.len()], false) };
         unsafe {
+            debug_assert_eq!(bytes.len(), byte_array.len());
             std::ptr::copy_nonoverlapping(bytes.as_ptr(), byte_array.data(), bytes.len());
         }
         let flat = byte_array

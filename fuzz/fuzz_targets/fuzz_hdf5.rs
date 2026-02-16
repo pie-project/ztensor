@@ -17,5 +17,6 @@ fuzz_target!(|data: &[u8]| {
 
     for name in reader.keys() {
         let _ = reader.read_data(name);
+        let _ = TensorReader::read::<f32>(&reader, name);
     }
 });
