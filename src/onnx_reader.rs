@@ -89,9 +89,7 @@ impl<'a> ProtobufCursor<'a> {
             }
             shift += 7;
             if shift >= 64 {
-                return Err(Error::InvalidFileStructure(
-                    "Varint too long".to_string(),
-                ));
+                return Err(Error::InvalidFileStructure("Varint too long".to_string()));
             }
         }
     }
@@ -123,7 +121,10 @@ impl<'a> ProtobufCursor<'a> {
         if end > self.data.len() {
             return Err(Error::UnexpectedEof);
         }
-        let abs_offset = self.base_offset.checked_add(self.pos).ok_or(Error::UnexpectedEof)?;
+        let abs_offset = self
+            .base_offset
+            .checked_add(self.pos)
+            .ok_or(Error::UnexpectedEof)?;
         let slice = &self.data[self.pos..end];
         self.pos = end;
         Ok((abs_offset, len, slice))
@@ -182,10 +183,7 @@ enum OnnxTensorData {
 }
 
 /// Parse a TensorProto message.
-fn parse_tensor_proto<'a>(
-    data: &'a [u8],
-    base_offset: usize,
-) -> Result<OnnxTensorInfo, Error> {
+fn parse_tensor_proto<'a>(data: &'a [u8], base_offset: usize) -> Result<OnnxTensorInfo, Error> {
     let mut cursor = ProtobufCursor::new(data, base_offset);
 
     let mut name = String::new();
@@ -326,34 +324,19 @@ fn parse_tensor_proto<'a>(
     let tensor_data = if let Some((offset, length)) = raw_data_offset {
         OnnxTensorData::RawData { offset, length }
     } else if !float_data.is_empty() {
-        let bytes: Vec<u8> = float_data
-            .iter()
-            .flat_map(|v| v.to_le_bytes())
-            .collect();
+        let bytes: Vec<u8> = float_data.iter().flat_map(|v| v.to_le_bytes()).collect();
         OnnxTensorData::TypedData(bytes)
     } else if !int32_data.is_empty() {
-        let bytes: Vec<u8> = int32_data
-            .iter()
-            .flat_map(|v| v.to_le_bytes())
-            .collect();
+        let bytes: Vec<u8> = int32_data.iter().flat_map(|v| v.to_le_bytes()).collect();
         OnnxTensorData::TypedData(bytes)
     } else if !int64_data.is_empty() {
-        let bytes: Vec<u8> = int64_data
-            .iter()
-            .flat_map(|v| v.to_le_bytes())
-            .collect();
+        let bytes: Vec<u8> = int64_data.iter().flat_map(|v| v.to_le_bytes()).collect();
         OnnxTensorData::TypedData(bytes)
     } else if !double_data.is_empty() {
-        let bytes: Vec<u8> = double_data
-            .iter()
-            .flat_map(|v| v.to_le_bytes())
-            .collect();
+        let bytes: Vec<u8> = double_data.iter().flat_map(|v| v.to_le_bytes()).collect();
         OnnxTensorData::TypedData(bytes)
     } else if !uint64_data.is_empty() {
-        let bytes: Vec<u8> = uint64_data
-            .iter()
-            .flat_map(|v| v.to_le_bytes())
-            .collect();
+        let bytes: Vec<u8> = uint64_data.iter().flat_map(|v| v.to_le_bytes()).collect();
         OnnxTensorData::TypedData(bytes)
     } else {
         // Empty tensor (zero elements)
@@ -395,9 +378,7 @@ impl OnnxReader {
         let mmap = unsafe { MmapOptions::new().map(&file)? };
 
         if mmap.is_empty() {
-            return Err(Error::InvalidFileStructure(
-                "Empty ONNX file".to_string(),
-            ));
+            return Err(Error::InvalidFileStructure("Empty ONNX file".to_string()));
         }
 
         // Parse ModelProto to find the graph field
@@ -500,7 +481,10 @@ impl OnnxReader {
 
     /// Gets a typed zero-copy reference to a tensor's data.
     pub fn view_as<T: TensorElement>(&self, name: &str) -> Result<&[T], Error> {
-        let dtype = self.manifest.objects.get(name)
+        let dtype = self
+            .manifest
+            .objects
+            .get(name)
             .ok_or_else(|| Error::ObjectNotFound(name.to_string()))?
             .data_dtype()?;
         if T::DTYPE != dtype {
@@ -520,7 +504,10 @@ impl OnnxReader {
 
     /// Reads tensor data as a typed vector.
     pub fn read_as<T: TensorElement>(&self, name: &str) -> Result<Vec<T>, Error> {
-        let dtype = self.manifest.objects.get(name)
+        let dtype = self
+            .manifest
+            .objects
+            .get(name)
             .ok_or_else(|| Error::ObjectNotFound(name.to_string()))?
             .data_dtype()?;
         if T::DTYPE != dtype {

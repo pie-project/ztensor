@@ -131,9 +131,8 @@ fn read_cstring(data: &[u8], pos: usize) -> Result<String, Error> {
     if end >= data.len() {
         return Err(Error::UnexpectedEof);
     }
-    String::from_utf8(data[start..end].to_vec()).map_err(|e| {
-        Error::InvalidFileStructure(format!("Invalid UTF-8 in HDF5 string: {}", e))
-    })
+    String::from_utf8(data[start..end].to_vec())
+        .map_err(|e| Error::InvalidFileStructure(format!("Invalid UTF-8 in HDF5 string: {}", e)))
 }
 
 // ---- Parsed dataset info ----
@@ -343,12 +342,14 @@ fn read_local_heap_data(data: &[u8], ctx: &Hdf5Ctx, heap_addr: u64) -> Result<us
     // Validate signature
     if &data[pos..pos + 4] != HEAP_SIGNATURE {
         return Err(Error::InvalidFileStructure(format!(
-            "Expected HEAP signature at offset {}", pos
+            "Expected HEAP signature at offset {}",
+            pos
         )));
     }
 
     // HEAP: sig(4) + version(1) + reserved(3) + data_seg_size(L) + free_list_head_offset(L) + data_seg_addr(O)
-    let data_seg_addr_offset = pos.checked_add(4 + 1 + 3 + ctx.length_size + ctx.length_size)
+    let data_seg_addr_offset = pos
+        .checked_add(4 + 1 + 3 + ctx.length_size + ctx.length_size)
         .ok_or(Error::UnexpectedEof)?;
     let data_seg_addr = ctx.read_offset(data, data_seg_addr_offset)?;
 
@@ -383,7 +384,8 @@ fn traverse_btree(
     // Validate signature
     if &data[pos..pos + 4] != TREE_SIGNATURE {
         return Err(Error::InvalidFileStructure(format!(
-            "Expected TREE signature at offset {}", pos
+            "Expected TREE signature at offset {}",
+            pos
         )));
     }
 
@@ -407,7 +409,8 @@ fn traverse_btree(
     if node_level > 0 {
         // Internal node: children are B-tree nodes
         for i in 0..entries_used {
-            let child_offset = keys_start + ctx.length_size + i * (ctx.length_size + ctx.offset_size);
+            let child_offset =
+                keys_start + ctx.length_size + i * (ctx.length_size + ctx.offset_size);
             let child_addr = ctx.read_offset(data, child_offset)?;
             if child_addr != UNDEF_ADDR {
                 traverse_btree(
@@ -425,7 +428,8 @@ fn traverse_btree(
     } else {
         // Leaf node: children are SNOD addresses
         for i in 0..entries_used {
-            let child_offset = keys_start + ctx.length_size + i * (ctx.length_size + ctx.offset_size);
+            let child_offset =
+                keys_start + ctx.length_size + i * (ctx.length_size + ctx.offset_size);
             let snod_addr = ctx.read_offset(data, child_offset)?;
             if snod_addr != UNDEF_ADDR {
                 parse_snod(
@@ -472,7 +476,8 @@ fn parse_snod(
     // Validate signature
     if &data[pos..pos + 4] != SNOD_SIGNATURE {
         return Err(Error::InvalidFileStructure(format!(
-            "Expected SNOD signature at offset {}", pos
+            "Expected SNOD signature at offset {}",
+            pos
         )));
     }
 
@@ -538,11 +543,15 @@ fn parse_snod(
                     if abs_offset + byte_size > data.len() {
                         return Err(Error::InvalidFileStructure(format!(
                             "Dataset '{}' extends beyond file: offset {} + size {} > file size {}",
-                            full_name, abs_offset, byte_size, data.len()
+                            full_name,
+                            abs_offset,
+                            byte_size,
+                            data.len()
                         )));
                     }
 
-                    let obj = Object::dense(info.shape, info.dtype, abs_offset as u64, byte_size as u64);
+                    let obj =
+                        Object::dense(info.shape, info.dtype, abs_offset as u64, byte_size as u64);
                     data_ranges.insert(full_name.clone(), (abs_offset, byte_size));
                     objects.insert(full_name, obj);
                 }
@@ -641,9 +650,19 @@ fn parse_object_header(
     let mut group_info: Option<(u64, u64)> = None;
 
     parse_messages(
-        data, ctx, msg_start, msg_end, num_messages,
-        &mut dtype, &mut shape, &mut data_addr, &mut data_size,
-        &mut is_contiguous, &mut group_info, name, depth,
+        data,
+        ctx,
+        msg_start,
+        msg_end,
+        num_messages,
+        &mut dtype,
+        &mut shape,
+        &mut data_addr,
+        &mut data_size,
+        &mut is_contiguous,
+        &mut group_info,
+        name,
+        depth,
     )?;
 
     // If a symbol table message was found, this is a group
@@ -824,17 +843,15 @@ fn parse_datatype(data: &[u8], pos: usize) -> Result<DType, Error> {
                 ))),
             }
         }
-        DT_CLASS_FLOATING_POINT => {
-            match dt_size {
-                8 => Ok(DType::F64),
-                4 => Ok(DType::F32),
-                2 => Ok(DType::F16),
-                _ => Err(Error::UnsupportedDType(format!(
-                    "HDF5 float: size={}",
-                    dt_size
-                ))),
-            }
-        }
+        DT_CLASS_FLOATING_POINT => match dt_size {
+            8 => Ok(DType::F64),
+            4 => Ok(DType::F32),
+            2 => Ok(DType::F16),
+            _ => Err(Error::UnsupportedDType(format!(
+                "HDF5 float: size={}",
+                dt_size
+            ))),
+        },
         _ => Err(Error::UnsupportedDType(format!(
             "HDF5 datatype class {} not supported (only integer and float)",
             dt_class
@@ -946,26 +963,29 @@ mod tests {
     #[test]
     fn test_parse_datatype_f32() {
         // class=1 (float), version=1, size=4
-        let data = [0x11, 0x20, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00,
-                     // properties (bit offset, bit precision, exponent location, etc.)
-                     0x00, 0x00, 0x20, 0x00, 0x17, 0x08, 0x00, 0x00,
-                     0x7f, 0x00, 0x00, 0x00];
+        let data = [
+            0x11, 0x20, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00,
+            // properties (bit offset, bit precision, exponent location, etc.)
+            0x00, 0x00, 0x20, 0x00, 0x17, 0x08, 0x00, 0x00, 0x7f, 0x00, 0x00, 0x00,
+        ];
         assert_eq!(parse_datatype(&data, 0).unwrap(), DType::F32);
     }
 
     #[test]
     fn test_parse_datatype_i64_signed() {
         // class=0 (integer), signed (bit 3 set in class_bits_0), size=8
-        let data = [0x00, 0x08, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00,
-                     0x00, 0x00, 0x40, 0x00];
+        let data = [
+            0x00, 0x08, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40, 0x00,
+        ];
         assert_eq!(parse_datatype(&data, 0).unwrap(), DType::I64);
     }
 
     #[test]
     fn test_parse_datatype_u32_unsigned() {
         // class=0 (integer), unsigned (bit 3 clear), size=4
-        let data = [0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00,
-                     0x00, 0x00, 0x20, 0x00];
+        let data = [
+            0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x20, 0x00,
+        ];
         assert_eq!(parse_datatype(&data, 0).unwrap(), DType::U32);
     }
 }

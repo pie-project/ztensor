@@ -4,10 +4,7 @@ use std::io::Write;
 use ztensor::{GgufReader, TensorReader};
 
 fuzz_target!(|data: &[u8]| {
-    let mut tmp = tempfile::Builder::new()
-        .suffix(".gguf")
-        .tempfile()
-        .unwrap();
+    let mut tmp = tempfile::Builder::new().suffix(".gguf").tempfile().unwrap();
     tmp.write_all(data).unwrap();
 
     let reader = match GgufReader::open(tmp.path()) {

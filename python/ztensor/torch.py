@@ -28,7 +28,6 @@ except ImportError:
 
 from . import Reader, Writer, ZTensorError, DTYPE_ZT_TO_TORCH
 
-
 # --- Torch dtype → numpy dtype for writer compatibility ---
 _TORCH_TO_NP_DTYPE = {
     torch.float64: np.float64,
@@ -80,6 +79,7 @@ def save_file(
         np_tensors[name] = _torch_to_numpy(tensor)
 
     from ._ztensor import save_file as _native_save_file
+
     _native_save_file(np_tensors, str(filename), compression=compression)
 
 
@@ -302,12 +302,14 @@ def load_model(
 
 # --- Helper Functions ---
 
+
 def _torch_to_numpy(tensor: torch.Tensor) -> np.ndarray:
     """Convert a torch tensor to a numpy array, handling bfloat16."""
     if tensor.dtype == torch.bfloat16:
         # bfloat16: convert via uint16 view of the raw bytes
         try:
             from ml_dtypes import bfloat16 as np_bfloat16
+
             return tensor.view(torch.int16).numpy().view(np_bfloat16)
         except ImportError:
             # Fallback: store as raw uint16 bytes
@@ -396,10 +398,9 @@ def _find_shared_tensors(state_dict: Dict[str, torch.Tensor]) -> List[set]:
 
 def _is_complete(tensor: torch.Tensor) -> bool:
     """Check if a tensor covers its entire storage."""
-    return (
-        tensor.data_ptr() == _storage_ptr(tensor) and
-        tensor.nelement() * tensor.element_size() == _storage_size(tensor)
-    )
+    return tensor.data_ptr() == _storage_ptr(
+        tensor
+    ) and tensor.nelement() * tensor.element_size() == _storage_size(tensor)
 
 
 def _remove_duplicate_names(

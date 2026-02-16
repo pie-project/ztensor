@@ -14,7 +14,7 @@ use safetensors::SafeTensors;
 
 use crate::error::Error;
 use crate::models::{DType, Manifest, Object};
-use crate::reader::{TensorElement, TensorData, TensorReader};
+use crate::reader::{TensorData, TensorElement, TensorReader};
 
 /// Reader for SafeTensors (.safetensors) files.
 ///
@@ -52,9 +52,8 @@ impl SafeTensorsReader {
         let mmap = unsafe { MmapOptions::new().map(&file)? };
 
         // Parse the safetensors header to build our manifest
-        let st = SafeTensors::deserialize(&mmap).map_err(|e| {
-            Error::InvalidFileStructure(format!("SafeTensors parse error: {}", e))
-        })?;
+        let st = SafeTensors::deserialize(&mmap)
+            .map_err(|e| Error::InvalidFileStructure(format!("SafeTensors parse error: {}", e)))?;
 
         let mut objects = BTreeMap::new();
         let mut data_ranges = BTreeMap::new();
@@ -102,7 +101,10 @@ impl SafeTensorsReader {
 
     /// Gets a typed zero-copy reference to an object's data.
     pub fn view_as<T: TensorElement>(&self, name: &str) -> Result<&[T], Error> {
-        let dtype = self.manifest.objects.get(name)
+        let dtype = self
+            .manifest
+            .objects
+            .get(name)
             .ok_or_else(|| Error::ObjectNotFound(name.to_string()))?
             .data_dtype()?;
         if T::DTYPE != dtype {
@@ -122,7 +124,10 @@ impl SafeTensorsReader {
 
     /// Reads object data as a typed vector.
     pub fn read_as<T: TensorElement>(&self, name: &str) -> Result<Vec<T>, Error> {
-        let dtype = self.manifest.objects.get(name)
+        let dtype = self
+            .manifest
+            .objects
+            .get(name)
             .ok_or_else(|| Error::ObjectNotFound(name.to_string()))?
             .data_dtype()?;
         if T::DTYPE != dtype {

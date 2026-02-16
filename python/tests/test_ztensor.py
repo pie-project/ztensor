@@ -21,12 +21,14 @@ import tracemalloc
 # Optional imports
 try:
     import torch
+
     TORCH_AVAILABLE = True
 except ImportError:
     TORCH_AVAILABLE = False
 
 try:
     from ml_dtypes import bfloat16 as np_bfloat16
+
     ML_DTYPES_AVAILABLE = True
 except ImportError:
     np_bfloat16 = None
@@ -35,15 +37,15 @@ except ImportError:
 import ztensor
 from ztensor import Reader, Writer
 
-
 # ============================================================================
 # FIXTURES
 # ============================================================================
 
+
 @pytest.fixture
 def temp_file():
     """Provides a temporary file path that's cleaned up after the test."""
-    fd, path = tempfile.mkstemp(suffix='.zt')
+    fd, path = tempfile.mkstemp(suffix=".zt")
     os.close(fd)
     yield path
     if os.path.exists(path):
@@ -56,6 +58,7 @@ def temp_dir():
     d = tempfile.mkdtemp()
     yield d
     import shutil
+
     shutil.rmtree(d, ignore_errors=True)
 
 
@@ -63,17 +66,18 @@ def temp_dir():
 def sample_tensors():
     """Standard test tensors of various shapes."""
     return {
-        'scalar': np.array(3.14, dtype=np.float32),
-        'vector': np.arange(100, dtype=np.float32),
-        'matrix': np.random.randn(32, 64).astype(np.float32),
-        'tensor3d': np.random.randn(4, 8, 16).astype(np.float32),
-        'large': np.random.randn(1000, 1000).astype(np.float32),
+        "scalar": np.array(3.14, dtype=np.float32),
+        "vector": np.arange(100, dtype=np.float32),
+        "matrix": np.random.randn(32, 64).astype(np.float32),
+        "tensor3d": np.random.randn(4, 8, 16).astype(np.float32),
+        "large": np.random.randn(1000, 1000).astype(np.float32),
     }
 
 
 # ============================================================================
 # 1. CORRECTNESS TESTS
 # ============================================================================
+
 
 class TestCorrectness:
     """Tests for data integrity and correctness."""
@@ -87,15 +91,24 @@ class TestCorrectness:
         reader = Reader(temp_file)
         for name, expected in sample_tensors.items():
             loaded = reader[name]
-            np.testing.assert_array_equal(loaded, expected,
-                err_msg=f"Tensor '{name}' data mismatch")
+            np.testing.assert_array_equal(
+                loaded, expected, err_msg=f"Tensor '{name}' data mismatch"
+            )
 
     def test_roundtrip_all_dtypes(self, temp_file):
         """All supported dtypes preserve data correctly."""
         dtypes = [
-            np.float64, np.float32, np.float16,
-            np.int64, np.int32, np.int16, np.int8,
-            np.uint64, np.uint32, np.uint16, np.uint8,
+            np.float64,
+            np.float32,
+            np.float16,
+            np.int64,
+            np.int32,
+            np.int16,
+            np.int8,
+            np.uint64,
+            np.uint32,
+            np.uint16,
+            np.uint8,
             np.bool_,
         ]
 
@@ -118,8 +131,9 @@ class TestCorrectness:
         reader = Reader(temp_file)
         for name, expected in tensors.items():
             loaded = reader[name]
-            np.testing.assert_array_equal(loaded, expected,
-                err_msg=f"Dtype {name} mismatch")
+            np.testing.assert_array_equal(
+                loaded, expected, err_msg=f"Dtype {name} mismatch"
+            )
 
     @pytest.mark.skipif(not ML_DTYPES_AVAILABLE, reason="ml_dtypes not installed")
     def test_bfloat16(self, temp_file):
@@ -157,8 +171,9 @@ class TestCorrectness:
 
     def test_multiple_tensors(self, temp_file):
         """Multiple tensors in one file are all correct."""
-        tensors = {f"tensor_{i}": np.random.randn(100).astype(np.float32)
-                   for i in range(50)}
+        tensors = {
+            f"tensor_{i}": np.random.randn(100).astype(np.float32) for i in range(50)
+        }
 
         with Writer(temp_file) as w:
             for name, t in tensors.items():
@@ -174,6 +189,7 @@ class TestCorrectness:
 # ============================================================================
 # 2. EDGE CASES
 # ============================================================================
+
 
 class TestEdgeCases:
     """Tests for boundary conditions and edge cases."""
@@ -278,6 +294,7 @@ class TestEdgeCases:
 # 3. MEMORY LEAK TESTS
 # ============================================================================
 
+
 class TestMemoryLeaks:
     """Tests to detect memory leaks."""
 
@@ -299,7 +316,9 @@ class TestMemoryLeaks:
         tracemalloc.stop()
 
         data_size = data.nbytes
-        assert current < data_size * 3, f"Possible memory leak: {current / 1e6:.1f}MB used"
+        assert (
+            current < data_size * 3
+        ), f"Possible memory leak: {current / 1e6:.1f}MB used"
 
     def test_repeated_write_no_leak(self, temp_file):
         """Repeated file writes should not leak memory."""
@@ -318,7 +337,9 @@ class TestMemoryLeaks:
         current, peak = tracemalloc.get_traced_memory()
         tracemalloc.stop()
 
-        assert current < data.nbytes * 3, f"Possible write memory leak: {current / 1e6:.1f}MB"
+        assert (
+            current < data.nbytes * 3
+        ), f"Possible write memory leak: {current / 1e6:.1f}MB"
 
     def test_reader_cleanup(self, temp_file):
         """Reader properly releases resources."""
@@ -339,7 +360,7 @@ class TestMemoryLeaks:
         snapshot2 = tracemalloc.take_snapshot()
         tracemalloc.stop()
 
-        top_stats = snapshot2.compare_to(snapshot1, 'lineno')
+        top_stats = snapshot2.compare_to(snapshot1, "lineno")
         total_diff = sum(stat.size_diff for stat in top_stats[:10])
 
         # Allow small overhead from Python/allocator internals (1% margin)
@@ -349,6 +370,7 @@ class TestMemoryLeaks:
 # ============================================================================
 # 4. ERROR HANDLING TESTS
 # ============================================================================
+
 
 class TestErrorHandling:
     """Tests for proper error handling."""
@@ -378,7 +400,7 @@ class TestErrorHandling:
 
     def test_corrupted_file(self, temp_file):
         """Corrupted file raises error."""
-        with open(temp_file, 'wb') as f:
+        with open(temp_file, "wb") as f:
             f.write(b"GARBAGE_DATA_NOT_ZTENSOR")
 
         with pytest.raises((RuntimeError, OSError)):
@@ -388,6 +410,7 @@ class TestErrorHandling:
 # ============================================================================
 # 5. API TESTS
 # ============================================================================
+
 
 class TestAPI:
     """Tests for API functionality."""
@@ -495,6 +518,7 @@ class TestAPI:
 # 6. NUMPY CONVENIENCE TESTS
 # ============================================================================
 
+
 class TestNumPyConvenience:
     """Tests for ztensor.numpy module."""
 
@@ -503,37 +527,38 @@ class TestNumPyConvenience:
         from ztensor.numpy import save_file, load_file
 
         tensors = {
-            'a': np.random.randn(64, 128).astype(np.float32),
-            'b': np.zeros(128, dtype=np.float32),
+            "a": np.random.randn(64, 128).astype(np.float32),
+            "b": np.zeros(128, dtype=np.float32),
         }
         save_file(tensors, temp_file)
         loaded = load_file(temp_file)
-        assert set(loaded.keys()) == {'a', 'b'}
-        np.testing.assert_array_equal(loaded['a'], tensors['a'])
-        np.testing.assert_array_equal(loaded['b'], tensors['b'])
+        assert set(loaded.keys()) == {"a", "b"}
+        np.testing.assert_array_equal(loaded["a"], tensors["a"])
+        np.testing.assert_array_equal(loaded["b"], tensors["b"])
 
     def test_save_load_bytes(self):
         """numpy save/load bytes roundtrip."""
         from ztensor.numpy import save, load
 
-        tensors = {'x': np.array([1, 2, 3], dtype=np.int32)}
+        tensors = {"x": np.array([1, 2, 3], dtype=np.int32)}
         data = save(tensors)
         loaded = load(data)
-        np.testing.assert_array_equal(loaded['x'], [1, 2, 3])
+        np.testing.assert_array_equal(loaded["x"], [1, 2, 3])
 
     def test_save_compressed(self, temp_file):
         """numpy save_file with compression."""
         from ztensor.numpy import save_file, load_file
 
-        tensors = {'data': np.random.randn(100, 100).astype(np.float32)}
+        tensors = {"data": np.random.randn(100, 100).astype(np.float32)}
         save_file(tensors, temp_file, compression=True)
         loaded = load_file(temp_file)
-        np.testing.assert_array_equal(loaded['data'], tensors['data'])
+        np.testing.assert_array_equal(loaded["data"], tensors["data"])
 
 
 # ============================================================================
 # 7. PYTORCH CONVENIENCE TESTS
 # ============================================================================
+
 
 @pytest.mark.skipif(not TORCH_AVAILABLE, reason="PyTorch not installed")
 class TestPyTorchConvenience:
@@ -544,36 +569,36 @@ class TestPyTorchConvenience:
         from ztensor.torch import save_file, load_file
 
         tensors = {
-            'weight': torch.randn(64, 128),
-            'bias': torch.zeros(128),
+            "weight": torch.randn(64, 128),
+            "bias": torch.zeros(128),
         }
         save_file(tensors, temp_file)
         loaded = load_file(temp_file)
-        assert set(loaded.keys()) == {'weight', 'bias'}
-        torch.testing.assert_close(loaded['weight'], tensors['weight'])
-        torch.testing.assert_close(loaded['bias'], tensors['bias'])
+        assert set(loaded.keys()) == {"weight", "bias"}
+        torch.testing.assert_close(loaded["weight"], tensors["weight"])
+        torch.testing.assert_close(loaded["bias"], tensors["bias"])
 
     def test_save_load_bytes(self):
         """torch save/load bytes roundtrip."""
         from ztensor.torch import save, load
 
-        tensors = {'x': torch.tensor([1, 2, 3], dtype=torch.int32)}
+        tensors = {"x": torch.tensor([1, 2, 3], dtype=torch.int32)}
         data = save(tensors)
         loaded = load(data)
-        torch.testing.assert_close(loaded['x'], tensors['x'])
+        torch.testing.assert_close(loaded["x"], tensors["x"])
 
     def test_torch_dtypes(self, temp_file):
         """Various PyTorch dtypes roundtrip."""
         from ztensor.torch import save_file, load_file
 
         tensors = {
-            'f32': torch.randn(10, dtype=torch.float32),
-            'f64': torch.randn(10, dtype=torch.float64),
-            'f16': torch.randn(10, dtype=torch.float16),
-            'i32': torch.tensor([1, 2, 3], dtype=torch.int32),
-            'i64': torch.tensor([4, 5, 6], dtype=torch.int64),
-            'u8': torch.tensor([7, 8, 9], dtype=torch.uint8),
-            'bool': torch.tensor([True, False, True]),
+            "f32": torch.randn(10, dtype=torch.float32),
+            "f64": torch.randn(10, dtype=torch.float64),
+            "f16": torch.randn(10, dtype=torch.float16),
+            "i32": torch.tensor([1, 2, 3], dtype=torch.int32),
+            "i64": torch.tensor([4, 5, 6], dtype=torch.int64),
+            "u8": torch.tensor([7, 8, 9], dtype=torch.uint8),
+            "bool": torch.tensor([True, False, True]),
         }
         save_file(tensors, temp_file)
         loaded = load_file(temp_file)
@@ -600,7 +625,7 @@ class TestPyTorchConvenience:
         from ztensor.torch import save_file
 
         t = torch.randn(10)
-        tensors = {'a': t, 'b': t}  # Same storage
+        tensors = {"a": t, "b": t}  # Same storage
 
         with pytest.raises(ValueError, match="share memory"):
             save_file(tensors, "/tmp/should_not_exist.zt")
@@ -613,6 +638,7 @@ class TestPyTorchConvenience:
 SAFETENSORS_AVAILABLE = False
 try:
     import safetensors.numpy
+
     SAFETENSORS_AVAILABLE = True
 except ImportError:
     pass
@@ -626,35 +652,35 @@ class TestSafeTensorsReading:
         """Read a .safetensors file written by the safetensors library."""
         path = os.path.join(temp_dir, "test.safetensors")
         tensors = {
-            'weight': np.random.randn(64, 128).astype(np.float32),
-            'bias': np.zeros(128, dtype=np.float32),
+            "weight": np.random.randn(64, 128).astype(np.float32),
+            "bias": np.zeros(128, dtype=np.float32),
         }
         safetensors.numpy.save_file(tensors, path)
 
         reader = Reader(path)
-        assert set(reader.keys()) == {'weight', 'bias'}
-        np.testing.assert_array_equal(reader['weight'], tensors['weight'])
-        np.testing.assert_array_equal(reader['bias'], tensors['bias'])
+        assert set(reader.keys()) == {"weight", "bias"}
+        np.testing.assert_array_equal(reader["weight"], tensors["weight"])
+        np.testing.assert_array_equal(reader["bias"], tensors["bias"])
 
     def test_read_safetensors_via_load_file(self, temp_dir):
         """ztensor.numpy.load_file reads .safetensors files."""
         from ztensor.numpy import load_file
 
         path = os.path.join(temp_dir, "test.safetensors")
-        tensors = {'data': np.random.randn(100, 100).astype(np.float32)}
+        tensors = {"data": np.random.randn(100, 100).astype(np.float32)}
         safetensors.numpy.save_file(tensors, path)
 
         loaded = load_file(path)
-        np.testing.assert_array_equal(loaded['data'], tensors['data'])
+        np.testing.assert_array_equal(loaded["data"], tensors["data"])
 
     def test_read_safetensors_multiple_dtypes(self, temp_dir):
         """Read safetensors with multiple dtypes."""
         path = os.path.join(temp_dir, "multi.safetensors")
         tensors = {
-            'f32': np.array([1.0, 2.0], dtype=np.float32),
-            'f64': np.array([3.0, 4.0], dtype=np.float64),
-            'i32': np.array([5, 6], dtype=np.int32),
-            'u8': np.array([7, 8], dtype=np.uint8),
+            "f32": np.array([1.0, 2.0], dtype=np.float32),
+            "f64": np.array([3.0, 4.0], dtype=np.float64),
+            "i32": np.array([5, 6], dtype=np.int32),
+            "u8": np.array([7, 8], dtype=np.uint8),
         }
         safetensors.numpy.save_file(tensors, path)
 
@@ -668,22 +694,22 @@ class TestSafeTensorsReading:
         from ztensor.torch import load_file
 
         path = os.path.join(temp_dir, "torch_st.safetensors")
-        tensors = {'w': np.random.randn(32, 64).astype(np.float32)}
+        tensors = {"w": np.random.randn(32, 64).astype(np.float32)}
         safetensors.numpy.save_file(tensors, path)
 
         loaded = load_file(path)
-        assert isinstance(loaded['w'], torch.Tensor)
-        np.testing.assert_allclose(loaded['w'].numpy(), tensors['w'], rtol=1e-6)
+        assert isinstance(loaded["w"], torch.Tensor)
+        np.testing.assert_allclose(loaded["w"].numpy(), tensors["w"], rtol=1e-6)
 
     def test_read_safetensors_metadata(self, temp_dir):
         """Metadata is accessible for safetensors tensors."""
         path = os.path.join(temp_dir, "meta.safetensors")
-        tensors = {'layer': np.random.randn(10, 20).astype(np.float32)}
+        tensors = {"layer": np.random.randn(10, 20).astype(np.float32)}
         safetensors.numpy.save_file(tensors, path)
 
         reader = Reader(path)
-        meta = reader.metadata('layer')
-        assert meta.dtype == 'float32'
+        meta = reader.metadata("layer")
+        assert meta.dtype == "float32"
         assert list(meta.shape) == [10, 20]
 
 
@@ -695,35 +721,39 @@ class TestPyTorchFileReading:
         """Read a .pt file written by torch.save."""
         path = os.path.join(temp_dir, "model.pt")
         state_dict = {
-            'weight': torch.randn(32, 64),
-            'bias': torch.zeros(32),
+            "weight": torch.randn(32, 64),
+            "bias": torch.zeros(32),
         }
         torch.save(state_dict, path)
 
         reader = Reader(path)
-        assert set(reader.keys()) == {'weight', 'bias'}
-        np.testing.assert_allclose(reader['weight'], state_dict['weight'].numpy(), rtol=1e-6)
-        np.testing.assert_allclose(reader['bias'], state_dict['bias'].numpy(), rtol=1e-6)
+        assert set(reader.keys()) == {"weight", "bias"}
+        np.testing.assert_allclose(
+            reader["weight"], state_dict["weight"].numpy(), rtol=1e-6
+        )
+        np.testing.assert_allclose(
+            reader["bias"], state_dict["bias"].numpy(), rtol=1e-6
+        )
 
     def test_read_pt_via_load_file(self, temp_dir):
         """ztensor.torch.load_file reads .pt files."""
         from ztensor.torch import load_file
 
         path = os.path.join(temp_dir, "model.pt")
-        state_dict = {'data': torch.randn(100)}
+        state_dict = {"data": torch.randn(100)}
         torch.save(state_dict, path)
 
         loaded = load_file(path)
-        assert isinstance(loaded['data'], torch.Tensor)
-        torch.testing.assert_close(loaded['data'], state_dict['data'])
+        assert isinstance(loaded["data"], torch.Tensor)
+        torch.testing.assert_close(loaded["data"], state_dict["data"])
 
     def test_read_pt_multiple_dtypes(self, temp_dir):
         """Read .pt file with multiple dtypes."""
         path = os.path.join(temp_dir, "dtypes.pt")
         state_dict = {
-            'f32': torch.randn(10, dtype=torch.float32),
-            'f64': torch.randn(10, dtype=torch.float64),
-            'i64': torch.tensor([1, 2, 3], dtype=torch.int64),
+            "f32": torch.randn(10, dtype=torch.float32),
+            "f64": torch.randn(10, dtype=torch.float64),
+            "i64": torch.tensor([1, 2, 3], dtype=torch.int64),
         }
         torch.save(state_dict, path)
 
@@ -740,22 +770,28 @@ class TestPyTorchFileReading:
 
         reader = Reader(path)
         keys = set(reader.keys())
-        assert 'weight' in keys
-        assert 'bias' in keys
-        np.testing.assert_allclose(reader['weight'], model.weight.detach().numpy(), rtol=1e-6)
-        np.testing.assert_allclose(reader['bias'], model.bias.detach().numpy(), rtol=1e-6)
+        assert "weight" in keys
+        assert "bias" in keys
+        np.testing.assert_allclose(
+            reader["weight"], model.weight.detach().numpy(), rtol=1e-6
+        )
+        np.testing.assert_allclose(
+            reader["bias"], model.bias.detach().numpy(), rtol=1e-6
+        )
 
     def test_read_pt_via_numpy_load_file(self, temp_dir):
         """ztensor.numpy.load_file reads .pt files."""
         from ztensor.numpy import load_file
 
         path = os.path.join(temp_dir, "np_pt.pt")
-        state_dict = {'tensor': torch.randn(50)}
+        state_dict = {"tensor": torch.randn(50)}
         torch.save(state_dict, path)
 
         loaded = load_file(path)
-        assert isinstance(loaded['tensor'], np.ndarray)
-        np.testing.assert_allclose(loaded['tensor'], state_dict['tensor'].numpy(), rtol=1e-6)
+        assert isinstance(loaded["tensor"], np.ndarray)
+        np.testing.assert_allclose(
+            loaded["tensor"], state_dict["tensor"].numpy(), rtol=1e-6
+        )
 
 
 # ============================================================================

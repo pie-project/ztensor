@@ -64,7 +64,12 @@ impl<W: std::io::Write> DigestWriter<W> {
             Checksum::Crc32c => (Some(crc32c::Crc32cHasher::default()), None),
             Checksum::Sha256 => (None, Some(sha2::Sha256::default())),
         };
-        Self { inner, crc32, sha256, bytes_written: 0 }
+        Self {
+            inner,
+            crc32,
+            sha256,
+            bytes_written: 0,
+        }
     }
 
     pub fn finalize(self) -> Option<String> {
@@ -92,10 +97,10 @@ impl<W: std::io::Write> std::io::Write for DigestWriter<W> {
             h.write(slice);
         }
         if let Some(h) = &mut self.sha256 {
-             use sha2::Digest;
-             h.update(slice);
+            use sha2::Digest;
+            h.update(slice);
         }
-        
+
         Ok(n)
     }
 

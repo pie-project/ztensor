@@ -91,11 +91,11 @@ pub mod hdf5_reader;
 #[cfg(feature = "python")]
 mod pylib;
 
+pub use compat::{is_legacy_file, is_legacy_format, LegacyReader};
 pub use error::Error;
 pub use models::{Checksum, Component, DType, Encoding, Format, Manifest, Object};
-pub use reader::{TensorData, TensorElement, TensorReader, Reader};
+pub use reader::{Reader, TensorData, TensorElement, TensorReader};
 pub use writer::{Compression, Writer};
-pub use compat::{LegacyReader, is_legacy_file, is_legacy_format};
 
 #[cfg(feature = "safetensors")]
 pub use safetensors_reader::SafeTensorsReader;
@@ -294,7 +294,11 @@ mod tests {
         let mut writer = Writer::new(&mut buffer)?;
 
         let data: Vec<f32> = (0..1000).map(|i| i as f32 * 0.5).collect();
-        writer.add_with("compressed", &[1000], &data).compress(Compression::Zstd(0)).checksum(Checksum::Crc32c).write()?;
+        writer
+            .add_with("compressed", &[1000], &data)
+            .compress(Compression::Zstd(0))
+            .checksum(Checksum::Crc32c)
+            .write()?;
         writer.finish()?;
 
         buffer.seek(SeekFrom::Start(0))?;
@@ -317,7 +321,10 @@ mod tests {
         let mut writer = Writer::new(&mut buffer)?;
 
         let data: Vec<u8> = (0..=20).collect();
-        writer.add_with("checksummed", &[data.len() as u64], &data).checksum(Checksum::Crc32c).write()?;
+        writer
+            .add_with("checksummed", &[data.len() as u64], &data)
+            .checksum(Checksum::Crc32c)
+            .write()?;
         writer.finish()?;
 
         buffer.seek(SeekFrom::Start(0))?;
@@ -360,7 +367,10 @@ mod tests {
         let mut writer = Writer::new(&mut buffer)?;
 
         let data: Vec<u8> = (0..=100).collect();
-        writer.add_with("sha256_test", &[data.len() as u64], &data).checksum(Checksum::Sha256).write()?;
+        writer
+            .add_with("sha256_test", &[data.len() as u64], &data)
+            .checksum(Checksum::Sha256)
+            .write()?;
         writer.finish()?;
 
         buffer.seek(SeekFrom::Start(0))?;
@@ -381,11 +391,7 @@ mod tests {
         let mut buffer = Cursor::new(Vec::new());
         let mut writer = Writer::new(&mut buffer)?;
 
-        let f16_data: Vec<f16> = vec![
-            f16::from_f32(1.0),
-            f16::from_f32(2.5),
-            f16::from_f32(-3.0),
-        ];
+        let f16_data: Vec<f16> = vec![f16::from_f32(1.0), f16::from_f32(2.5), f16::from_f32(-3.0)];
         writer.add("f16_obj", &[3], &f16_data)?;
 
         let bf16_data: Vec<bf16> = vec![
@@ -421,7 +427,16 @@ mod tests {
         let indices: Vec<u64> = vec![1, 2];
         let indptr: Vec<u64> = vec![0, 1, 2];
 
-        writer.add_csr("sparse_csr", vec![2, 3], DType::F32, &values, &indices, &indptr, Compression::Raw, Checksum::None)?;
+        writer.add_csr(
+            "sparse_csr",
+            vec![2, 3],
+            DType::F32,
+            &values,
+            &indices,
+            &indptr,
+            Compression::Raw,
+            Checksum::None,
+        )?;
         writer.finish()?;
 
         buffer.seek(SeekFrom::Start(0))?;
@@ -445,7 +460,15 @@ mod tests {
         // SoA format: [row_indices..., col_indices...]
         let coords: Vec<u64> = vec![0, 1, 0, 2];
 
-        writer.add_coo("sparse_coo", vec![2, 3], DType::I32, &values, &coords, Compression::Raw, Checksum::None)?;
+        writer.add_coo(
+            "sparse_coo",
+            vec![2, 3],
+            DType::I32,
+            &values,
+            &coords,
+            Compression::Raw,
+            Checksum::None,
+        )?;
         writer.finish()?;
 
         buffer.seek(SeekFrom::Start(0))?;
@@ -514,10 +537,24 @@ mod tests {
         add_dtype!("t_u32", DType::U32, 200u32, u32);
         add_dtype!("t_u16", DType::U16, 300u16, u16);
         add_dtype!("t_u8", DType::U8, 50u8, u8);
-        writer.add_bytes("t_bool", vec![1], DType::Bool, Compression::Raw, &[1u8], Checksum::None)?;
+        writer.add_bytes(
+            "t_bool",
+            vec![1],
+            DType::Bool,
+            Compression::Raw,
+            &[1u8],
+            Checksum::None,
+        )?;
 
         // Manual bool test using bytes directly since bool is not Pod
-        writer.add_bytes("t_bool_typed", vec![1], DType::Bool, Compression::Raw, &[1u8], Checksum::None)?;
+        writer.add_bytes(
+            "t_bool_typed",
+            vec![1],
+            DType::Bool,
+            Compression::Raw,
+            &[1u8],
+            Checksum::None,
+        )?;
 
         writer.finish()?;
         buffer.seek(SeekFrom::Start(0))?;
@@ -565,7 +602,8 @@ mod tests {
         let mut writer = Writer::new(&mut buffer)?;
 
         let data: Vec<f32> = (0..256).map(|i| i as f32).collect();
-        writer.add_with("compressed", &[256], &data)
+        writer
+            .add_with("compressed", &[256], &data)
             .compress(Compression::Zstd(3))
             .write()?;
         writer.finish()?;
@@ -627,27 +665,33 @@ mod tests {
 
     #[test]
     fn test_type_field_cbor_roundtrip() -> Result<(), Error> {
-        use crate::models::{Component, Manifest, Object, Format};
+        use crate::models::{Component, Format, Manifest, Object};
 
         // Build a manifest with a type field set
         let mut components = std::collections::BTreeMap::new();
-        components.insert("data".to_string(), Component {
-            dtype: DType::U8,
-            r#type: Some("f8_e4m3fn".to_string()),
-            offset: 64,
-            length: 1024,
-            uncompressed_length: None,
-            encoding: Encoding::Raw,
-            digest: None,
-        });
+        components.insert(
+            "data".to_string(),
+            Component {
+                dtype: DType::U8,
+                r#type: Some("f8_e4m3fn".to_string()),
+                offset: 64,
+                length: 1024,
+                uncompressed_length: None,
+                encoding: Encoding::Raw,
+                digest: None,
+            },
+        );
 
         let mut objects = std::collections::BTreeMap::new();
-        objects.insert("weights".to_string(), Object {
-            shape: vec![32, 32],
-            format: Format::Dense,
-            attributes: None,
-            components,
-        });
+        objects.insert(
+            "weights".to_string(),
+            Object {
+                shape: vec![32, 32],
+                format: Format::Dense,
+                attributes: None,
+                components,
+            },
+        );
 
         let manifest = Manifest {
             version: "1.2.0".to_string(),
@@ -687,7 +731,10 @@ mod tests {
         use crate::models::Manifest;
 
         let mut attrs = std::collections::BTreeMap::new();
-        attrs.insert("framework".to_string(), ciborium::Value::Text("PyTorch".to_string()));
+        attrs.insert(
+            "framework".to_string(),
+            ciborium::Value::Text("PyTorch".to_string()),
+        );
         attrs.insert("version".to_string(), ciborium::Value::Integer(2.into()));
 
         let manifest = Manifest {
@@ -702,8 +749,14 @@ mod tests {
         let decoded: Manifest = ciborium::from_reader(std::io::Cursor::new(&cbor)).unwrap();
 
         let attrs = decoded.attributes.unwrap();
-        assert_eq!(attrs.get("framework"), Some(&ciborium::Value::Text("PyTorch".to_string())));
-        assert_eq!(attrs.get("version"), Some(&ciborium::Value::Integer(2.into())));
+        assert_eq!(
+            attrs.get("framework"),
+            Some(&ciborium::Value::Text("PyTorch".to_string()))
+        );
+        assert_eq!(
+            attrs.get("version"),
+            Some(&ciborium::Value::Integer(2.into()))
+        );
 
         Ok(())
     }

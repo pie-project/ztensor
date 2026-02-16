@@ -18,12 +18,14 @@ import ztensor
 
 try:
     from safetensors.numpy import save_file as st_save, load_file as st_load
+
     HAS_SAFETENSORS = True
 except ImportError:
     HAS_SAFETENSORS = False
 
 try:
     import torch
+
     HAS_TORCH = True
 except ImportError:
     HAS_TORCH = False
@@ -31,18 +33,21 @@ except ImportError:
 try:
     import onnx
     from onnx import numpy_helper
+
     HAS_ONNX = True
 except ImportError:
     HAS_ONNX = False
 
 try:
     from gguf import GGUFWriter, GGUFReader
+
     HAS_GGUF = True
 except ImportError:
     HAS_GGUF = False
 
 try:
     import h5py
+
     HAS_H5PY = True
 except ImportError:
     HAS_H5PY = False
@@ -51,6 +56,7 @@ except ImportError:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture
 def tmp_path_ext():
@@ -73,7 +79,8 @@ def tmp_path_ext():
 def assert_close(actual, expected, name=""):
     """Assert arrays are exactly equal (bitwise), with a nice message on failure."""
     np.testing.assert_array_equal(
-        actual, expected,
+        actual,
+        expected,
         err_msg=f"Mismatch for tensor '{name}': ztensor vs reference",
     )
 
@@ -82,13 +89,21 @@ def assert_close(actual, expected, name=""):
 # SafeTensors
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.skipif(not HAS_SAFETENSORS, reason="safetensors not installed")
 class TestSafeTensors:
     DTYPES = [
-        np.float32, np.float64,
+        np.float32,
+        np.float64,
         np.float16,
-        np.int64, np.int32, np.int16, np.int8,
-        np.uint64, np.uint32, np.uint16, np.uint8,
+        np.int64,
+        np.int32,
+        np.int16,
+        np.int8,
+        np.uint64,
+        np.uint32,
+        np.uint16,
+        np.uint8,
         np.bool_,
     ]
 
@@ -157,13 +172,20 @@ class TestSafeTensors:
 # PyTorch
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.skipif(not HAS_TORCH, reason="torch not installed")
 class TestPyTorch:
     DTYPES = [
-        torch.float32, torch.float64,
-        torch.float16, torch.bfloat16,
-        torch.int64, torch.int32, torch.int16, torch.int8,
-        torch.uint8, torch.bool,
+        torch.float32,
+        torch.float64,
+        torch.float16,
+        torch.bfloat16,
+        torch.int64,
+        torch.int32,
+        torch.int16,
+        torch.int8,
+        torch.uint8,
+        torch.bool,
     ]
 
     def _save_load_compare(self, path, tensors):
@@ -172,7 +194,11 @@ class TestPyTorch:
         ref = torch.load(path, map_location="cpu", weights_only=True)
         reader = ztensor.Reader(path)
         for name in ref:
-            ref_np = ref[name].numpy() if ref[name].dtype != torch.bfloat16 else ref[name].view(torch.uint16).numpy()
+            ref_np = (
+                ref[name].numpy()
+                if ref[name].dtype != torch.bfloat16
+                else ref[name].view(torch.uint16).numpy()
+            )
             zt_np = reader[name]
             if ref[name].dtype == torch.bfloat16:
                 # ztensor returns bf16 as ml_dtypes.bfloat16 numpy array;
@@ -226,12 +252,20 @@ class TestPyTorch:
 # NPZ (NumPy)
 # ---------------------------------------------------------------------------
 
+
 class TestNpz:
     DTYPES = [
-        np.float32, np.float64,
+        np.float32,
+        np.float64,
         np.float16,
-        np.int64, np.int32, np.int16, np.int8,
-        np.uint64, np.uint32, np.uint16, np.uint8,
+        np.int64,
+        np.int32,
+        np.int16,
+        np.int8,
+        np.uint64,
+        np.uint32,
+        np.uint16,
+        np.uint8,
         np.bool_,
     ]
 
@@ -308,6 +342,7 @@ class TestNpz:
 # ONNX
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.skipif(not HAS_ONNX, reason="onnx not installed")
 class TestOnnx:
     ONNX_DTYPES = [
@@ -331,10 +366,15 @@ class TestOnnx:
         for name, data in tensors.items():
             initializers.append(numpy_helper.from_array(data, name=name))
         graph = onnx.helper.make_graph(
-            [], "test", [], [], initializer=initializers,
+            [],
+            "test",
+            [],
+            [],
+            initializer=initializers,
         )
         model = onnx.helper.make_model(
-            graph, opset_imports=[onnx.helper.make_opsetid("", 13)],
+            graph,
+            opset_imports=[onnx.helper.make_opsetid("", 13)],
         )
         onnx.save(model, path)
 
@@ -409,6 +449,7 @@ class TestOnnx:
 # GGUF
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.skipif(not HAS_GGUF, reason="gguf not installed")
 class TestGguf:
     def _write_gguf(self, path, tensors):
@@ -482,7 +523,9 @@ class TestGguf:
         ref = self._load_ref(path)
         assert set(reader.keys()) == set(ref.keys())
         for name in ref:
-            assert_close(reader[name].flatten(), ref[name].flatten(), f"gguf/multi/{name}")
+            assert_close(
+                reader[name].flatten(), ref[name].flatten(), f"gguf/multi/{name}"
+            )
 
     def test_metadata_consistency(self, tmp_path_ext):
         """Verify ztensor metadata matches the actual array."""
@@ -500,13 +543,21 @@ class TestGguf:
 # HDF5
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.skipif(not HAS_H5PY, reason="h5py not installed")
 class TestHdf5:
     DTYPES = [
-        np.float32, np.float64,
+        np.float32,
+        np.float64,
         np.float16,
-        np.int64, np.int32, np.int16, np.int8,
-        np.uint64, np.uint32, np.uint16, np.uint8,
+        np.int64,
+        np.int32,
+        np.int16,
+        np.int8,
+        np.uint64,
+        np.uint32,
+        np.uint16,
+        np.uint8,
     ]
 
     def test_single_tensor_all_dtypes(self, tmp_path_ext):
@@ -547,19 +598,25 @@ class TestHdf5:
         """Datasets nested in HDF5 groups (e.g. layer1/weight)."""
         path = tmp_path_ext(".h5")
         with h5py.File(path, "w") as hf:
-            hf.create_dataset("layer1/weight", data=np.array([1, 2, 3], dtype=np.float32))
-            hf.create_dataset("layer1/bias", data=np.array([0.1, 0.2], dtype=np.float64))
+            hf.create_dataset(
+                "layer1/weight", data=np.array([1, 2, 3], dtype=np.float32)
+            )
+            hf.create_dataset(
+                "layer1/bias", data=np.array([0.1, 0.2], dtype=np.float64)
+            )
             hf.create_dataset("layer2/weight", data=np.array([4, 5], dtype=np.float32))
 
         reader = ztensor.Reader(path)
         # ztensor uses '.' as group separator
         with h5py.File(path, "r") as hf:
+
             def visit(name, obj):
                 if isinstance(obj, h5py.Dataset):
                     zt_name = name.replace("/", ".")
                     ref = obj[:]
                     zt = reader[zt_name]
                     assert_close(zt, ref, f"hdf5/groups/{name}")
+
             hf.visititems(visit)
 
     def test_multi_dataset(self, tmp_path_ext):
@@ -593,6 +650,7 @@ class TestHdf5:
 # ---------------------------------------------------------------------------
 # Cross-format: write with one library, verify all readers agree
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.skipif(
     not (HAS_SAFETENSORS and HAS_TORCH),

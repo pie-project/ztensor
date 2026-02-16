@@ -209,9 +209,7 @@ impl Object {
         } else {
             self.shape.iter().try_fold(1u64, |acc, &d| {
                 acc.checked_mul(d).ok_or_else(|| {
-                    crate::error::Error::InvalidFileStructure(
-                        "Shape product overflows u64".into(),
-                    )
+                    crate::error::Error::InvalidFileStructure("Shape product overflows u64".into())
                 })
             })
         }
@@ -219,14 +217,9 @@ impl Object {
 
     /// Returns the dtype of the "data" component.
     pub fn data_dtype(&self) -> Result<DType, crate::error::Error> {
-        self.components
-            .get("data")
-            .map(|c| c.dtype)
-            .ok_or_else(|| {
-                crate::error::Error::InvalidFileStructure(
-                    "Missing 'data' component".to_string(),
-                )
-            })
+        self.components.get("data").map(|c| c.dtype).ok_or_else(|| {
+            crate::error::Error::InvalidFileStructure("Missing 'data' component".to_string())
+        })
     }
 
     /// Creates a dense object with a single raw "data" component.

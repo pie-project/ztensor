@@ -104,17 +104,15 @@ fn gguf_tensor_byte_size(n_elements: u64, type_id: u32) -> Result<usize, Error> 
         Error::InvalidFileStructure("GGUF tensor element count exceeds platform limit".into())
     })?;
     if block_size == 1 {
-        n_elements.checked_mul(bytes_per_block)
-            .ok_or_else(|| Error::InvalidFileStructure(
-                "GGUF tensor byte size overflows".into(),
-            ))
+        n_elements
+            .checked_mul(bytes_per_block)
+            .ok_or_else(|| Error::InvalidFileStructure("GGUF tensor byte size overflows".into()))
     } else {
         // Quantized: elements must be divisible by block_size
         let n_blocks = n_elements / block_size;
-        n_blocks.checked_mul(bytes_per_block)
-            .ok_or_else(|| Error::InvalidFileStructure(
-                "GGUF tensor byte size overflows".into(),
-            ))
+        n_blocks
+            .checked_mul(bytes_per_block)
+            .ok_or_else(|| Error::InvalidFileStructure("GGUF tensor byte size overflows".into()))
     }
 }
 
@@ -162,9 +160,8 @@ impl<'a> ParseCursor<'a> {
     fn read_gguf_key(&mut self) -> Result<String, Error> {
         let len = self.read_u64_le()? as usize;
         let bytes = self.read_bytes(len)?;
-        String::from_utf8(bytes.to_vec()).map_err(|e| {
-            Error::InvalidFileStructure(format!("Invalid UTF-8 in GGUF key: {}", e))
-        })
+        String::from_utf8(bytes.to_vec())
+            .map_err(|e| Error::InvalidFileStructure(format!("Invalid UTF-8 in GGUF key: {}", e)))
     }
 
     /// Skip a GGUF metadata value of the given type.
@@ -318,7 +315,8 @@ impl GgufReader {
         }
 
         // 5. Calculate tensor data section start (aligned)
-        let tensor_data_start = crate::utils::align_offset_to(cursor.pos as u64, alignment as u64).0 as usize;
+        let tensor_data_start =
+            crate::utils::align_offset_to(cursor.pos as u64, alignment as u64).0 as usize;
 
         // 6. Build manifest and data ranges
         let mut objects = BTreeMap::new();
@@ -330,23 +328,28 @@ impl GgufReader {
             let n_elements: u64 = if info.shape.is_empty() {
                 1
             } else {
-                info.shape.iter().try_fold(1u64, |acc, &d| acc.checked_mul(d))
-                    .ok_or_else(|| Error::InvalidFileStructure(format!(
-                        "Tensor '{}' shape overflows", info.name
-                    )))?
+                info.shape
+                    .iter()
+                    .try_fold(1u64, |acc, &d| acc.checked_mul(d))
+                    .ok_or_else(|| {
+                        Error::InvalidFileStructure(format!(
+                            "Tensor '{}' shape overflows",
+                            info.name
+                        ))
+                    })?
             };
             let byte_size = gguf_tensor_byte_size(n_elements, info.type_id)?;
 
-            let abs_offset = tensor_data_start.checked_add(info.offset as usize)
-                .ok_or_else(|| Error::InvalidFileStructure(format!(
-                    "Tensor '{}' offset overflows", info.name
-                )))?;
+            let abs_offset = tensor_data_start
+                .checked_add(info.offset as usize)
+                .ok_or_else(|| {
+                    Error::InvalidFileStructure(format!("Tensor '{}' offset overflows", info.name))
+                })?;
 
             // Bounds check
-            let end = abs_offset.checked_add(byte_size)
-                .ok_or_else(|| Error::InvalidFileStructure(format!(
-                    "Tensor '{}' extends beyond file", info.name
-                )))?;
+            let end = abs_offset.checked_add(byte_size).ok_or_else(|| {
+                Error::InvalidFileStructure(format!("Tensor '{}' extends beyond file", info.name))
+            })?;
             if end > mmap.len() {
                 return Err(Error::InvalidFileStructure(format!(
                     "Tensor '{}' extends beyond file: offset {} + size {} > file size {}",
@@ -412,7 +415,10 @@ impl GgufReader {
 
     /// Gets a typed zero-copy reference to an object's data.
     pub fn view_as<T: TensorElement>(&self, name: &str) -> Result<&[T], Error> {
-        let dtype = self.manifest.objects.get(name)
+        let dtype = self
+            .manifest
+            .objects
+            .get(name)
             .ok_or_else(|| Error::ObjectNotFound(name.to_string()))?
             .data_dtype()?;
         if T::DTYPE != dtype {
@@ -432,7 +438,10 @@ impl GgufReader {
 
     /// Reads object data as a typed vector.
     pub fn read_as<T: TensorElement>(&self, name: &str) -> Result<Vec<T>, Error> {
-        let dtype = self.manifest.objects.get(name)
+        let dtype = self
+            .manifest
+            .objects
+            .get(name)
             .ok_or_else(|| Error::ObjectNotFound(name.to_string()))?
             .data_dtype()?;
         if T::DTYPE != dtype {

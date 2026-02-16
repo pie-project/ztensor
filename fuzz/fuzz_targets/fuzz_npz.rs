@@ -4,10 +4,7 @@ use std::io::Write;
 use ztensor::{NpzReader, TensorReader};
 
 fuzz_target!(|data: &[u8]| {
-    let mut tmp = tempfile::Builder::new()
-        .suffix(".npz")
-        .tempfile()
-        .unwrap();
+    let mut tmp = tempfile::Builder::new().suffix(".npz").tempfile().unwrap();
     tmp.write_all(data).unwrap();
 
     let reader = match NpzReader::open(tmp.path()) {

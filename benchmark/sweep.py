@@ -94,8 +94,10 @@ def run_sweep():
         scenario = cfg["scenario"]
 
         print(f"--- {scenario} / {data_style} ---")
-        print(f"  Sizes: {cfg['sizes']}, Dists: {cfg['distributions']}, "
-              f"Formats: {cfg['formats']}")
+        print(
+            f"  Sizes: {cfg['sizes']}, Dists: {cfg['distributions']}, "
+            f"Formats: {cfg['formats']}"
+        )
         print()
 
         for dist in cfg["distributions"]:
@@ -107,7 +109,10 @@ def run_sweep():
                     filepath = config.filepath_for_format(fmt, "bench_out", "sweep")
 
                     result = run_single_benchmark(
-                        fmt, tensors, filepath, scenario=scenario,
+                        fmt,
+                        tensors,
+                        filepath,
+                        scenario=scenario,
                     )
 
                     if result is None:
@@ -121,23 +126,27 @@ def run_sweep():
                     r_lat = result["read_median"]
                     size_gb = result["file_size_gb"]
 
-                    print(f"  {fmt:<16} | {size_mb:>4}MB ({dist:<5}) | "
-                          f"W: {w_speed:.2f} GB/s | R: {r_lat:.4f}s | "
-                          f"File: {size_gb*1024:.1f}MB | Tensors: {tensor_count} "
-                          f"| {scenario}/{data_style}")
+                    print(
+                        f"  {fmt:<16} | {size_mb:>4}MB ({dist:<5}) | "
+                        f"W: {w_speed:.2f} GB/s | R: {r_lat:.4f}s | "
+                        f"File: {size_gb*1024:.1f}MB | Tensors: {tensor_count} "
+                        f"| {scenario}/{data_style}"
+                    )
 
-                    results.append({
-                        "Format": fmt,
-                        "SizeMB": size_mb,
-                        "Distribution": dist,
-                        "DataStyle": data_style,
-                        "Scenario": scenario,
-                        "WriteGBs": w_speed,
-                        "ReadSeconds": r_lat,
-                        "FileSizeGB": size_gb,
-                        "DataSizeGB": result["data_size_gb"],
-                        "TensorCount": tensor_count,
-                    })
+                    results.append(
+                        {
+                            "Format": fmt,
+                            "SizeMB": size_mb,
+                            "Distribution": dist,
+                            "DataStyle": data_style,
+                            "Scenario": scenario,
+                            "WriteGBs": w_speed,
+                            "ReadSeconds": r_lat,
+                            "FileSizeGB": size_gb,
+                            "DataSizeGB": result["data_size_gb"],
+                            "TensorCount": tensor_count,
+                        }
+                    )
 
                 print()
 

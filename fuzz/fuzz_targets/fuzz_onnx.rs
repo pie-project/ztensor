@@ -4,10 +4,7 @@ use std::io::Write;
 use ztensor::{OnnxReader, TensorReader};
 
 fuzz_target!(|data: &[u8]| {
-    let mut tmp = tempfile::Builder::new()
-        .suffix(".onnx")
-        .tempfile()
-        .unwrap();
+    let mut tmp = tempfile::Builder::new().suffix(".onnx").tempfile().unwrap();
     tmp.write_all(data).unwrap();
 
     let reader = match OnnxReader::open(tmp.path()) {

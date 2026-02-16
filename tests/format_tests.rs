@@ -12,8 +12,8 @@ use tempfile::NamedTempFile;
 
 use ztensor::writer::Compression;
 use ztensor::{
-    Checksum, DType, Encoding, Error, Format, GgufReader, Hdf5Reader, PyTorchReader,
-    SafeTensorsReader, Reader, TensorReader, Writer, NpzReader, OnnxReader,
+    Checksum, DType, Encoding, Error, Format, GgufReader, Hdf5Reader, NpzReader, OnnxReader,
+    PyTorchReader, Reader, SafeTensorsReader, TensorReader, Writer,
 };
 
 // =========================================================================
@@ -260,8 +260,7 @@ fn zt_dense_f32_1d() {
     let data = make_f32_data(1024);
     let mut buf = Cursor::new(Vec::new());
     let mut w = Writer::new(&mut buf).unwrap();
-    w.add("v", &[1024], &data)
-        .unwrap();
+    w.add("v", &[1024], &data).unwrap();
     w.finish().unwrap();
     buf.seek(SeekFrom::Start(0)).unwrap();
     let r = Reader::new(&mut buf).unwrap();
@@ -273,8 +272,7 @@ fn zt_dense_f32_2d() {
     let data = make_f32_data(64 * 128);
     let mut buf = Cursor::new(Vec::new());
     let mut w = Writer::new(&mut buf).unwrap();
-    w.add("w", &[64, 128], &data)
-        .unwrap();
+    w.add("w", &[64, 128], &data).unwrap();
     w.finish().unwrap();
     buf.seek(SeekFrom::Start(0)).unwrap();
     let r = Reader::new(&mut buf).unwrap();
@@ -288,8 +286,7 @@ fn zt_dense_f32_3d() {
     let data = make_f32_data(3 * 3 * 64);
     let mut buf = Cursor::new(Vec::new());
     let mut w = Writer::new(&mut buf).unwrap();
-    w.add("k", &[3, 3, 64], &data)
-        .unwrap();
+    w.add("k", &[3, 3, 64], &data).unwrap();
     w.finish().unwrap();
     buf.seek(SeekFrom::Start(0)).unwrap();
     let r = Reader::new(&mut buf).unwrap();
@@ -302,8 +299,7 @@ fn zt_dense_f32_4d() {
     let data = make_f32_data(8 * 3 * 32 * 32);
     let mut buf = Cursor::new(Vec::new());
     let mut w = Writer::new(&mut buf).unwrap();
-    w.add("x", &[8, 3, 32, 32], &data)
-        .unwrap();
+    w.add("x", &[8, 3, 32, 32], &data).unwrap();
     w.finish().unwrap();
     buf.seek(SeekFrom::Start(0)).unwrap();
     let r = Reader::new(&mut buf).unwrap();
@@ -316,8 +312,7 @@ fn zt_dense_scalar() {
     let data: Vec<f32> = vec![42.0];
     let mut buf = Cursor::new(Vec::new());
     let mut w = Writer::new(&mut buf).unwrap();
-    w.add("s", &[], &data)
-        .unwrap();
+    w.add("s", &[], &data).unwrap();
     w.finish().unwrap();
     buf.seek(SeekFrom::Start(0)).unwrap();
     let r = Reader::new(&mut buf).unwrap();
@@ -331,8 +326,7 @@ fn zt_dense_large() {
     let data = make_f32_data(1024 * 1024);
     let mut buf = Cursor::new(Vec::new());
     let mut w = Writer::new(&mut buf).unwrap();
-    w.add("big", &[1024, 1024], &data)
-        .unwrap();
+    w.add("big", &[1024, 1024], &data).unwrap();
     w.finish().unwrap();
     buf.seek(SeekFrom::Start(0)).unwrap();
     let r = Reader::new(&mut buf).unwrap();
@@ -348,12 +342,7 @@ macro_rules! zt_dtype_test {
             let data: Vec<$t> = $make($n);
             let mut buf = Cursor::new(Vec::new());
             let mut w = Writer::new(&mut buf).unwrap();
-            w.add(
-                "tensor",
-                &[$n as u64],
-                &data,
-            )
-            .unwrap();
+            w.add("tensor", &[$n as u64], &data).unwrap();
             w.finish().unwrap();
             buf.seek(SeekFrom::Start(0)).unwrap();
             let r = Reader::new(&mut buf).unwrap();
@@ -381,8 +370,15 @@ fn zt_dtype_bool() {
     let data = make_bool_data(64);
     let mut buf = Cursor::new(Vec::new());
     let mut w = Writer::new(&mut buf).unwrap();
-    w.add_bytes("tensor", vec![64], DType::Bool, Compression::Raw, &data, Checksum::None)
-        .unwrap();
+    w.add_bytes(
+        "tensor",
+        vec![64],
+        DType::Bool,
+        Compression::Raw,
+        &data,
+        Checksum::None,
+    )
+    .unwrap();
     w.finish().unwrap();
     buf.seek(SeekFrom::Start(0)).unwrap();
     let r = Reader::new(&mut buf).unwrap();
@@ -446,12 +442,8 @@ fn zt_multi_object_many() {
     let mut all_data = Vec::new();
     for i in 0..50 {
         let data = make_f32_data(4 * 4);
-        w.add(
-            &format!("layer_{:02}.weight", i),
-            &[4, 4],
-            &data,
-        )
-        .unwrap();
+        w.add(&format!("layer_{:02}.weight", i), &[4, 4], &data)
+            .unwrap();
         all_data.push(data);
     }
     w.finish().unwrap();
@@ -472,7 +464,9 @@ fn zt_compressed_zstd() {
     let data = make_f32_data(4096);
     let mut buf = Cursor::new(Vec::new());
     let mut w = Writer::new(&mut buf).unwrap();
-    w.add_with("c", &[4096], &data).compress(Compression::Zstd(3)).write()
+    w.add_with("c", &[4096], &data)
+        .compress(Compression::Zstd(3))
+        .write()
         .unwrap();
     w.finish().unwrap();
 
@@ -492,13 +486,14 @@ fn zt_compressed_vs_raw() {
 
     let mut raw_buf = Cursor::new(Vec::new());
     let mut w = Writer::new(&mut raw_buf).unwrap();
-    w.add("t", &[2048], &data)
-        .unwrap();
+    w.add("t", &[2048], &data).unwrap();
     w.finish().unwrap();
 
     let mut zstd_buf = Cursor::new(Vec::new());
     let mut w = Writer::new(&mut zstd_buf).unwrap();
-    w.add_with("t", &[2048], &data).compress(Compression::Zstd(3)).write()
+    w.add_with("t", &[2048], &data)
+        .compress(Compression::Zstd(3))
+        .write()
         .unwrap();
     w.finish().unwrap();
 
@@ -519,7 +514,9 @@ fn zt_checksum_crc32c() {
     let data = make_u8_data(256);
     let mut buf = Cursor::new(Vec::new());
     let mut w = Writer::new(&mut buf).unwrap();
-    w.add_with("c", &[256], &data).checksum(Checksum::Crc32c).write()
+    w.add_with("c", &[256], &data)
+        .checksum(Checksum::Crc32c)
+        .write()
         .unwrap();
     w.finish().unwrap();
 
@@ -538,7 +535,9 @@ fn zt_checksum_sha256() {
     let data = make_u8_data(256);
     let mut buf = Cursor::new(Vec::new());
     let mut w = Writer::new(&mut buf).unwrap();
-    w.add_with("s", &[256], &data).checksum(Checksum::Sha256).write()
+    w.add_with("s", &[256], &data)
+        .checksum(Checksum::Sha256)
+        .write()
         .unwrap();
     w.finish().unwrap();
 
@@ -559,8 +558,7 @@ fn zt_mmap_read() {
     let mut file = NamedTempFile::new().unwrap();
     {
         let mut w = Writer::new(&mut file).unwrap();
-        w.add("t", &[128], &data)
-            .unwrap();
+        w.add("t", &[128], &data).unwrap();
         w.finish().unwrap();
     }
 
@@ -579,8 +577,7 @@ fn zt_stream_read() {
     let data = make_f32_data(64);
     let mut buf = Cursor::new(Vec::new());
     let mut w = Writer::new(&mut buf).unwrap();
-    w.add("t", &[64], &data)
-        .unwrap();
+    w.add("t", &[64], &data).unwrap();
     w.finish().unwrap();
 
     let bytes = buf.into_inner();
@@ -594,8 +591,7 @@ fn zt_open_any_v1() {
     let mut file = NamedTempFile::new().unwrap();
     {
         let mut w = Writer::new(&mut file).unwrap();
-        w.add("t", &[32], &data)
-            .unwrap();
+        w.add("t", &[32], &data).unwrap();
         w.finish().unwrap();
     }
 
@@ -766,19 +762,84 @@ fn st_all_dtypes() {
     let bool_data = make_bool_data(4);
 
     let file = build_safetensors_file(vec![
-        ("f64".into(), safetensors::Dtype::F64, vec![4], bytemuck::cast_slice(&f64_data).to_vec()),
-        ("f32".into(), safetensors::Dtype::F32, vec![4], bytemuck::cast_slice(&f32_data).to_vec()),
-        ("f16".into(), safetensors::Dtype::F16, vec![4], bytemuck::cast_slice(&f16_data).to_vec()),
-        ("bf16".into(), safetensors::Dtype::BF16, vec![4], bytemuck::cast_slice(&bf16_data).to_vec()),
-        ("i64".into(), safetensors::Dtype::I64, vec![4], bytemuck::cast_slice(&i64_data).to_vec()),
-        ("i32".into(), safetensors::Dtype::I32, vec![4], bytemuck::cast_slice(&i32_data).to_vec()),
-        ("i16".into(), safetensors::Dtype::I16, vec![4], bytemuck::cast_slice(&i16_data).to_vec()),
-        ("i8".into(), safetensors::Dtype::I8, vec![4], bytemuck::cast_slice(&i8_data).to_vec()),
-        ("u64".into(), safetensors::Dtype::U64, vec![4], bytemuck::cast_slice(&u64_data).to_vec()),
-        ("u32".into(), safetensors::Dtype::U32, vec![4], bytemuck::cast_slice(&u32_data).to_vec()),
-        ("u16".into(), safetensors::Dtype::U16, vec![4], bytemuck::cast_slice(&u16_data).to_vec()),
-        ("u8".into(), safetensors::Dtype::U8, vec![4], u8_data.clone()),
-        ("bool".into(), safetensors::Dtype::BOOL, vec![4], bool_data.clone()),
+        (
+            "f64".into(),
+            safetensors::Dtype::F64,
+            vec![4],
+            bytemuck::cast_slice(&f64_data).to_vec(),
+        ),
+        (
+            "f32".into(),
+            safetensors::Dtype::F32,
+            vec![4],
+            bytemuck::cast_slice(&f32_data).to_vec(),
+        ),
+        (
+            "f16".into(),
+            safetensors::Dtype::F16,
+            vec![4],
+            bytemuck::cast_slice(&f16_data).to_vec(),
+        ),
+        (
+            "bf16".into(),
+            safetensors::Dtype::BF16,
+            vec![4],
+            bytemuck::cast_slice(&bf16_data).to_vec(),
+        ),
+        (
+            "i64".into(),
+            safetensors::Dtype::I64,
+            vec![4],
+            bytemuck::cast_slice(&i64_data).to_vec(),
+        ),
+        (
+            "i32".into(),
+            safetensors::Dtype::I32,
+            vec![4],
+            bytemuck::cast_slice(&i32_data).to_vec(),
+        ),
+        (
+            "i16".into(),
+            safetensors::Dtype::I16,
+            vec![4],
+            bytemuck::cast_slice(&i16_data).to_vec(),
+        ),
+        (
+            "i8".into(),
+            safetensors::Dtype::I8,
+            vec![4],
+            bytemuck::cast_slice(&i8_data).to_vec(),
+        ),
+        (
+            "u64".into(),
+            safetensors::Dtype::U64,
+            vec![4],
+            bytemuck::cast_slice(&u64_data).to_vec(),
+        ),
+        (
+            "u32".into(),
+            safetensors::Dtype::U32,
+            vec![4],
+            bytemuck::cast_slice(&u32_data).to_vec(),
+        ),
+        (
+            "u16".into(),
+            safetensors::Dtype::U16,
+            vec![4],
+            bytemuck::cast_slice(&u16_data).to_vec(),
+        ),
+        (
+            "u8".into(),
+            safetensors::Dtype::U8,
+            vec![4],
+            u8_data.clone(),
+        ),
+        (
+            "bool".into(),
+            safetensors::Dtype::BOOL,
+            vec![4],
+            bool_data.clone(),
+        ),
     ]);
 
     let reader = SafeTensorsReader::open(file.path()).unwrap();
@@ -882,15 +943,60 @@ fn st_model_like() {
     let lm_head = make_f32_data(100 * 64);
 
     let file = build_safetensors_file(vec![
-        ("embed_tokens.weight".into(), safetensors::Dtype::F32, vec![100, 64], bytemuck::cast_slice(&embed).to_vec()),
-        ("layers.0.self_attn.q_proj.weight".into(), safetensors::Dtype::F32, vec![64, 64], bytemuck::cast_slice(&q_proj).to_vec()),
-        ("layers.0.self_attn.k_proj.weight".into(), safetensors::Dtype::F32, vec![64, 64], bytemuck::cast_slice(&k_proj).to_vec()),
-        ("layers.0.self_attn.v_proj.weight".into(), safetensors::Dtype::F32, vec![64, 64], bytemuck::cast_slice(&v_proj).to_vec()),
-        ("layers.0.mlp.gate_proj.weight".into(), safetensors::Dtype::F16, vec![256, 64], bytemuck::cast_slice(&gate).to_vec()),
-        ("layers.0.mlp.up_proj.weight".into(), safetensors::Dtype::F16, vec![256, 64], bytemuck::cast_slice(&up).to_vec()),
-        ("layers.0.mlp.down_proj.weight".into(), safetensors::Dtype::F16, vec![64, 256], bytemuck::cast_slice(&down).to_vec()),
-        ("layers.0.input_layernorm.weight".into(), safetensors::Dtype::F32, vec![64], bytemuck::cast_slice(&ln).to_vec()),
-        ("lm_head.weight".into(), safetensors::Dtype::F32, vec![100, 64], bytemuck::cast_slice(&lm_head).to_vec()),
+        (
+            "embed_tokens.weight".into(),
+            safetensors::Dtype::F32,
+            vec![100, 64],
+            bytemuck::cast_slice(&embed).to_vec(),
+        ),
+        (
+            "layers.0.self_attn.q_proj.weight".into(),
+            safetensors::Dtype::F32,
+            vec![64, 64],
+            bytemuck::cast_slice(&q_proj).to_vec(),
+        ),
+        (
+            "layers.0.self_attn.k_proj.weight".into(),
+            safetensors::Dtype::F32,
+            vec![64, 64],
+            bytemuck::cast_slice(&k_proj).to_vec(),
+        ),
+        (
+            "layers.0.self_attn.v_proj.weight".into(),
+            safetensors::Dtype::F32,
+            vec![64, 64],
+            bytemuck::cast_slice(&v_proj).to_vec(),
+        ),
+        (
+            "layers.0.mlp.gate_proj.weight".into(),
+            safetensors::Dtype::F16,
+            vec![256, 64],
+            bytemuck::cast_slice(&gate).to_vec(),
+        ),
+        (
+            "layers.0.mlp.up_proj.weight".into(),
+            safetensors::Dtype::F16,
+            vec![256, 64],
+            bytemuck::cast_slice(&up).to_vec(),
+        ),
+        (
+            "layers.0.mlp.down_proj.weight".into(),
+            safetensors::Dtype::F16,
+            vec![64, 256],
+            bytemuck::cast_slice(&down).to_vec(),
+        ),
+        (
+            "layers.0.input_layernorm.weight".into(),
+            safetensors::Dtype::F32,
+            vec![64],
+            bytemuck::cast_slice(&ln).to_vec(),
+        ),
+        (
+            "lm_head.weight".into(),
+            safetensors::Dtype::F32,
+            vec![100, 64],
+            bytemuck::cast_slice(&lm_head).to_vec(),
+        ),
     ]);
 
     let reader = SafeTensorsReader::open(file.path()).unwrap();
@@ -907,7 +1013,12 @@ fn st_model_like() {
 
     // Verify data
     assert_eq!(reader.read_as::<f32>("embed_tokens.weight").unwrap(), embed);
-    assert_eq!(reader.read_as::<f16>("layers.0.mlp.gate_proj.weight").unwrap(), gate);
+    assert_eq!(
+        reader
+            .read_as::<f16>("layers.0.mlp.gate_proj.weight")
+            .unwrap(),
+        gate
+    );
     assert_eq!(reader.read_as::<f32>("lm_head.weight").unwrap(), lm_head);
 }
 
@@ -930,12 +1041,7 @@ fn st_zero_copy_slice() {
 fn st_zero_copy_typed() {
     let data = make_f32_data(16);
     let bytes: Vec<u8> = bytemuck::cast_slice(&data).to_vec();
-    let file = build_safetensors_file(vec![(
-        "t".into(),
-        safetensors::Dtype::F32,
-        vec![16],
-        bytes,
-    )]);
+    let file = build_safetensors_file(vec![("t".into(), safetensors::Dtype::F32, vec![16], bytes)]);
     let reader = SafeTensorsReader::open(file.path()).unwrap();
     let typed = reader.view_as::<f32>("t").unwrap();
     assert_eq!(typed, &data[..]);
@@ -987,22 +1093,61 @@ macro_rules! pt_storage_test {
             assert_eq!(reader.tensors().len(), 1);
             let obj = reader.get("tensor").unwrap();
             assert_eq!(obj.shape, vec![$n as u64]);
-            assert_eq!(
-                obj.components.get("data").unwrap().dtype,
-                $dtype
-            );
+            assert_eq!(obj.components.get("data").unwrap().dtype, $dtype);
             let result: Vec<$t> = reader.read_as("tensor").unwrap();
             assert_eq!(result, data);
         }
     };
 }
 
-pt_storage_test!(pt_float_storage, "FloatStorage", DType::F32, f32, make_f32_data, 12);
-pt_storage_test!(pt_double_storage, "DoubleStorage", DType::F64, f64, make_f64_data, 8);
-pt_storage_test!(pt_half_storage, "HalfStorage", DType::F16, f16, make_f16_data, 16);
-pt_storage_test!(pt_long_storage, "LongStorage", DType::I64, i64, make_i64_data, 6);
-pt_storage_test!(pt_int_storage, "IntStorage", DType::I32, i32, make_i32_data, 10);
-pt_storage_test!(pt_byte_storage, "ByteStorage", DType::U8, u8, make_u8_data, 20);
+pt_storage_test!(
+    pt_float_storage,
+    "FloatStorage",
+    DType::F32,
+    f32,
+    make_f32_data,
+    12
+);
+pt_storage_test!(
+    pt_double_storage,
+    "DoubleStorage",
+    DType::F64,
+    f64,
+    make_f64_data,
+    8
+);
+pt_storage_test!(
+    pt_half_storage,
+    "HalfStorage",
+    DType::F16,
+    f16,
+    make_f16_data,
+    16
+);
+pt_storage_test!(
+    pt_long_storage,
+    "LongStorage",
+    DType::I64,
+    i64,
+    make_i64_data,
+    6
+);
+pt_storage_test!(
+    pt_int_storage,
+    "IntStorage",
+    DType::I32,
+    i32,
+    make_i32_data,
+    10
+);
+pt_storage_test!(
+    pt_byte_storage,
+    "ByteStorage",
+    DType::U8,
+    u8,
+    make_u8_data,
+    20
+);
 
 #[test]
 fn pt_bool_storage() {
@@ -1299,11 +1444,7 @@ fn pt_error_no_pickle() {
 
     match PyTorchReader::open(file.path()) {
         Err(Error::InvalidFileStructure(msg)) => {
-            assert!(
-                msg.contains("pickle") || msg.contains("pkl"),
-                "msg={}",
-                msg
-            );
+            assert!(msg.contains("pickle") || msg.contains("pkl"), "msg={}", msg);
         }
         Err(e) => panic!("Expected InvalidFileStructure about pickle, got {:?}", e),
         Ok(_) => panic!("Expected error"),
@@ -1333,7 +1474,10 @@ fn pt_error_empty_state_dict() {
         Err(Error::InvalidFileStructure(msg)) => {
             assert!(msg.contains("No tensors"), "msg={}", msg);
         }
-        Err(e) => panic!("Expected InvalidFileStructure about no tensors, got {:?}", e),
+        Err(e) => panic!(
+            "Expected InvalidFileStructure about no tensors, got {:?}",
+            e
+        ),
         Ok(_) => panic!("Expected error"),
     }
 }
@@ -1350,8 +1494,7 @@ fn cross_format_verify_f32(name: &str, shape_zt: Vec<u64>, shape_st: Vec<usize>,
     // ZTensor
     let mut zt_buf = Cursor::new(Vec::new());
     let mut w = Writer::new(&mut zt_buf).unwrap();
-    w.add(name, &shape_zt, data)
-        .unwrap();
+    w.add(name, &shape_zt, data).unwrap();
     w.finish().unwrap();
     zt_buf.seek(SeekFrom::Start(0)).unwrap();
     let zt_reader = Reader::new(&mut zt_buf).unwrap();
@@ -1368,7 +1511,11 @@ fn cross_format_verify_f32(name: &str, shape_zt: Vec<u64>, shape_st: Vec<usize>,
     let st_data: Vec<f32> = st_reader.read_as(name).unwrap();
 
     // PyTorch
-    let shape_pt: Vec<usize> = zt_data.len().min(n).max(1).min(n)
+    let shape_pt: Vec<usize> = zt_data
+        .len()
+        .min(n)
+        .max(1)
+        .min(n)
         .checked_div(1) // just use [n] for simplicity
         .map(|_| vec![n])
         .unwrap();
@@ -1408,8 +1555,7 @@ fn cross_f16_all_formats() {
     // ZTensor
     let mut zt_buf = Cursor::new(Vec::new());
     let mut w = Writer::new(&mut zt_buf).unwrap();
-    w.add("t", &[256], &data)
-        .unwrap();
+    w.add("t", &[256], &data).unwrap();
     w.finish().unwrap();
     zt_buf.seek(SeekFrom::Start(0)).unwrap();
     let zt_reader = Reader::new(&mut zt_buf).unwrap();
@@ -1454,8 +1600,7 @@ fn cross_i32_all_formats() {
     // ZTensor
     let mut zt_buf = Cursor::new(Vec::new());
     let mut w = Writer::new(&mut zt_buf).unwrap();
-    w.add("t", &[128], &data)
-        .unwrap();
+    w.add("t", &[128], &data).unwrap();
     w.finish().unwrap();
     zt_buf.seek(SeekFrom::Start(0)).unwrap();
     let zt_reader = Reader::new(&mut zt_buf).unwrap();
@@ -1506,8 +1651,7 @@ fn cross_manifest_shapes() {
     // ZTensor
     let mut zt_buf = Cursor::new(Vec::new());
     let mut w = Writer::new(&mut zt_buf).unwrap();
-    w.add("t", &[8, 16], &data)
-        .unwrap();
+    w.add("t", &[8, 16], &data).unwrap();
     w.finish().unwrap();
     zt_buf.seek(SeekFrom::Start(0)).unwrap();
     let zt_reader = Reader::new(&mut zt_buf).unwrap();
@@ -1573,8 +1717,18 @@ fn cross_model_checkpoint() {
 
         // SafeTensors
         let st_file = build_safetensors_file(vec![
-            (w_name.clone(), safetensors::Dtype::F32, vec![32, 32], w_bytes.clone()),
-            (b_name.clone(), safetensors::Dtype::F32, vec![32], b_bytes.clone()),
+            (
+                w_name.clone(),
+                safetensors::Dtype::F32,
+                vec![32, 32],
+                w_bytes.clone(),
+            ),
+            (
+                b_name.clone(),
+                safetensors::Dtype::F32,
+                vec![32],
+                b_bytes.clone(),
+            ),
         ]);
         let st_reader = SafeTensorsReader::open(st_file.path()).unwrap();
 
@@ -1643,17 +1797,56 @@ fn cross_mixed_dtypes() {
 
     // SafeTensors
     let st_file = build_safetensors_file(vec![
-        ("f32".into(), safetensors::Dtype::F32, vec![64], f32_bytes.clone()),
-        ("i64".into(), safetensors::Dtype::I64, vec![32], i64_bytes.clone()),
-        ("u8".into(), safetensors::Dtype::U8, vec![128], u8_data.clone()),
+        (
+            "f32".into(),
+            safetensors::Dtype::F32,
+            vec![64],
+            f32_bytes.clone(),
+        ),
+        (
+            "i64".into(),
+            safetensors::Dtype::I64,
+            vec![32],
+            i64_bytes.clone(),
+        ),
+        (
+            "u8".into(),
+            safetensors::Dtype::U8,
+            vec![128],
+            u8_data.clone(),
+        ),
     ]);
     let st_reader = SafeTensorsReader::open(st_file.path()).unwrap();
 
     // PyTorch
     let specs = vec![
-        PtTensorSpec { name: "f32".into(), storage_type: "FloatStorage".into(), storage_key: "0".into(), shape: vec![64], stride: vec![1], storage_offset: 0, numel: 64 },
-        PtTensorSpec { name: "i64".into(), storage_type: "LongStorage".into(), storage_key: "1".into(), shape: vec![32], stride: vec![1], storage_offset: 0, numel: 32 },
-        PtTensorSpec { name: "u8".into(), storage_type: "ByteStorage".into(), storage_key: "2".into(), shape: vec![128], stride: vec![1], storage_offset: 0, numel: 128 },
+        PtTensorSpec {
+            name: "f32".into(),
+            storage_type: "FloatStorage".into(),
+            storage_key: "0".into(),
+            shape: vec![64],
+            stride: vec![1],
+            storage_offset: 0,
+            numel: 64,
+        },
+        PtTensorSpec {
+            name: "i64".into(),
+            storage_type: "LongStorage".into(),
+            storage_key: "1".into(),
+            shape: vec![32],
+            stride: vec![1],
+            storage_offset: 0,
+            numel: 32,
+        },
+        PtTensorSpec {
+            name: "u8".into(),
+            storage_type: "ByteStorage".into(),
+            storage_key: "2".into(),
+            shape: vec![128],
+            stride: vec![1],
+            storage_offset: 0,
+            numel: 128,
+        },
     ];
     let mut storage = BTreeMap::new();
     storage.insert("0".into(), f32_bytes);
@@ -1823,7 +2016,8 @@ fn npz_open_dispatch() {
     assert_eq!(reader.keys(), vec!["x"]);
     let td = reader.read_data("x").unwrap();
     let raw = td.as_slice();
-    let result: Vec<f32> = raw.chunks_exact(4)
+    let result: Vec<f32> = raw
+        .chunks_exact(4)
         .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
         .collect();
     assert_eq!(result, data);
@@ -2030,7 +2224,8 @@ fn onnx_open_dispatch() {
     assert_eq!(reader.keys(), vec!["x"]);
     let td = reader.read_data("x").unwrap();
     let bytes = td.as_slice();
-    let result: Vec<f32> = bytes.chunks_exact(4)
+    let result: Vec<f32> = bytes
+        .chunks_exact(4)
         .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
         .collect();
     assert_eq!(result, data);
@@ -2173,7 +2368,8 @@ fn hdf5_rejects_bad_magic() {
 fn hdf5_rejects_truncated_superblock() {
     let mut tmp = NamedTempFile::new().unwrap();
     // Real HDF5 signature but truncated
-    tmp.write_all(&[0x89, 0x48, 0x44, 0x46, 0x0d, 0x0a, 0x1a, 0x0a]).unwrap();
+    tmp.write_all(&[0x89, 0x48, 0x44, 0x46, 0x0d, 0x0a, 0x1a, 0x0a])
+        .unwrap();
     tmp.flush().unwrap();
     assert!(Hdf5Reader::open(tmp.path()).is_err());
 }
@@ -2186,8 +2382,8 @@ fn npz_rejects_invalid_npy_header() {
     let buf = Vec::new();
     let cursor = Cursor::new(buf);
     let mut zip = zip::ZipWriter::new(cursor);
-    let options = zip::write::SimpleFileOptions::default()
-        .compression_method(zip::CompressionMethod::Stored);
+    let options =
+        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
     zip.start_file("arr_0.npy", options).unwrap();
     zip.write_all(b"NOT_A_NUMPY_ARRAY").unwrap();
     let cursor = zip.finish().unwrap();
@@ -2197,4 +2393,3 @@ fn npz_rejects_invalid_npy_header() {
     tmp.flush().unwrap();
     assert!(NpzReader::open(tmp.path()).is_err());
 }
-

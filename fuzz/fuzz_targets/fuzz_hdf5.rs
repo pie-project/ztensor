@@ -4,10 +4,7 @@ use std::io::Write;
 use ztensor::{Hdf5Reader, TensorReader};
 
 fuzz_target!(|data: &[u8]| {
-    let mut tmp = tempfile::Builder::new()
-        .suffix(".h5")
-        .tempfile()
-        .unwrap();
+    let mut tmp = tempfile::Builder::new().suffix(".h5").tempfile().unwrap();
     tmp.write_all(data).unwrap();
 
     let reader = match Hdf5Reader::open(tmp.path()) {

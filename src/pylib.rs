@@ -280,15 +280,9 @@ fn build_numpy_dict_zerocopy<'py>(
         let this = slf.borrow();
         let mut infos = Vec::new();
         for (name, obj) in this.inner.tensors() {
-            let component = obj
-                .components
-                .get("data")
-                .ok_or_else(|| {
-                    PyRuntimeError::new_err(format!(
-                        "Missing 'data' component for '{}'",
-                        name
-                    ))
-                })?;
+            let component = obj.components.get("data").ok_or_else(|| {
+                PyRuntimeError::new_err(format!("Missing 'data' component for '{}'", name))
+            })?;
             let data = this.inner.read_data(name).map_err(zt_err)?;
             let result = match &data {
                 TensorData::Borrowed(slice) => ReadResult::ZeroCopy {
@@ -319,9 +313,8 @@ fn build_numpy_dict_zerocopy<'py>(
                     bytes_to_numpy_borrowed(py, slice, *dtype, shape, slf.clone().into_any())?
                 } else {
                     let view = ArrayView1::from(slice);
-                    let np_array = unsafe {
-                        PyArray1::<u8>::borrow_from_array(&view, slf.clone().into_any())
-                    };
+                    let np_array =
+                        unsafe { PyArray1::<u8>::borrow_from_array(&view, slf.clone().into_any()) };
                     let np_dtype = cached_np_dtype(py, &mut dtype_cache, &np, *dtype)?;
                     let flat = np_array
                         .into_pyobject(py)?
@@ -403,10 +396,7 @@ fn create_torch_tensor<'py>(
 }
 
 /// Core implementation for reading a single tensor, supporting zero-copy.
-fn read_tensor_impl<'py>(
-    slf: &Bound<'py, PyReader>,
-    name: &str,
-) -> PyResult<PyObject> {
+fn read_tensor_impl<'py>(slf: &Bound<'py, PyReader>, name: &str) -> PyResult<PyObject> {
     let py = slf.py();
 
     // Borrow the reader, extract metadata and data location, then release borrow.
@@ -418,13 +408,9 @@ fn read_tensor_impl<'py>(
             .ok_or_else(|| PyKeyError::new_err(format!("Tensor '{}' not found", name)))?
             .clone();
 
-        let dtype = obj
-            .components
-            .get("data")
-            .map(|c| c.dtype)
-            .ok_or_else(|| {
-                PyRuntimeError::new_err(format!("Missing 'data' component for '{}'", name))
-            })?;
+        let dtype = obj.components.get("data").map(|c| c.dtype).ok_or_else(|| {
+            PyRuntimeError::new_err(format!("Missing 'data' component for '{}'", name))
+        })?;
         let shape = obj.shape.clone();
 
         let data = this.inner.read_data(name).map_err(zt_err)?;
@@ -450,9 +436,7 @@ fn read_tensor_impl<'py>(
             let slice = unsafe { std::slice::from_raw_parts(ptr, len) };
             bytes_to_numpy_borrowed(py, slice, dtype, &shape, slf.clone().into_any())
         }
-        ReadResult::Owned(data) => {
-            bytes_to_numpy(py, TensorData::Owned(data), dtype, &shape)
-        }
+        ReadResult::Owned(data) => bytes_to_numpy(py, TensorData::Owned(data), dtype, &shape),
     }
 }
 
@@ -479,31 +463,26 @@ impl PyReader {
         // Open .zt files with MAP_PRIVATE directly to avoid re-opening later
         // for zero-copy (copy=False) loads. MAP_PRIVATE has identical read
         // performance to MAP_SHARED; it only adds COW on writes.
-        let inner: Box<dyn TensorReader + Send> = if file_format == "zt" || file_format == "unknown" {
+        let inner: Box<dyn TensorReader + Send> = if file_format == "zt" || file_format == "unknown"
+        {
             Box::new(crate::Reader::open_mmap_any(path).map_err(zt_err)?)
         } else {
             crate::open(path).map_err(zt_err)?
         };
-        Ok(Self {
-            inner,
-            file_format,
-        })
+        Ok(Self { inner, file_format })
     }
 
     /// Returns a list of all tensor names.
     fn keys(&self) -> Vec<String> {
-        self.inner
-            .keys()
-            .iter()
-            .map(|s| s.to_string())
-            .collect()
+        self.inner.keys().iter().map(|s| s.to_string()).collect()
     }
 
     /// Returns metadata for a tensor by name.
     fn metadata(&self, name: &str) -> PyResult<PyTensorMeta> {
-        let obj = self.inner.get(name).ok_or_else(|| {
-            PyKeyError::new_err(format!("Tensor '{}' not found", name))
-        })?;
+        let obj = self
+            .inner
+            .get(name)
+            .ok_or_else(|| PyKeyError::new_err(format!("Tensor '{}' not found", name)))?;
         let component = obj.components.get("data");
         let dtype_str = component
             .map(|c| dtype_to_numpy_str(c.dtype))
@@ -567,15 +546,9 @@ impl PyReader {
                 let this = slf.borrow();
                 let mut infos = Vec::new();
                 for (name, obj) in this.inner.tensors() {
-                    let component = obj
-                        .components
-                        .get("data")
-                        .ok_or_else(|| {
-                            PyRuntimeError::new_err(format!(
-                                "Missing 'data' component for '{}'",
-                                name
-                            ))
-                        })?;
+                    let component = obj.components.get("data").ok_or_else(|| {
+                        PyRuntimeError::new_err(format!("Missing 'data' component for '{}'", name))
+                    })?;
                     let dtype = component.dtype;
                     let offset = component.offset;
                     let shape = obj.shape.clone();
@@ -598,9 +571,9 @@ impl PyReader {
 
             for (name, dtype, shape, _offset, data) in &sorted_infos {
                 let src_slice = match data {
-                    ReadResult::ZeroCopy { ptr, len } => {
-                        unsafe { std::slice::from_raw_parts(*ptr, *len) }
-                    }
+                    ReadResult::ZeroCopy { ptr, len } => unsafe {
+                        std::slice::from_raw_parts(*ptr, *len)
+                    },
                     ReadResult::Owned(vec) => vec.as_slice(),
                 };
                 let tensor = create_torch_tensor(py, &torch, *dtype, shape, src_slice)?;
@@ -620,10 +593,8 @@ impl PyReader {
         // Device transfer if needed
         if device != "cpu" {
             let target = torch.call_method1("device", (device,))?;
-            let items: Vec<(PyObject, PyObject)> = dict
-                .iter()
-                .map(|(k, v)| (k.unbind(), v.unbind()))
-                .collect();
+            let items: Vec<(PyObject, PyObject)> =
+                dict.iter().map(|(k, v)| (k.unbind(), v.unbind())).collect();
             for (key, tensor) in items {
                 let moved = tensor.call_method1(py, "to", (&target,))?;
                 dict.set_item(&key, moved)?;
@@ -650,15 +621,9 @@ impl PyReader {
                 let this = slf.borrow();
                 let mut infos = Vec::new();
                 for (name, obj) in this.inner.tensors() {
-                    let component = obj
-                        .components
-                        .get("data")
-                        .ok_or_else(|| {
-                            PyRuntimeError::new_err(format!(
-                                "Missing 'data' component for '{}'",
-                                name
-                            ))
-                        })?;
+                    let component = obj.components.get("data").ok_or_else(|| {
+                        PyRuntimeError::new_err(format!("Missing 'data' component for '{}'", name))
+                    })?;
                     let dtype = component.dtype;
                     let offset = component.offset;
                     let shape = obj.shape.clone();
@@ -809,7 +774,12 @@ impl PyWriter {
             "none" => Checksum::None,
             "crc32c" => Checksum::Crc32c,
             "sha256" => Checksum::Sha256,
-            _ => return Err(PyValueError::new_err(format!("Unknown checksum: {}", checksum))),
+            _ => {
+                return Err(PyValueError::new_err(format!(
+                    "Unknown checksum: {}",
+                    checksum
+                )))
+            }
         };
 
         // Extract bytes and metadata from the array
@@ -926,8 +896,7 @@ fn save_file(
         None => Compression::Raw,
     };
 
-    let file = std::fs::File::create(filename)
-        .map_err(|e| PyIOError::new_err(e.to_string()))?;
+    let file = std::fs::File::create(filename).map_err(|e| PyIOError::new_err(e.to_string()))?;
     let buf_writer = std::io::BufWriter::with_capacity(256 * 1024, file);
     let mut writer = Writer::new(buf_writer).map_err(zt_err)?;
 

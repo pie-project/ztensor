@@ -8,7 +8,7 @@ def generate_tensor_dict(
     total_size_mb: int,
     distribution: str = "mixed",
     data_style: str = "random",
-) -> Dict[str, Union[np.ndarray, 'torch.Tensor']]:
+) -> Dict[str, Union[np.ndarray, "torch.Tensor"]]:
     """
     Generates tensors summing to total_size_mb.
     distribution:
@@ -23,8 +23,10 @@ def generate_tensor_dict(
     Uses config.BACKEND setting to determine tensor type ('numpy' or 'torch').
     """
     style_tag = f", {data_style}" if data_style != "random" else ""
-    print(f"  [{distribution.upper()}] Generating {total_size_mb}MB of synthetic data "
-          f"(backend={config.BACKEND}{style_tag})...")
+    print(
+        f"  [{distribution.upper()}] Generating {total_size_mb}MB of synthetic data "
+        f"(backend={config.BACKEND}{style_tag})..."
+    )
     tensors = {}
     remaining_bytes = total_size_mb * 1024 * 1024
     i = 0
@@ -86,7 +88,9 @@ def generate_tensor_dict(
             t_np = np.random.normal(0.0, 0.02, size=shape).astype(np.float32)
             # Add block-sparsity: zero out ~20% of rows for realistic structure
             if len(shape) == 2 and shape[0] > 10:
-                zero_rows = np.random.choice(shape[0], size=shape[0] // 5, replace=False)
+                zero_rows = np.random.choice(
+                    shape[0], size=shape[0] // 5, replace=False
+                )
                 t_np[zero_rows] = 0.0
         elif data_style == "mixed_dtype":
             if dtype == np.int8:
@@ -94,8 +98,9 @@ def generate_tensor_dict(
             else:
                 t_np = np.random.normal(0.0, 0.02, size=shape).astype(dtype)
 
-        if config.BACKEND == 'torch':
+        if config.BACKEND == "torch":
             import torch
+
             if dtype == np.int8:
                 t = torch.from_numpy(t_np.copy())
             else:
@@ -117,11 +122,11 @@ def _generate_llama_1b(data_style: str = "random") -> dict:
     All float16 (matching real HF checkpoints). Random data.
     ~1.24B params, ~2.5 GB in fp16.
     """
-    H = 2048        # hidden_size
-    KV = 512        # num_kv_heads * head_dim = 8 * 64
-    I = 8192        # intermediate_size
-    V = 128256      # vocab_size
-    N = 16          # num_hidden_layers
+    H = 2048  # hidden_size
+    KV = 512  # num_kv_heads * head_dim = 8 * 64
+    I = 8192  # intermediate_size
+    V = 128256  # vocab_size
+    N = 16  # num_hidden_layers
 
     dtype = np.float16
     tensors = {}
@@ -130,7 +135,9 @@ def _generate_llama_1b(data_style: str = "random") -> dict:
         if data_style == "structured":
             t = np.random.normal(0.0, 0.02, size=shape).astype(dtype)
             if len(shape) == 2 and shape[0] > 10:
-                zero_rows = np.random.choice(shape[0], size=shape[0] // 5, replace=False)
+                zero_rows = np.random.choice(
+                    shape[0], size=shape[0] // 5, replace=False
+                )
                 t[zero_rows] = 0.0
             return t
         return np.random.randn(*shape).astype(dtype)
@@ -158,7 +165,9 @@ def _generate_llama_1b(data_style: str = "random") -> dict:
 
     total_bytes = sum(t.nbytes for t in tensors.values())
     total_params = sum(t.size for t in tensors.values())
-    print(f"  [LLAMA-1B] Generated {len(tensors)} tensors, "
-          f"{total_params/1e9:.2f}B params, {total_bytes/1e9:.2f} GB ({data_style})")
+    print(
+        f"  [LLAMA-1B] Generated {len(tensors)} tensors, "
+        f"{total_params/1e9:.2f}B params, {total_bytes/1e9:.2f} GB ({data_style})"
+    )
 
     return tensors

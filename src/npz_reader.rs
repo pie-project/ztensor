@@ -77,24 +77,22 @@ fn extract_string_value(header: &str, key: &str) -> Option<String> {
 /// e.g., from "'shape': (3, 4)" extracts [3, 4].
 fn extract_shape(header: &str) -> Result<Vec<u64>, Error> {
     let key = "'shape'";
-    let key_pos = header.find(key).ok_or_else(|| {
-        Error::InvalidFileStructure("Missing 'shape' in .npy header".to_string())
-    })?;
+    let key_pos = header
+        .find(key)
+        .ok_or_else(|| Error::InvalidFileStructure("Missing 'shape' in .npy header".to_string()))?;
     let after_key = &header[key_pos + key.len()..];
     let after_colon = after_key
         .trim_start()
         .strip_prefix(':')
-        .ok_or_else(|| {
-            Error::InvalidFileStructure("Malformed shape in .npy header".to_string())
-        })?;
+        .ok_or_else(|| Error::InvalidFileStructure("Malformed shape in .npy header".to_string()))?;
     let trimmed = after_colon.trim_start();
 
-    let paren_start = trimmed.find('(').ok_or_else(|| {
-        Error::InvalidFileStructure("Missing '(' in shape tuple".to_string())
-    })?;
-    let paren_end = trimmed.find(')').ok_or_else(|| {
-        Error::InvalidFileStructure("Missing ')' in shape tuple".to_string())
-    })?;
+    let paren_start = trimmed
+        .find('(')
+        .ok_or_else(|| Error::InvalidFileStructure("Missing '(' in shape tuple".to_string()))?;
+    let paren_end = trimmed
+        .find(')')
+        .ok_or_else(|| Error::InvalidFileStructure("Missing ')' in shape tuple".to_string()))?;
 
     let inner = &trimmed[paren_start + 1..paren_end];
     if inner.trim().is_empty() {
@@ -161,13 +159,11 @@ pub fn parse_npy_header(data: &[u8]) -> Result<NpyHeader, Error> {
         return Err(Error::UnexpectedEof);
     }
 
-    let header_str = std::str::from_utf8(&data[header_start..header_end]).map_err(|_| {
-        Error::InvalidFileStructure("Invalid UTF-8 in .npy header".to_string())
-    })?;
+    let header_str = std::str::from_utf8(&data[header_start..header_end])
+        .map_err(|_| Error::InvalidFileStructure("Invalid UTF-8 in .npy header".to_string()))?;
 
-    let descr = extract_string_value(header_str, "'descr'").ok_or_else(|| {
-        Error::InvalidFileStructure("Missing 'descr' in .npy header".to_string())
-    })?;
+    let descr = extract_string_value(header_str, "'descr'")
+        .ok_or_else(|| Error::InvalidFileStructure("Missing 'descr' in .npy header".to_string()))?;
 
     let dtype = parse_npy_descr(&descr)?;
     let shape = extract_shape(header_str)?;
@@ -210,9 +206,8 @@ impl NpzReader {
 
         // Open as ZIP to enumerate entries
         let file2 = File::open(path)?;
-        let mut archive = zip::ZipArchive::new(file2).map_err(|e| {
-            Error::InvalidFileStructure(format!("Not a valid ZIP/NPZ file: {}", e))
-        })?;
+        let mut archive = zip::ZipArchive::new(file2)
+            .map_err(|e| Error::InvalidFileStructure(format!("Not a valid ZIP/NPZ file: {}", e)))?;
 
         let mut objects = BTreeMap::new();
         let mut data_locations = BTreeMap::new();
@@ -259,7 +254,12 @@ impl NpzReader {
                 let data_start = entry_offset + header.data_offset;
                 let data_len = entry_size - header.data_offset;
 
-                let obj = Object::dense(header.shape, header.dtype, data_start as u64, data_len as u64);
+                let obj = Object::dense(
+                    header.shape,
+                    header.dtype,
+                    data_start as u64,
+                    data_len as u64,
+                );
 
                 data_locations.insert(
                     tensor_name.clone(),
@@ -272,9 +272,9 @@ impl NpzReader {
             } else {
                 // Compressed path: read entire entry into memory
                 let mut npy_bytes = Vec::new();
-                entry.read_to_end(&mut npy_bytes).map_err(|e| {
-                    Error::Io(e)
-                })?;
+                entry
+                    .read_to_end(&mut npy_bytes)
+                    .map_err(|e| Error::Io(e))?;
 
                 let header = parse_npy_header(&npy_bytes)?;
 
@@ -321,7 +321,10 @@ impl NpzReader {
 
     /// Gets a typed zero-copy reference to a tensor's data.
     pub fn view_as<T: TensorElement>(&self, name: &str) -> Result<&[T], Error> {
-        let dtype = self.manifest.objects.get(name)
+        let dtype = self
+            .manifest
+            .objects
+            .get(name)
             .ok_or_else(|| Error::ObjectNotFound(name.to_string()))?
             .data_dtype()?;
         if T::DTYPE != dtype {
@@ -341,7 +344,10 @@ impl NpzReader {
 
     /// Reads tensor data as a typed vector.
     pub fn read_as<T: TensorElement>(&self, name: &str) -> Result<Vec<T>, Error> {
-        let dtype = self.manifest.objects.get(name)
+        let dtype = self
+            .manifest
+            .objects
+            .get(name)
             .ok_or_else(|| Error::ObjectNotFound(name.to_string()))?
             .data_dtype()?;
         if T::DTYPE != dtype {
@@ -404,10 +410,7 @@ mod tests {
     #[test]
     fn test_extract_string_value() {
         let header = "{'descr': '<f4', 'fortran_order': False, 'shape': (3, 4), }";
-        assert_eq!(
-            extract_string_value(header, "'descr'").unwrap(),
-            "<f4"
-        );
+        assert_eq!(extract_string_value(header, "'descr'").unwrap(), "<f4");
     }
 
     #[test]

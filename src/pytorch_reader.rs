@@ -20,7 +20,7 @@ use memmap2::{Mmap, MmapOptions};
 use crate::error::Error;
 use crate::models::{DType, Manifest, Object};
 use crate::pickle_vm::{parse_pytorch_pickle, PtTensorInfo};
-use crate::reader::{TensorElement, TensorData, TensorReader};
+use crate::reader::{TensorData, TensorElement, TensorReader};
 
 /// ZIP local file header signature (PK\x03\x04).
 const ZIP_LOCAL_HEADER_MAGIC: [u8; 4] = [0x50, 0x4b, 0x03, 0x04];
@@ -34,9 +34,7 @@ enum StorageBackend {
         storage_offsets: BTreeMap<String, (usize, usize)>,
     },
     /// Buffered: storage was eagerly read into memory.
-    Buffered {
-        data: BTreeMap<String, Vec<u8>>,
-    },
+    Buffered { data: BTreeMap<String, Vec<u8>> },
 }
 
 /// Reader for PyTorch (.pt / .bin) files.
@@ -74,10 +72,7 @@ impl PyTorchReader {
         let pickle_name = find_pickle_file(&archive)?;
         let tensor_infos = {
             let mut pkl_file = archive.by_name(&pickle_name).map_err(|e| {
-                Error::InvalidFileStructure(format!(
-                    "Cannot read '{}': {}",
-                    pickle_name, e
-                ))
+                Error::InvalidFileStructure(format!("Cannot read '{}': {}", pickle_name, e))
             })?;
             let mut pkl_data = Vec::new();
             pkl_file.read_to_end(&mut pkl_data)?;
@@ -115,7 +110,9 @@ impl PyTorchReader {
                     if !is_stored {
                         all_stored = false;
                     }
-                    entry_headers.entry(key.clone()).or_insert((header_start, size));
+                    entry_headers
+                        .entry(key.clone())
+                        .or_insert((header_start, size));
                 }
             }
         }
@@ -156,10 +153,7 @@ impl PyTorchReader {
         let pickle_name = find_pickle_file(&archive)?;
         let tensor_infos = {
             let mut pkl_file = archive.by_name(&pickle_name).map_err(|e| {
-                Error::InvalidFileStructure(format!(
-                    "Cannot read '{}': {}",
-                    pickle_name, e
-                ))
+                Error::InvalidFileStructure(format!("Cannot read '{}': {}", pickle_name, e))
             })?;
             let mut pkl_data = Vec::new();
             pkl_file.read_to_end(&mut pkl_data)?;
@@ -201,10 +195,7 @@ impl PyTorchReader {
             }
             StorageBackend::Buffered { data } => {
                 data.get(key).map(Vec::as_slice).ok_or_else(|| {
-                    Error::InvalidFileStructure(format!(
-                        "Storage '{}' not found in buffer",
-                        key
-                    ))
+                    Error::InvalidFileStructure(format!("Storage '{}' not found in buffer", key))
                 })
             }
         }
@@ -282,7 +273,12 @@ fn build_manifest_and_locations(
     for info in tensor_infos {
         let byte_length = info.numel * info.dtype.byte_size();
 
-        let obj = Object::dense(info.shape.clone(), info.dtype, info.storage_offset as u64, byte_length as u64);
+        let obj = Object::dense(
+            info.shape.clone(),
+            info.dtype,
+            info.storage_offset as u64,
+            byte_length as u64,
+        );
 
         tensor_locations.insert(
             info.name.clone(),
@@ -384,19 +380,14 @@ fn read_all_storage<R: Read + Seek>(
     Ok(data)
 }
 
-fn read_zip_entry<R: Read + Seek>(
-    archive: &mut zip::ZipArchive<R>,
-    name: &str,
-) -> Option<Vec<u8>> {
+fn read_zip_entry<R: Read + Seek>(archive: &mut zip::ZipArchive<R>, name: &str) -> Option<Vec<u8>> {
     let mut entry = archive.by_name(name).ok()?;
     let mut data = Vec::new();
     entry.read_to_end(&mut data).ok()?;
     Some(data)
 }
 
-fn find_pickle_file<R: Read + Seek>(
-    archive: &zip::ZipArchive<R>,
-) -> Result<String, Error> {
+fn find_pickle_file<R: Read + Seek>(archive: &zip::ZipArchive<R>) -> Result<String, Error> {
     let names: Vec<String> = (0..archive.len())
         .filter_map(|i| archive.name_for_index(i).map(|s| s.to_string()))
         .collect();

@@ -2,7 +2,15 @@
 use libfuzzer_sys::fuzz_target;
 use std::io::Write;
 
-const EXTENSIONS: &[&str] = &[".zt", ".safetensors", ".pt", ".gguf", ".npz", ".onnx", ".h5"];
+const EXTENSIONS: &[&str] = &[
+    ".zt",
+    ".safetensors",
+    ".pt",
+    ".gguf",
+    ".npz",
+    ".onnx",
+    ".h5",
+];
 
 fuzz_target!(|data: &[u8]| {
     if data.is_empty() {

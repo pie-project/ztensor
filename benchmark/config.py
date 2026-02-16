@@ -1,14 +1,23 @@
 # Runtime globals — set by main() via `import config; config.BACKEND = ...`
 # Other modules must access as `config.BACKEND`, NOT `from config import BACKEND`.
 
-BACKEND = 'numpy'
+BACKEND = "numpy"
 WARMUP_RUNS = 1
 BENCH_RUNS = 3
 
 # --- Format constants ---
 
 # Formats that write + read with their own native library
-NATIVE_FORMATS = ["ztensor", "ztensor_zstd", "safetensors", "pickle", "hdf5", "gguf", "npz", "onnx"]
+NATIVE_FORMATS = [
+    "ztensor",
+    "ztensor_zstd",
+    "safetensors",
+    "pickle",
+    "hdf5",
+    "gguf",
+    "npz",
+    "onnx",
+]
 
 # Zstd compression levels to benchmark
 ZSTD_FORMATS = ["ztensor_zstd3", "ztensor_zstd13", "ztensor_zstd22"]
@@ -17,7 +26,14 @@ ZSTD_FORMATS = ["ztensor_zstd3", "ztensor_zstd13", "ztensor_zstd22"]
 ZEROCOPY_FORMATS = ["ztensor_zerocopy"]
 
 # Cross-format read: write with native lib, read via ztensor
-CROSS_READ_FORMATS = ["zt_read_st", "zt_read_pt", "zt_read_gguf", "zt_read_npz", "zt_read_onnx", "zt_read_h5"]
+CROSS_READ_FORMATS = [
+    "zt_read_st",
+    "zt_read_pt",
+    "zt_read_gguf",
+    "zt_read_npz",
+    "zt_read_onnx",
+    "zt_read_h5",
+]
 
 ALL_FORMATS = NATIVE_FORMATS + ZEROCOPY_FORMATS + CROSS_READ_FORMATS
 

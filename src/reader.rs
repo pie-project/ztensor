@@ -250,9 +250,9 @@ pub trait TensorReader {
         Self: Sized,
     {
         let data = self.read_data(name)?;
-        let obj = self.get(name).ok_or_else(|| {
-            Error::ObjectNotFound(name.to_string())
-        })?;
+        let obj = self
+            .get(name)
+            .ok_or_else(|| Error::ObjectNotFound(name.to_string()))?;
         let component = obj.components.get("data").ok_or_else(|| {
             Error::InvalidFileStructure(format!("Missing 'data' component for {}", name))
         })?;
@@ -480,7 +480,10 @@ macro_rules! impl_mmap_reader {
             /// # Ok::<(), ztensor::Error>(())
             /// ```
             pub fn view_as<T: TensorElement>(&self, name: &str) -> Result<&[T], Error> {
-                let dtype = self.manifest.objects.get(name)
+                let dtype = self
+                    .manifest
+                    .objects
+                    .get(name)
                     .ok_or_else(|| Error::ObjectNotFound(name.to_string()))?
                     .data_dtype()?;
                 if T::DTYPE != dtype {
@@ -609,7 +612,10 @@ impl<R: Read + Seek> Reader<R> {
         let manifest: Manifest = ciborium::from_reader(std::io::Cursor::new(&cbor_buf))
             .map_err(Error::CborDeserialize)?;
 
-        Ok(Self { reader: RefCell::new(reader), manifest })
+        Ok(Self {
+            reader: RefCell::new(reader),
+            manifest,
+        })
     }
 
     /// Creates a reader for a legacy v0.1.0 zTensor file.
@@ -628,18 +634,15 @@ impl<R: Read + Seek> Reader<R> {
         let cbor_size = u64::from_le_bytes(size_buf);
 
         if cbor_size > MAX_MANIFEST_SIZE {
-            return Err(Error::ManifestTooLarge {
-                size: cbor_size,
-            });
+            return Err(Error::ManifestTooLarge { size: cbor_size });
         }
 
         reader.seek(SeekFrom::End(-8 - cbor_size as i64))?;
         let mut cbor_buf = vec![0u8; cbor_size as usize];
         reader.read_exact(&mut cbor_buf)?;
 
-        let tensors: Vec<LegacyTensorMeta> =
-            ciborium::from_reader(std::io::Cursor::new(&cbor_buf))
-                .map_err(Error::CborDeserialize)?;
+        let tensors: Vec<LegacyTensorMeta> = ciborium::from_reader(std::io::Cursor::new(&cbor_buf))
+            .map_err(Error::CborDeserialize)?;
 
         let mut objects = BTreeMap::new();
         for t in tensors {
@@ -664,7 +667,10 @@ impl<R: Read + Seek> Reader<R> {
             objects,
         };
 
-        Ok(Self { reader: RefCell::new(reader), manifest })
+        Ok(Self {
+            reader: RefCell::new(reader),
+            manifest,
+        })
     }
 
     /// Auto-detects file version and opens accordingly.
@@ -747,10 +753,7 @@ impl<R: Read + Seek> Reader<R> {
         Ok(())
     }
 
-    fn read_component_impl(
-        reader: &mut R,
-        component: &Component,
-    ) -> Result<Vec<u8>, Error> {
+    fn read_component_impl(reader: &mut R, component: &Component) -> Result<Vec<u8>, Error> {
         let ctx = ReadContext::unknown();
 
         match component.encoding {
@@ -842,11 +845,7 @@ impl<R: Read + Seek> Reader<R> {
     // =========================================================================
 
     /// Reads raw byte data of a dense object.
-    pub fn read(
-        &self,
-        name: &str,
-        verify_checksum: bool,
-    ) -> Result<Vec<u8>, Error> {
+    pub fn read(&self, name: &str, verify_checksum: bool) -> Result<Vec<u8>, Error> {
         let obj = self
             .manifest
             .objects
@@ -862,10 +861,7 @@ impl<R: Read + Seek> Reader<R> {
         }
 
         let component = obj.components.get("data").ok_or_else(|| {
-            Error::InvalidFileStructure(format!(
-                "Dense object '{}' missing 'data' component",
-                name
-            ))
+            Error::InvalidFileStructure(format!("Dense object '{}' missing 'data' component", name))
         })?;
 
         let num_elements = obj.num_elements()?;
@@ -899,11 +895,7 @@ impl<R: Read + Seek> Reader<R> {
     }
 
     /// Reads multiple objects in batch.
-    pub fn read_many(
-        &self,
-        names: &[&str],
-        verify_checksum: bool,
-    ) -> Result<Vec<Vec<u8>>, Error> {
+    pub fn read_many(&self, names: &[&str], verify_checksum: bool) -> Result<Vec<Vec<u8>>, Error> {
         let mut results = Vec::with_capacity(names.len());
         for name in names {
             results.push(self.read(name, verify_checksum)?);
@@ -973,7 +965,13 @@ impl<R: Read + Seek> Reader<R> {
             unsafe { std::slice::from_raw_parts_mut(typed_data.as_mut_ptr() as *mut u8, byte_len) };
 
         let ctx = ReadContext::new(name, "data");
-        Self::read_component_into_impl(&mut *self.reader.borrow_mut(), &component, output_slice, &ctx, true)?;
+        Self::read_component_into_impl(
+            &mut *self.reader.borrow_mut(),
+            &component,
+            output_slice,
+            &ctx,
+            true,
+        )?;
 
         Ok(typed_data)
     }
@@ -1083,10 +1081,7 @@ impl<R: Read + Seek> Reader<R> {
     /// println!("shape: {:?}, nnz: {}", coo.shape, coo.values.len());
     /// # Ok::<(), ztensor::Error>(())
     /// ```
-    pub fn read_coo<T: TensorElement>(
-        &self,
-        name: &str,
-    ) -> Result<CooTensor<T>, Error> {
+    pub fn read_coo<T: TensorElement>(&self, name: &str) -> Result<CooTensor<T>, Error> {
         let obj = self
             .get(name)
             .ok_or_else(|| Error::ObjectNotFound(name.to_string()))?;
@@ -1103,16 +1098,12 @@ impl<R: Read + Seek> Reader<R> {
         let val_comp = obj
             .components
             .get("values")
-            .ok_or(Error::InvalidFileStructure(
-                "Missing 'values'".to_string(),
-            ))?
+            .ok_or(Error::InvalidFileStructure("Missing 'values'".to_string()))?
             .clone();
         let coords_comp = obj
             .components
             .get("coords")
-            .ok_or(Error::InvalidFileStructure(
-                "Missing 'coords'".to_string(),
-            ))?
+            .ok_or(Error::InvalidFileStructure("Missing 'coords'".to_string()))?
             .clone();
 
         let val_ctx = ReadContext::new(name, "values");
@@ -1121,9 +1112,8 @@ impl<R: Read + Seek> Reader<R> {
 
         if cfg!(target_endian = "big") && val_comp.dtype.is_multi_byte() {
             let byte_len = values.len() * T::SIZE;
-            let val_slice = unsafe {
-                std::slice::from_raw_parts_mut(values.as_mut_ptr() as *mut u8, byte_len)
-            };
+            let val_slice =
+                unsafe { std::slice::from_raw_parts_mut(values.as_mut_ptr() as *mut u8, byte_len) };
             swap_endianness_in_place(val_slice, val_comp.dtype.byte_size());
         }
 
@@ -1168,10 +1158,7 @@ impl<R: Read + Seek> Reader<R> {
     /// println!("shape: {:?}, nnz: {}", csr.shape, csr.values.len());
     /// # Ok::<(), ztensor::Error>(())
     /// ```
-    pub fn read_csr<T: TensorElement>(
-        &self,
-        name: &str,
-    ) -> Result<CsrTensor<T>, Error> {
+    pub fn read_csr<T: TensorElement>(&self, name: &str) -> Result<CsrTensor<T>, Error> {
         let obj = self
             .get(name)
             .ok_or_else(|| Error::ObjectNotFound(name.to_string()))?;
@@ -1188,23 +1175,17 @@ impl<R: Read + Seek> Reader<R> {
         let val_comp = obj
             .components
             .get("values")
-            .ok_or(Error::InvalidFileStructure(
-                "Missing 'values'".to_string(),
-            ))?
+            .ok_or(Error::InvalidFileStructure("Missing 'values'".to_string()))?
             .clone();
         let idx_comp = obj
             .components
             .get("indices")
-            .ok_or(Error::InvalidFileStructure(
-                "Missing 'indices'".to_string(),
-            ))?
+            .ok_or(Error::InvalidFileStructure("Missing 'indices'".to_string()))?
             .clone();
         let ptr_comp = obj
             .components
             .get("indptr")
-            .ok_or(Error::InvalidFileStructure(
-                "Missing 'indptr'".to_string(),
-            ))?
+            .ok_or(Error::InvalidFileStructure("Missing 'indptr'".to_string()))?
             .clone();
 
         let val_ctx = ReadContext::new(name, "values");
@@ -1213,14 +1194,14 @@ impl<R: Read + Seek> Reader<R> {
 
         if cfg!(target_endian = "big") && val_comp.dtype.is_multi_byte() {
             let byte_len = values.len() * T::SIZE;
-            let val_slice = unsafe {
-                std::slice::from_raw_parts_mut(values.as_mut_ptr() as *mut u8, byte_len)
-            };
+            let val_slice =
+                unsafe { std::slice::from_raw_parts_mut(values.as_mut_ptr() as *mut u8, byte_len) };
             swap_endianness_in_place(val_slice, val_comp.dtype.byte_size());
         }
 
         let idx_ctx = ReadContext::new(name, "indices");
-        let indices = Self::read_u64_component(&mut *self.reader.borrow_mut(), &idx_comp, &idx_ctx)?;
+        let indices =
+            Self::read_u64_component(&mut *self.reader.borrow_mut(), &idx_comp, &idx_ctx)?;
 
         let ptr_ctx = ReadContext::new(name, "indptr");
         let indptr = Self::read_u64_component(&mut *self.reader.borrow_mut(), &ptr_comp, &ptr_ctx)?;

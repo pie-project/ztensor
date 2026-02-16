@@ -7,8 +7,8 @@ use std::path::Path;
 
 use crate::error::Error;
 use crate::models::{Checksum, Component, DType, Encoding, Format, Manifest, Object, MAGIC};
-use crate::utils::{align_offset, is_little_endian, swap_endianness_in_place, DigestWriter};
 use crate::reader::TensorElement;
+use crate::utils::{align_offset, is_little_endian, swap_endianness_in_place, DigestWriter};
 
 /// Zero-filled padding buffer (avoids heap allocation per tensor).
 const ZERO_PAD: [u8; 64] = [0u8; 64];
@@ -119,22 +119,19 @@ impl<W: Write + Seek> Writer<W> {
                 })
             })?
         };
-        let expected_size = num_elements.checked_mul(dtype.byte_size() as u64).ok_or_else(|| {
-            Error::InvalidFileStructure("Tensor byte size overflows u64".into())
-        })?;
+        let expected_size = num_elements
+            .checked_mul(dtype.byte_size() as u64)
+            .ok_or_else(|| Error::InvalidFileStructure("Tensor byte size overflows u64".into()))?;
 
         if data.len() as u64 != expected_size {
-             return Err(Error::InconsistentDataSize {
+            return Err(Error::InconsistentDataSize {
                 expected: expected_size,
                 found: data.len() as u64,
             });
         }
 
         if self.manifest.objects.contains_key(name) {
-            return Err(Error::Other(format!(
-                "Duplicate tensor name: '{}'",
-                name
-            )));
+            return Err(Error::Other(format!("Duplicate tensor name: '{}'", name)));
         }
 
         let component = self.write_component(data, dtype, compression, checksum)?;
@@ -175,7 +172,14 @@ impl<W: Write + Seek> Writer<W> {
         data: &[T],
     ) -> Result<(), Error> {
         let bytes = bytemuck::cast_slice(data);
-        self.add_bytes(name, shape.to_vec(), T::DTYPE, Compression::Raw, bytes, Checksum::None)
+        self.add_bytes(
+            name,
+            shape.to_vec(),
+            T::DTYPE,
+            Compression::Raw,
+            bytes,
+            Checksum::None,
+        )
     }
 
     /// Adds a dense tensor with builder options for compression and checksum.
@@ -229,17 +233,15 @@ impl<W: Write + Seek> Writer<W> {
         checksum: Checksum,
     ) -> Result<(), Error> {
         if self.manifest.objects.contains_key(name) {
-            return Err(Error::Other(format!(
-                "Duplicate tensor name: '{}'",
-                name
-            )));
+            return Err(Error::Other(format!("Duplicate tensor name: '{}'", name)));
         }
 
         let indices_bytes = bytemuck::cast_slice(indices);
         let indptr_bytes = bytemuck::cast_slice(indptr);
 
         let values_comp = self.write_component(values, dtype, compression, checksum)?;
-        let indices_comp = self.write_component(indices_bytes, DType::U64, compression, checksum)?;
+        let indices_comp =
+            self.write_component(indices_bytes, DType::U64, compression, checksum)?;
         let indptr_comp = self.write_component(indptr_bytes, DType::U64, compression, checksum)?;
 
         let mut components = BTreeMap::new();
@@ -293,7 +295,16 @@ impl<W: Write + Seek> Writer<W> {
         checksum: Checksum,
     ) -> Result<(), Error> {
         let values_bytes = bytemuck::cast_slice(values);
-        self.add_csr_bytes(name, shape, dtype, values_bytes, indices, indptr, compression, checksum)
+        self.add_csr_bytes(
+            name,
+            shape,
+            dtype,
+            values_bytes,
+            indices,
+            indptr,
+            compression,
+            checksum,
+        )
     }
 
     /// Adds a COO sparse object from raw byte buffers.
@@ -311,10 +322,7 @@ impl<W: Write + Seek> Writer<W> {
         checksum: Checksum,
     ) -> Result<(), Error> {
         if self.manifest.objects.contains_key(name) {
-            return Err(Error::Other(format!(
-                "Duplicate tensor name: '{}'",
-                name
-            )));
+            return Err(Error::Other(format!("Duplicate tensor name: '{}'", name)));
         }
 
         let coords_bytes = bytemuck::cast_slice(coords);
@@ -374,7 +382,15 @@ impl<W: Write + Seek> Writer<W> {
         checksum: Checksum,
     ) -> Result<(), Error> {
         let values_bytes = bytemuck::cast_slice(values);
-        self.add_coo_bytes(name, shape, dtype, values_bytes, coords, compression, checksum)
+        self.add_coo_bytes(
+            name,
+            shape,
+            dtype,
+            values_bytes,
+            coords,
+            compression,
+            checksum,
+        )
     }
 
     fn write_component(
@@ -435,23 +451,23 @@ impl<W: Write + Seek> Writer<W> {
         dtype: DType,
     ) -> Result<(), Error> {
         let is_native_safe = is_little_endian() || !dtype.is_multi_byte();
-        
+
         if is_native_safe {
             writer.write_all(data)?;
         } else {
             // Swap in chunks
             const CHUNK_SIZE: usize = 4096;
             let mut buffer = Vec::with_capacity(CHUNK_SIZE);
-            
+
             // Iterate over chunks of size CHUNK_SIZE
             // Ensure we don't split multi-byte elements
             // Since CHUNK_SIZE=4096 is divisible by 1,2,4,8, we are safe.
             for chunk in data.chunks(CHUNK_SIZE) {
                 buffer.clear();
                 buffer.extend_from_slice(chunk);
-                
+
                 swap_endianness_in_place(&mut buffer, dtype.byte_size());
-                
+
                 writer.write_all(&buffer)?;
             }
         }
@@ -466,8 +482,7 @@ impl<W: Write + Seek> Writer<W> {
     /// File layout: `[MAGIC 8B] [BLOBS...] [CBOR MANIFEST] [MANIFEST SIZE 8B] [MAGIC 8B]`
     pub fn finish(mut self) -> Result<u64, Error> {
         let mut cbor = Vec::new();
-        ciborium::into_writer(&self.manifest, &mut cbor)
-            .map_err(Error::CborSerialize)?;
+        ciborium::into_writer(&self.manifest, &mut cbor).map_err(Error::CborSerialize)?;
 
         self.writer.write_all(&cbor)?;
 

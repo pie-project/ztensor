@@ -3,14 +3,14 @@
 mod commands;
 mod utils;
 
-use anyhow::{Result, bail};
+use anyhow::{bail, Result};
 use clap::CommandFactory;
 use clap::{Parser, Subcommand, ValueEnum};
 use std::path::Path;
 
 use commands::{
-    compress_ztensor, decompress_ztensor, download_hf, merge_ztensor_files,
-    migrate_ztensor, print_tensor_metadata, print_tensors_table, run_conversion,
+    compress_ztensor, decompress_ztensor, download_hf, merge_ztensor_files, migrate_ztensor,
+    print_tensor_metadata, print_tensors_table, run_conversion,
 };
 
 /// Checksum algorithm selection
@@ -233,32 +233,63 @@ fn main() -> Result<()> {
                 bail!("No input files provided for convert.");
             }
             if Path::new(output).exists() {
-                bail!("Output file '{}' already exists. Please remove it or choose a different name.", output);
+                bail!(
+                    "Output file '{}' already exists. Please remove it or choose a different name.",
+                    output
+                );
             }
 
             let compression = commands::get_compression(*compress, *level);
             let preserve = !delete_original;
 
-            run_conversion(inputs, output, compression, checksum.to_checksum(), preserve)?;
-            println!("Successfully converted {} file(s) into {}", inputs.len(), output);
+            run_conversion(
+                inputs,
+                output,
+                compression,
+                checksum.to_checksum(),
+                preserve,
+            )?;
+            println!(
+                "Successfully converted {} file(s) into {}",
+                inputs.len(),
+                output
+            );
         }
-        Some(Commands::Compress { input, output, level }) => {
+        Some(Commands::Compress {
+            input,
+            output,
+            level,
+        }) => {
             if Path::new(output).exists() {
-                bail!("Output file '{}' already exists. Please remove it or choose a different name.", output);
+                bail!(
+                    "Output file '{}' already exists. Please remove it or choose a different name.",
+                    output
+                );
             }
             compress_ztensor(input, output, *level)?;
             println!("Successfully compressed {} to {}", input, output);
         }
         Some(Commands::Decompress { input, output }) => {
             if Path::new(output).exists() {
-                bail!("Output file '{}' already exists. Please remove it or choose a different name.", output);
+                bail!(
+                    "Output file '{}' already exists. Please remove it or choose a different name.",
+                    output
+                );
             }
             decompress_ztensor(input, output)?;
             println!("Successfully decompressed {} to {}", input, output);
         }
-        Some(Commands::Migrate { input, output, compress, level }) => {
+        Some(Commands::Migrate {
+            input,
+            output,
+            compress,
+            level,
+        }) => {
             if Path::new(output).exists() {
-                bail!("Output file '{}' already exists. Please remove it or choose a different name.", output);
+                bail!(
+                    "Output file '{}' already exists. Please remove it or choose a different name.",
+                    output
+                );
             }
             migrate_ztensor(input, output, *compress, *level)?;
             println!("Successfully migrated {} to {}", input, output);
@@ -282,12 +313,19 @@ fn main() -> Result<()> {
                 print_tensors_table(objects);
             }
         }
-        Some(Commands::Merge { inputs, output, delete_original }) => {
+        Some(Commands::Merge {
+            inputs,
+            output,
+            delete_original,
+        }) => {
             if inputs.is_empty() {
                 bail!("No input files provided for merge.");
             }
             if Path::new(output).exists() {
-                bail!("Output file '{}' already exists. Please remove it or choose a different name.", output);
+                bail!(
+                    "Output file '{}' already exists. Please remove it or choose a different name.",
+                    output
+                );
             }
             let preserve = !delete_original;
             merge_ztensor_files(inputs, output, preserve)?;
@@ -301,7 +339,14 @@ fn main() -> Result<()> {
             compress,
             level,
         }) => {
-            download_hf(repo, output_dir, token.as_deref(), revision, *compress, *level)?;
+            download_hf(
+                repo,
+                output_dir,
+                token.as_deref(),
+                revision,
+                *compress,
+                *level,
+            )?;
         }
         None => {
             Cli::command().print_help()?;
