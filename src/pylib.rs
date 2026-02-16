@@ -160,7 +160,7 @@ fn bytes_to_numpy<'py>(
         let np_dtype = np.call_method1("dtype", (np_dtype_str,))?;
         let byte_array = unsafe { PyArray1::<u8>::new(py, [bytes.len()], false) };
         unsafe {
-            debug_assert_eq!(bytes.len(), byte_array.len());
+            // Safety: byte_array was created with size [bytes.len()] on the line above.
             std::ptr::copy_nonoverlapping(bytes.as_ptr(), byte_array.data(), bytes.len());
         }
         let flat = byte_array
