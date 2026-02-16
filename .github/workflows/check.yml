@@ -39,8 +39,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install maturin numpy torch safetensors onnx h5py gguf ml-dtypes pytest
+      - name: Setup venv
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install maturin numpy torch safetensors onnx h5py gguf ml-dtypes pytest
       - name: Build extension
-        run: maturin develop --release --features python
+        run: .venv/bin/maturin develop --release --features python
       - name: Run tests
-        run: pytest python/tests/ -v
+        run: .venv/bin/pytest python/tests/ -v
