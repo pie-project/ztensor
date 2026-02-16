@@ -50,40 +50,63 @@ def _style_ax(ax, ylabel):
 # ── Chart 1: Cross-format read ─────────────────────────────────────────
 
 CROSS_FORMAT_DATA = [
-    # (label, ztensor GB/s, native GB/s | None)
-    (".safetensors", 2.27, 1.48),
-    (".pt",          2.26, 1.44),
-    (".npz",         2.35, 1.15),
-    (".gguf",        2.29, 2.34),
-    (".onnx",        2.28, 0.79),
-    (".h5",          2.41, 1.48),
+    # (label, zt_zerocopy, zt_copy, native_copy, native_zerocopy | None)
+    # Llama 3.2 1B shapes (~2.8 GB), median of 5 runs, 2 warmup
+    (".safetensors", 2.19, 1.46, 1.33, 1.35),
+    (".pt",          2.04, 1.33, 0.89, None),
+    (".npz",         2.11, 1.41, 1.04, None),
+    (".gguf",        2.11, 1.38, 1.39, 2.15),
+    (".onnx",        2.07, 1.29, 0.76, None),
+    (".h5",          1.96, 1.30, 1.35, None),
 ]
+
+ZTENSOR_DARK = "#1D4ED8"   # ztensor (default, zero-copy)
+ZTENSOR_LIGHT = "#93C5FD"  # ztensor (zc off)
+NATIVE_DARK = "#64748B"    # native zero-copy
+NATIVE_LIGHT = "#CBD5E1"   # native copy
 
 
 def draw_cross_format_read(path):
     labels = [d[0] for d in CROSS_FORMAT_DATA]
-    zt_vals = [d[1] for d in CROSS_FORMAT_DATA]
-    native_vals = [d[2] for d in CROSS_FORMAT_DATA]
+    zt_zc = [d[1] for d in CROSS_FORMAT_DATA]
+    zt_cp = [d[2] for d in CROSS_FORMAT_DATA]
+    nat_cp = [d[3] for d in CROSS_FORMAT_DATA]
+    nat_zc = [d[4] if d[4] is not None else 0 for d in CROSS_FORMAT_DATA]
+    has_nat_zc = [d[4] is not None for d in CROSS_FORMAT_DATA]
 
     x = np.arange(len(labels))
-    width = 0.35
+    width = 0.18
 
-    fig, ax = plt.subplots(figsize=(8, 3.5))
-    bars_zt = ax.bar(x - width / 2, zt_vals, width, label="ztensor",
-                     color=ZTENSOR_BLUE, edgecolor="white", linewidth=0.5,
-                     zorder=3)
-    bars_native = ax.bar(x + width / 2, native_vals, width,
-                         label="reference impl.",
-                         color=BASELINE_GRAY, edgecolor="white", linewidth=0.5,
-                         zorder=3)
+    fig, ax = plt.subplots(figsize=(9, 3.8))
+    ax.bar(x - 1.5 * width, zt_zc, width, label="ztensor",
+           color=ZTENSOR_DARK, edgecolor="white", linewidth=0.5, zorder=3)
+    ax.bar(x - 0.5 * width, zt_cp, width, label="ztensor (zc off)",
+           color=ZTENSOR_LIGHT, edgecolor="white", linewidth=0.5, zorder=3)
 
+    # Native zero-copy: only draw where available
+    nat_zc_colors = [NATIVE_DARK if h else "none" for h in has_nat_zc]
+    ax.bar(x + 0.5 * width, nat_zc, width, label="ref. zero-copy",
+           color=nat_zc_colors, edgecolor=["white" if h else "none" for h in has_nat_zc],
+           linewidth=0.5, zorder=3)
+
+    ax.bar(x + 1.5 * width, nat_cp, width, label="ref. copy",
+           color=NATIVE_LIGHT, edgecolor="white", linewidth=0.5, zorder=3)
 
     _style_ax(ax, "Read Throughput (GB/s)")
     ax.set_xticks(x)
     ax.set_xticklabels(labels, fontsize=10, color=TEXT_COLOR)
-    ax.legend(fontsize=9, frameon=False, loc="upper center", ncol=2,
-              bbox_to_anchor=(0.5, 1.0))
-    ax.set_ylim(0, max(zt_vals + native_vals) * 1.18)
+
+    from matplotlib.patches import Patch
+    legend_elements = [
+        Patch(facecolor=ZTENSOR_DARK, label="ztensor"),
+        Patch(facecolor=ZTENSOR_LIGHT, label="ztensor (zc off)"),
+        Patch(facecolor=NATIVE_DARK, label="ref. zero-copy"),
+        Patch(facecolor=NATIVE_LIGHT, label="ref. copy"),
+    ]
+    ax.legend(handles=legend_elements, fontsize=8, frameon=False,
+              loc="upper center", ncol=4, bbox_to_anchor=(0.5, 1.0))
+    all_vals = zt_zc + zt_cp + nat_cp + [v for v in nat_zc if v > 0]
+    ax.set_ylim(0, max(all_vals) * 1.15)
 
     fig.tight_layout()
     fig.savefig(path, format="svg", transparent=True)
@@ -95,13 +118,14 @@ def draw_cross_format_read(path):
 
 WRITE_DIST_DATA = [
     # name, large, mixed, small
-    ("ztensor",     3.60, 3.65, 1.43),
-    ("safetensors", 1.72, 1.75, 1.30),
-    ("pickle",      3.58, 3.65, 1.76),
-    ("npz",         2.39, 2.38, 0.50),
-    ("gguf",        3.81, 3.90, 1.01),
-    ("onnx",        0.29, 0.29, 0.34),
-    ("hdf5",        3.68, 3.67, 0.27),
+    # 512MB, median of 5 runs, 2 warmup
+    ("ztensor",     3.62, 3.65, 1.42),
+    ("safetensors", 1.72, 1.77, 1.48),
+    ("pickle",      3.62, 3.68, 2.00),
+    ("npz",         2.40, 2.40, 0.51),
+    ("gguf",        3.85, 3.86, 1.06),
+    ("onnx",        0.28, 0.29, 0.32),
+    ("hdf5",        3.67, 3.69, 0.27),
 ]
 
 DIST_LABELS = ["Large", "Mixed", "Small"]

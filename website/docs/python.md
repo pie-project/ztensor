@@ -8,14 +8,30 @@ sidebar_position: 3
 pip install ztensor
 ```
 
-The `ztensor.torch` and `ztensor.numpy` modules provide a safetensors-compatible API for saving and loading tensors.
+## Quick start
 
 ```python
-from ztensor.torch import save_file, load_file   # PyTorch
-from ztensor.numpy import save_file, load_file   # NumPy
+import numpy as np
+from ztensor.numpy import save_file, load_file
+
+# Save
+save_file({"weight": np.random.randn(1024, 768).astype(np.float32)}, "model.zt")
+
+# Load (any format)
+tensors = load_file("model.zt")           # .zt
+tensors = load_file("model.safetensors")  # .safetensors, .pt, .gguf, .npz, .onnx, .h5
 ```
 
-## `save_file`
+The `ztensor.torch` and `ztensor.numpy` modules share the same interface:
+
+```python
+from ztensor.torch import save_file, load_file   # PyTorch tensors
+from ztensor.numpy import save_file, load_file   # NumPy arrays
+```
+
+## Saving
+
+### `save_file(tensors, filename, metadata=None, compression=False)`
 
 Saves a dictionary of tensors to a `.zt` file.
 
@@ -31,18 +47,19 @@ import torch
 from ztensor.torch import save_file
 
 tensors = {"weight": torch.randn(1024, 768), "bias": torch.zeros(768)}
-save_file(tensors, "model.zt")
 
-# With zstd compression
-save_file(tensors, "model.zt", compression=True)
-
-# With specific compression level
-save_file(tensors, "model.zt", compression=10)
+save_file(tensors, "model.zt")                  # no compression
+save_file(tensors, "model.zt", compression=True) # zstd level 3
+save_file(tensors, "model.zt", compression=10)   # zstd level 10
 ```
 
-## `load_file`
+Compressed files are decompressed automatically on load.
 
-Loads a tensor file. Auto-detects format by extension.
+## Loading
+
+### `load_file(filename, ...)`
+
+Loads a tensor file, detecting the format by extension.
 
 **Supported formats:** `.zt`, `.safetensors`, `.pt` / `.pth` / `.bin`, `.gguf`, `.npz`, `.onnx`, `.h5` / `.hdf5`
 
@@ -64,64 +81,32 @@ Loads a tensor file. Auto-detects format by extension.
 ```python
 from ztensor.torch import load_file
 
-# Zero-copy loading (default)
-loaded = load_file("model.zt")
-loaded = load_file("model.safetensors")
-loaded = load_file("model.pt")
-
-# Load to GPU
-loaded = load_file("model.zt", device="cuda:0")
-
-# Independent copies (see "The copy parameter" below)
-loaded = load_file("model.zt", copy=True)
+loaded = load_file("model.zt")                    # zero-copy (default)
+loaded = load_file("model.safetensors")           # any format
+loaded = load_file("model.zt", device="cuda:0")   # load to GPU
+loaded = load_file("model.zt", copy=True)         # independent copies
 ```
 
----
-
-## The `copy` parameter
-
-The `copy` parameter controls how tensor data is loaded from disk:
+### The `copy` parameter
 
 | Mode | Speed | Memory | Behavior |
 |---|---|---|---|
 | `copy=False` (default) | Zero-copy from mmap | Shared pages | Copy-on-write: reads are free, writes trigger per-page copies |
 | `copy=True` | Standard | Full copy in RAM | Independent tensors, fully decoupled from the file |
 
-The default `copy=False` uses `MAP_PRIVATE` (copy-on-write) memory mapping. Tensors are writable — modifications affect your process only, never the file on disk.
+The default `copy=False` uses `MAP_PRIVATE` (copy-on-write) memory mapping. Tensors are writable: modifications affect your process only, never the file on disk.
 
 **When to use `copy=True`:**
 - When you need tensors that outlive the file handle
 - When you plan to heavily mutate tensor data in-place
 
----
-
-## Compression
-
-Save functions accept a `compression` parameter. Loading auto-decompresses — no flag needed.
-
-```python
-from ztensor.numpy import save_file, load_file
-
-# Default: no compression
-save_file(tensors, "model.zt")
-
-# zstd level 3
-save_file(tensors, "model.zt", compression=True)
-
-# zstd level 10 (higher = slower but smaller)
-save_file(tensors, "model.zt", compression=10)
-
-# Loading is automatic
-loaded = load_file("model.zt")
-```
-
----
-
 ## Model save/load
 
-These functions are specific to `ztensor.torch` and handle shared tensor deduplication automatically.
+These functions are specific to `ztensor.torch`.
 
 ### `save_model(model, filename, metadata=None, force_contiguous=True)`
+
+Saves all parameters from a `torch.nn.Module`. Shared tensors are deduplicated automatically. If `force_contiguous=True` (default), non-contiguous parameters are copied to contiguous storage before writing.
 
 ```python
 from ztensor.torch import save_model
@@ -149,29 +134,9 @@ model = torch.nn.Linear(10, 5)
 missing, unexpected = load_model(model, "model.zt")
 ```
 
----
-
-## Bytes API
-
-Serialize to and from raw bytes without touching disk.
-
-```python
-# PyTorch
-from ztensor.torch import save, load
-data = save({"x": torch.zeros(10)})
-loaded = load(data)
-
-# NumPy
-from ztensor.numpy import save, load
-data = save({"x": np.zeros(10, dtype=np.float32)})
-loaded = load(data)
-```
-
----
-
 ## Reader
 
-The `Reader` class provides direct, per-tensor access to files. For most use cases, `save_file` / `load_file` above are simpler.
+The `Reader` class provides direct, per-tensor access to files. For most use cases, `load_file` above is simpler.
 
 ```python
 from ztensor import Reader
@@ -209,7 +174,7 @@ print(meta.shape, meta.dtype)  # [1024, 768] float32
 
 ### `read_tensor(name)` / `read_tensors(names)`
 
-Read individual or multiple tensors as NumPy arrays.
+Reads individual or multiple tensors as NumPy arrays.
 
 ```python
 arr = reader.read_tensor("weights")
@@ -218,7 +183,7 @@ result = reader.read_tensors(["weight", "bias"])
 
 ### `load_torch(*, device="cpu", copy=False)` / `load_numpy(*, copy=False)`
 
-Load all tensors at once.
+Loads all tensors at once.
 
 ```python
 tensors = reader.load_torch(device="cuda:0")
@@ -236,11 +201,9 @@ with Reader("model.zt") as r:
     weights = r["weights"]
 ```
 
----
-
 ## Writer
 
-Creates `.zt` files.
+Creates `.zt` files with per-tensor control over compression and checksums.
 
 ```python
 from ztensor import Writer
@@ -258,9 +221,9 @@ Adds a dense tensor from a NumPy array.
 | `checksum` | `str` | `"none"` | `"none"`, `"crc32c"`, or `"sha256"` |
 
 ```python
-writer.add("weights", np_array)
-writer.add("compressed", np_array, compress=True)
-writer.add("verified", np_array, checksum="crc32c")
+w.add("weights", np_array)
+w.add("compressed", np_array, compress=True)
+w.add("verified", np_array, checksum="crc32c")
 ```
 
 ### `finish()`
@@ -274,9 +237,25 @@ with Writer("output.zt") as w:
 # finish() called automatically
 ```
 
----
+## Bytes API
 
-## TensorMetadata
+Serialize to and from raw bytes without touching disk.
+
+```python
+# PyTorch
+from ztensor.torch import save, load
+data = save({"x": torch.zeros(10)})
+loaded = load(data)
+
+# NumPy
+from ztensor.numpy import save, load
+data = save({"x": np.zeros(10, dtype=np.float32)})
+loaded = load(data)
+```
+
+## Reference
+
+### TensorMetadata
 
 Returned by `reader.metadata(name)`.
 
@@ -288,21 +267,15 @@ Returned by `reader.metadata(name)`.
 | `type` | `str \| None` | Logical type (e.g., `"f8_e4m3fn"`), `None` when same as `dtype` |
 | `format` | `str` | Layout format (e.g., `"dense"`, `"sparse_csr"`) |
 
----
-
-## `ztensor.open(path)`
+### `ztensor.open(path)`
 
 Convenience alias for `Reader(path)`.
 
----
-
-## `ztensor.ZTensorError`
+### `ztensor.ZTensorError`
 
 Custom exception for ztensor errors. Subclass of `Exception`.
 
----
-
-## Supported dtypes
+### Supported dtypes
 
 | PyTorch | NumPy | zTensor |
 |---|---|---|
@@ -316,9 +289,9 @@ Custom exception for ztensor errors. Subclass of `Exception`.
 | `torch.int8` | `np.int8` | `int8` |
 | `torch.uint8` | `np.uint8` | `uint8` |
 | `torch.bool` | `np.bool_` | `bool` |
-| — | `np.uint64` | `uint64` |
-| — | `np.uint32` | `uint32` |
-| — | `np.uint16` | `uint16` |
+| - | `np.uint64` | `uint64` |
+| - | `np.uint32` | `uint32` |
+| - | `np.uint16` | `uint16` |
 
 :::note
 `bfloat16` support in NumPy requires the [`ml_dtypes`](https://github.com/jax-ml/ml_dtypes) package:
@@ -327,9 +300,7 @@ pip install ztensor[bfloat16]
 ```
 :::
 
----
-
-## Migrating from safetensors
+### Migrating from safetensors
 
 The API is a drop-in replacement:
 

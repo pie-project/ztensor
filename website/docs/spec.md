@@ -8,14 +8,7 @@ sidebar_position: 6
 
 ## Motivation
 
-Existing tensor formats each solve part of the problem, but none solve it cleanly:
-
-- **Pickle-based formats** (PyTorch `.pt`, `.bin`) execute arbitrary code during loading. This is a fundamental security flaw: a model file can run anything on the reader's machine. No amount of sandboxing makes deserializing code safe by default.
-- **SafeTensors** solved the security problem, but treats every tensor as a flat, dense array of a fixed dtype. There is no way to represent sparse matrices, quantized weight groups, or newer numeric types like FP8 without extending the format itself. Adding a new dtype requires a spec change and a library update on both sides.
-- **GGUF** handles quantization well but bakes quantized types into the dtype enum. Each new quantization scheme requires a new dtype constant, and the format is tightly coupled to the llama.cpp ecosystem.
-- **NumPy `.npz`** is simple and widely supported, but has no alignment guarantees (no mmap), no compression options beyond zip, and no room for structured metadata.
-
-The common thread is that most formats equate "tensor" with "flat array of one dtype." The moment you need a tensor that is *structurally* more complex (sparse indices alongside values, or quantized weights alongside scales), the format either can't express it or forces you to flatten everything into separate, unrelated arrays with naming conventions gluing them together.
+Most tensor formats equate "tensor" with "flat array of one dtype." This works for dense weights but breaks down for sparse matrices, quantized weight groups, or newer numeric types. These formats either can't express them or force you to flatten everything into separate arrays held together by naming conventions. See the [introduction](/) for a feature comparison across formats.
 
 ## Design Goals
 

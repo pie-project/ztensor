@@ -8,22 +8,22 @@ Unified, zero-copy, and safe I/O for deep learning formats.
 
 ## Reading
 
-zTensor reads `.safetensors`, `.pt`, `.gguf`, `.npz`, `.onnx`, `.h5`, and `.zt` files through a single API. Format detection is automatic. Because it uses memory-mapped I/O, it is often faster than each format's own reader. For `.pt` files, it parses pickle using a restricted VM in Rust that only extracts tensor metadata, so no arbitrary code can execute.
+zTensor reads `.safetensors`, `.pt`, `.gguf`, `.npz`, `.onnx`, `.h5`, and `.zt` files through a single API. Format detection is automatic. In zero-copy mode, it consistently achieves ~2 GB/s across all formats. For `.pt` files, it parses pickle using a restricted VM in Rust that only extracts tensor metadata, so no arbitrary code can execute.
 
 <p align="center">
   <img src="website/static/charts/cross_format_read.svg" alt="Cross-format read throughput" width="700">
 </p>
 
-| Format | zTensor | Reference impl. | Speedup |
+| Format | zTensor | zTensor (zc off) | Reference impl. |
 | :--- | :--- | :--- | :--- |
-| .safetensors | 2.27 GB/s | 1.48 GB/s ([safetensors](https://github.com/huggingface/safetensors)) | **+53%** |
-| .pt | 2.26 GB/s | 1.44 GB/s ([torch](https://github.com/pytorch/pytorch)) | **+57%** |
-| .npz | 2.35 GB/s | 1.15 GB/s ([numpy](https://github.com/numpy/numpy)) | **+104%** |
-| .gguf | 2.29 GB/s | 2.34 GB/s ([gguf](https://github.com/ggml-org/ggml)) | −2% |
-| .onnx | 2.28 GB/s | 0.79 GB/s ([onnx](https://github.com/onnx/onnx)) | **+189%** |
-| .h5 | 2.41 GB/s | 1.48 GB/s ([h5py](https://github.com/h5py/h5py)) | **+63%** |
+| .safetensors | **2.19 GB/s** | 1.46 GB/s | 1.33 GB/s ([safetensors](https://github.com/huggingface/safetensors)) |
+| .pt | **2.04 GB/s** | 1.33 GB/s | 0.89 GB/s ([torch](https://github.com/pytorch/pytorch)) |
+| .npz | **2.11 GB/s** | 1.41 GB/s | 1.04 GB/s ([numpy](https://github.com/numpy/numpy)) |
+| .gguf | **2.11 GB/s** | 1.38 GB/s | 1.39 GB/s / 2.15 GB/s† ([gguf](https://github.com/ggml-org/ggml)) |
+| .onnx | **2.07 GB/s** | 1.29 GB/s | 0.76 GB/s ([onnx](https://github.com/onnx/onnx)) |
+| .h5 | **1.96 GB/s** | 1.30 GB/s | 1.35 GB/s ([h5py](https://github.com/h5py/h5py)) |
 
-*Llama 3.2 1B shapes (~2.8 GB). Linux, NVMe SSD, median of 7 runs, cold reads. See [Benchmarks](https://pie-project.github.io/ztensor/benchmarks) for details.*
+*Llama 3.2 1B shapes (~2.8 GB). Linux, NVMe SSD, median of 5 runs, cold reads. ONNX at 1 GB (protobuf limit). †GGUF's native reader also supports mmap (2.15 GB/s). See [Benchmarks](https://pie-project.github.io/ztensor/benchmarks) for details.*
 
 ## Writing (.zt format)
 
@@ -44,15 +44,15 @@ Most formats equate "tensor" with "flat array of one dtype." Once you need somet
 
 | Format | Large | Mixed | Small |
 | :--- | :--- | :--- | :--- |
-| **ztensor** | 3.60 GB/s | 3.65 GB/s | 1.43 GB/s |
-| safetensors | 1.72 GB/s | 1.75 GB/s | 1.30 GB/s |
-| pickle | 3.58 GB/s | 3.65 GB/s | 1.76 GB/s |
-| npz | 2.39 GB/s | 2.38 GB/s | 0.50 GB/s |
-| gguf | 3.81 GB/s | 3.90 GB/s | 1.01 GB/s |
-| onnx | 0.29 GB/s | 0.29 GB/s | 0.34 GB/s |
-| hdf5 | 3.68 GB/s | 3.67 GB/s | 0.27 GB/s |
+| **ztensor** | 3.62 GB/s | 3.65 GB/s | 1.42 GB/s |
+| safetensors | 1.72 GB/s | 1.77 GB/s | 1.48 GB/s |
+| pickle | 3.62 GB/s | 3.68 GB/s | **2.00 GB/s** |
+| npz | 2.40 GB/s | 2.40 GB/s | 0.51 GB/s |
+| **gguf** | **3.85 GB/s** | **3.86 GB/s** | 1.06 GB/s |
+| onnx | 0.28 GB/s | 0.29 GB/s | 0.32 GB/s |
+| hdf5 | 3.67 GB/s | 3.69 GB/s | 0.27 GB/s |
 
-*Three workloads at 512 MB: Large (few big matrices), Mixed (realistic model shapes), Small (many ~10 KB parameters). See [Benchmarks](https://pie-project.github.io/ztensor/benchmarks) for details.*
+*Three workloads at 512 MB, `copy=True`: Large (few big matrices), Mixed (realistic model shapes), Small (many ~10 KB parameters). See [Benchmarks](https://pie-project.github.io/ztensor/benchmarks) for details.*
 
 | Feature | .zt | .safetensors | .gguf | .pt (pickle) | .npz | .onnx | .h5 |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |

@@ -51,7 +51,7 @@ for (name, obj) in reader.tensors() {
 }
 ```
 
-Each format requires its corresponding feature flag — see [Feature flags](#feature-flags) below.
+Each format requires its corresponding feature flag; see [Feature flags](#feature-flags) below.
 
 ## Writing
 
@@ -84,7 +84,7 @@ writer.add_with("weights", &[2, 3], &data)
 writer.finish()?;
 ```
 
-Reading auto-decompresses and verifies checksums — no flags needed on the read side.
+Compressed data is decompressed and checksums are verified automatically on read.
 
 ### Sparse tensors
 
@@ -136,7 +136,7 @@ Each external format reader is behind a feature flag:
 | `npz` | NumPy | `.npz` |
 | `onnx` | ONNX | `.onnx` |
 | `hdf5` | HDF5 | `.h5`, `.hdf5` |
-| `all-formats` | All of the above | — |
+| `all-formats` | All of the above | |
 
 ```toml
 [dependencies]

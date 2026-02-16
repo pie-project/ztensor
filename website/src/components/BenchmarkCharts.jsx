@@ -243,22 +243,29 @@ export function CompressionBarChart({ data, height = 240 }) {
 
 // ---- Cross-format bar chart ----
 
-export function CrossFormatBarChart({ data, height = 320 }) {
+export function CrossFormatBarChart({ data, height = 340 }) {
   const t = useTheme();
+  const zcBlue = t.dark ? '#2563EB' : '#1D4ED8';
+  const copyBlue = t.dark ? '#93C5FD' : '#93C5FD';
+  const zcGray = t.dark ? '#4B5563' : '#9CA3AF';
+  const copyGray = t.dark ? '#9CA3AF' : '#D1D5DB';
   return (
     <div style={{ margin: '16px 0' }}>
-      <div style={{ display: 'flex', gap: 20, justifyContent: 'center', marginBottom: 4, fontSize: 13 }}>
-        <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-          <span style={{ width: 14, height: 14, background: t.primary, borderRadius: 3, display: 'inline-block' }} />
-          <span style={{ color: t.text, fontWeight: 600 }}>ztensor</span>
-        </span>
-        <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-          <span style={{ width: 14, height: 14, background: t.baselineFill, borderRadius: 3, display: 'inline-block' }} />
-          <span style={{ color: t.textMuted }}>reference impl.</span>
-        </span>
+      <div style={{ display: 'flex', gap: 16, justifyContent: 'center', marginBottom: 4, fontSize: 12, flexWrap: 'wrap' }}>
+        {[
+          [zcBlue, 'ztensor'],
+          [copyBlue, 'ztensor (zc off)'],
+          [zcGray, 'ref. zero-copy'],
+          [copyGray, 'ref. copy'],
+        ].map(([color, label]) => (
+          <span key={label} style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+            <span style={{ width: 12, height: 12, background: color, borderRadius: 3, display: 'inline-block' }} />
+            <span style={{ color: t.text, fontWeight: label.startsWith('ztensor') ? 600 : 400 }}>{label}</span>
+          </span>
+        ))}
       </div>
       <ResponsiveContainer width="100%" height={height}>
-        <BarChart data={data} margin={{ top: 8, right: 16, bottom: 4, left: 4 }} barSize={BAR_WIDTH}>
+        <BarChart data={data} margin={{ top: 8, right: 16, bottom: 4, left: 4 }} barSize={16}>
           <CartesianGrid vertical={false} stroke={t.grid} />
           <XAxis
             dataKey="name"
@@ -275,13 +282,16 @@ export function CrossFormatBarChart({ data, height = 320 }) {
             width={50}
           />
           <Tooltip content={<ChartTooltip suffix=" GB/s" />} />
-          <Bar dataKey="ztensor" name="ztensor" fill={t.primary} radius={[4, 4, 0, 0]} />
-          <Bar dataKey="native" name="Reference impl." fill={t.baselineFill} radius={[4, 4, 0, 0]}>
+          <Bar dataKey="ztensorZc" name="ztensor" fill={zcBlue} radius={[4, 4, 0, 0]} />
+          <Bar dataKey="ztensor" name="ztensor (zc off)" fill={copyBlue} radius={[4, 4, 0, 0]} />
+          <Bar dataKey="nativeZc" name="Ref. zero-copy" radius={[4, 4, 0, 0]}>
             {data.map((entry, i) => (
-              <Cell
-                key={i}
-                fill={entry.native != null ? t.baselineFill : 'transparent'}
-              />
+              <Cell key={i} fill={entry.nativeZc != null ? zcGray : 'transparent'} />
+            ))}
+          </Bar>
+          <Bar dataKey="native" name="Ref. copy" radius={[4, 4, 0, 0]}>
+            {data.map((entry, i) => (
+              <Cell key={i} fill={entry.native != null ? copyGray : 'transparent'} />
             ))}
           </Bar>
         </BarChart>
@@ -343,7 +353,7 @@ function DistributionBarChart({ data, yLabel = 'Throughput (GB/s)', yMax = 'auto
           {['large', 'mixed', 'small'].map(key => (
             <Bar key={key} dataKey={key} name={key.charAt(0).toUpperCase() + key.slice(1)} radius={[4, 4, 0, 0]}>
               {data.map((entry, i) => (
-                <Cell key={i} fill={entry.name === 'ztensor' ? blue[key] : gray[key]} />
+                <Cell key={i} fill={entry.name.startsWith('ztensor') ? blue[key] : gray[key]} />
               ))}
             </Bar>
           ))}
@@ -354,27 +364,29 @@ function DistributionBarChart({ data, yLabel = 'Throughput (GB/s)', yMax = 'auto
 }
 
 const READ_DIST = [
-  { name: 'ztensor',     large: 2.14, mixed: 2.31, small: 1.91 },
-  { name: 'safetensors', large: 1.28, mixed: 1.35, small: 1.35 },
-  { name: 'pickle',      large: 1.43, mixed: 1.43, small: 1.57 },
-  { name: 'npz',         large: 1.12, mixed: 1.12, small: 0.22 },
-  { name: 'gguf',        large: 2.34, mixed: 2.29, small: 0.20 },
-  { name: 'onnx',        large: 0.78, mixed: 0.78, small: 0.67 },
-  { name: 'hdf5',        large: 1.33, mixed: 1.40, small: 0.16 },
+  { name: 'ztensor',              large: 2.08, mixed: 2.02, small: 1.76, zc: true },
+  { name: 'ztensor\n(zc off)',    large: 1.25, mixed: 1.31, small: 1.46 },
+  { name: 'safetensors',          large: 1.23, mixed: 1.32, small: 1.35 },
+  { name: 'pickle',               large: 1.25, mixed: 1.36, small: 1.40 },
+  { name: 'npz',                  large: 1.05, mixed: 1.06, small: 0.22 },
+  { name: 'gguf',                 large: 2.32, mixed: 2.31, small: 0.21, zc: true },
+  { name: 'gguf\n(zc off)',       large: 1.40, mixed: 1.40, small: 0.20 },
+  { name: 'onnx',                 large: 0.73, mixed: 0.75, small: 0.65 },
+  { name: 'hdf5',                 large: 1.28, mixed: 1.33, small: 0.16 },
 ];
 
 const WRITE_DIST = [
-  { name: 'ztensor',     large: 3.60, mixed: 3.65, small: 1.43 },
-  { name: 'safetensors', large: 1.72, mixed: 1.75, small: 1.30 },
-  { name: 'pickle',      large: 3.58, mixed: 3.65, small: 1.76 },
-  { name: 'npz',         large: 2.39, mixed: 2.38, small: 0.50 },
-  { name: 'gguf',        large: 3.81, mixed: 3.90, small: 1.01 },
-  { name: 'onnx',        large: 0.29, mixed: 0.29, small: 0.34 },
-  { name: 'hdf5',        large: 3.68, mixed: 3.67, small: 0.27 },
+  { name: 'ztensor',     large: 3.62, mixed: 3.65, small: 1.42 },
+  { name: 'safetensors', large: 1.72, mixed: 1.77, small: 1.48 },
+  { name: 'pickle',      large: 3.62, mixed: 3.68, small: 2.00 },
+  { name: 'npz',         large: 2.40, mixed: 2.40, small: 0.51 },
+  { name: 'gguf',        large: 3.85, mixed: 3.86, small: 1.06 },
+  { name: 'onnx',        large: 0.28, mixed: 0.29, small: 0.32 },
+  { name: 'hdf5',        large: 3.67, mixed: 3.69, small: 0.27 },
 ];
 
 export function DistributionComparisonChart() {
-  return <DistributionBarChart data={READ_DIST} yLabel="Read Throughput (GB/s)" yMax={3.0} />;
+  return <DistributionBarChart data={READ_DIST} yLabel="Read Throughput (GB/s)" yMax={2.8} />;
 }
 
 
@@ -385,10 +397,10 @@ export function WriteDistributionChart() {
 // ---- Compression workload charts ----
 
 const COMPRESSION_WORKLOADS = [
-  { name: 'Dense fp32',       ratio: 0.92, readRaw: 2.31, readZstd: 0.45, writeRaw: 3.65, writeZstd: 0.72 },
-  { name: 'Quantized int8',   ratio: 0.52, readRaw: 2.31, readZstd: 0.73, writeRaw: 3.65, writeZstd: 0.24 },
-  { name: 'Pruned 80%',       ratio: 0.27, readRaw: 2.31, readZstd: 0.59, writeRaw: 3.65, writeZstd: 0.39 },
-  { name: 'Ternary',          ratio: 0.25, readRaw: 2.31, readZstd: 0.90, writeRaw: 3.65, writeZstd: 0.45 },
+  { name: 'Dense fp32',       ratio: 0.92, readRaw: 1.31, readZstd: 0.45, writeRaw: 3.65, writeZstd: 0.72 },
+  { name: 'Quantized int8',   ratio: 0.52, readRaw: 1.31, readZstd: 0.73, writeRaw: 3.65, writeZstd: 0.24 },
+  { name: 'Pruned 80%',       ratio: 0.27, readRaw: 1.31, readZstd: 0.59, writeRaw: 3.65, writeZstd: 0.39 },
+  { name: 'Ternary',          ratio: 0.25, readRaw: 1.31, readZstd: 0.90, writeRaw: 3.65, writeZstd: 0.45 },
 ];
 
 function CompLegend({ items }) {
@@ -480,7 +492,7 @@ export function CompressionThroughputChart() {
     <div style={{ margin: '16px 0' }}>
       <CompLegend items={[[light, 'ztensor'], [solid, 'ztensor + zstd-3']]} />
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-        <CompThroughputSub data={COMPRESSION_WORKLOADS} rawKey="readRaw" zstdKey="readZstd" yMax={2.6} title="Read" />
+        <CompThroughputSub data={COMPRESSION_WORKLOADS} rawKey="readRaw" zstdKey="readZstd" yMax={1.5} title="Read" />
         <CompThroughputSub data={COMPRESSION_WORKLOADS} rawKey="writeRaw" zstdKey="writeZstd" yMax={4.0} title="Write" />
       </div>
     </div>
@@ -490,45 +502,45 @@ export function CompressionThroughputChart() {
 // ---- Data ----
 
 const READ_MIXED = [
-  { size: '128MB', ztensor: 2.65, safetensors: 1.82, pickle: 1.95, hdf5: 1.82, gguf: 2.65 },
-  { size: '512MB', ztensor: 2.63, safetensors: 1.85, pickle: 1.89, hdf5: 1.80, gguf: 2.65 },
-  { size: '1GB',   ztensor: 2.63, safetensors: 1.90, pickle: 1.90, hdf5: 1.90, gguf: 2.65 },
-  { size: '2GB',   ztensor: 2.61, safetensors: 1.95, pickle: 1.99, hdf5: 1.96, gguf: 2.64 },
+  { size: '128MB', ztensor: 1.29, safetensors: 1.28, pickle: 1.32, hdf5: 1.31, gguf: 1.35 },
+  { size: '512MB', ztensor: 1.31, safetensors: 1.32, pickle: 1.36, hdf5: 1.33, gguf: 1.40 },
+  { size: '1GB',   ztensor: 1.30, safetensors: 1.29, pickle: 1.27, hdf5: 1.34, gguf: 1.38 },
+  { size: '2GB',   ztensor: 1.23, safetensors: 1.23, pickle: 1.28, hdf5: 1.34, gguf: 1.38 },
 ];
 
 const READ_LARGE = [
-  { size: '128MB', ztensor: 2.57, safetensors: 2.21, pickle: 2.15, hdf5: 1.92, gguf: 2.55 },
-  { size: '512MB', ztensor: 2.57, safetensors: 2.26, pickle: 2.17, hdf5: 1.86, gguf: 2.61 },
-  { size: '1GB',   ztensor: 2.64, safetensors: 2.29, pickle: 2.25, hdf5: 1.93, gguf: 2.59 },
-  { size: '2GB',   ztensor: 2.66, safetensors: 2.28, pickle: 2.19, hdf5: 1.94, gguf: 2.63 },
+  { size: '128MB', ztensor: 1.38, safetensors: 1.35, pickle: 1.28, hdf5: 1.36, gguf: 1.41 },
+  { size: '512MB', ztensor: 1.25, safetensors: 1.23, pickle: 1.25, hdf5: 1.28, gguf: 1.40 },
+  { size: '1GB',   ztensor: 1.31, safetensors: 1.29, pickle: 1.37, hdf5: 1.34, gguf: 1.37 },
+  { size: '2GB',   ztensor: 1.33, safetensors: 1.32, pickle: 1.37, hdf5: 1.36, gguf: 1.37 },
 ];
 
 const READ_SMALL = [
-  { size: '128MB', ztensor: 1.78, safetensors: 1.14, pickle: 1.58, hdf5: 0.14, gguf: 0.21 },
-  { size: '512MB', ztensor: 1.78, safetensors: 1.37, pickle: 1.51, hdf5: 0.16, gguf: 0.20 },
-  { size: '1GB',   ztensor: 1.80, safetensors: 1.37, pickle: 1.46, hdf5: 0.16, gguf: 0.20 },
-  { size: '2GB',   ztensor: 1.83, safetensors: 1.42, pickle: 1.56, hdf5: 0.17, gguf: 0.21 },
+  { size: '128MB', ztensor: 1.46, safetensors: 1.41, pickle: 1.68, hdf5: 0.15, gguf: 0.21 },
+  { size: '512MB', ztensor: 1.46, safetensors: 1.35, pickle: 1.40, hdf5: 0.16, gguf: 0.20 },
+  { size: '1GB',   ztensor: 1.46, safetensors: 1.31, pickle: 1.44, hdf5: 0.16, gguf: 0.20 },
+  { size: '2GB',   ztensor: 1.44, safetensors: 1.31, pickle: 1.42, hdf5: 0.16, gguf: 0.20 },
 ];
 
 const WRITE_MIXED = [
-  { size: '128MB', ztensor: 3.69, safetensors: 2.05, pickle: 3.79, hdf5: 3.83, gguf: 3.92 },
-  { size: '512MB', ztensor: 3.66, safetensors: 1.78, pickle: 3.65, hdf5: 3.44, gguf: 3.92 },
-  { size: '1GB',   ztensor: 3.63, safetensors: 1.77, pickle: 3.63, hdf5: 3.62, gguf: 3.84 },
-  { size: '2GB',   ztensor: 3.68, safetensors: 1.77, pickle: 3.66, hdf5: 3.63, gguf: 3.89 },
+  { size: '128MB', ztensor: 3.77, safetensors: 2.01, pickle: 3.82, hdf5: 3.86, gguf: 3.92 },
+  { size: '512MB', ztensor: 3.65, safetensors: 1.77, pickle: 3.68, hdf5: 3.69, gguf: 3.86 },
+  { size: '1GB',   ztensor: 3.65, safetensors: 1.69, pickle: 3.65, hdf5: 3.61, gguf: 3.86 },
+  { size: '2GB',   ztensor: 3.57, safetensors: 1.68, pickle: 3.58, hdf5: 3.54, gguf: 3.78 },
 ];
 
 const SELECTIVE_2GB = [
-  { name: 'ztensor',     id: 'ztensor',     value: 0.148 },
-  { name: 'safetensors', id: 'safetensors', value: 0.136 },
-  { name: 'hdf5',        id: 'hdf5',        value: 0.148 },
-  { name: 'gguf',        id: 'gguf',        value: 0.114 },
-  { name: 'pickle',      id: 'pickle',      value: 0.820 },
+  { name: 'ztensor',     id: 'ztensor',     value: 0.176 },
+  { name: 'safetensors', id: 'safetensors', value: 0.177 },
+  { name: 'hdf5',        id: 'hdf5',        value: 0.171 },
+  { name: 'gguf',        id: 'gguf',        value: 0.161 },
+  { name: 'pickle',      id: 'pickle',      value: 1.013 },
 ];
 
 const ZEROCOPY = [
-  { name: '512MB', 'copy=False': 2.63, 'copy=True': 1.85 },
-  { name: '1GB',   'copy=False': 2.63, 'copy=True': 1.90 },
-  { name: '2GB',   'copy=False': 2.61, 'copy=True': 1.95 },
+  { name: '512MB', 'copy=False': 2.08, 'copy=True': 1.31 },
+  { name: '1GB',   'copy=False': 2.12, 'copy=True': 1.30 },
+  { name: '2GB',   'copy=False': 2.14, 'copy=True': 1.30 },
 ];
 
 const COMPRESSION = [
@@ -537,13 +549,15 @@ const COMPRESSION = [
 ];
 
 const CROSS_FORMAT_READ = [
-  { name: '.zt',          ztensor: 2.50, native: null },
-  { name: '.safetensors', ztensor: 2.27, native: 1.48 },
-  { name: '.pt',          ztensor: 2.26, native: 1.44 },
-  { name: '.npz',         ztensor: 2.35, native: 1.15 },
-  { name: '.gguf',        ztensor: 2.29, native: 2.34 },
-  { name: '.onnx',        ztensor: 2.28, native: 0.79 },
-  { name: '.h5',          ztensor: 2.41, native: 1.48 },
+  // ztensorZc: ztensor copy=False (zero-copy mmap), ztensor: copy=True
+  // nativeZc: native lib zero-copy where available (gguf mmap, safetensors safe_open)
+  { name: '.zt',          ztensorZc: 2.19, ztensor: 1.37, native: null, nativeZc: null },
+  { name: '.safetensors', ztensorZc: 2.19, ztensor: 1.46, native: 1.33, nativeZc: 1.35 },
+  { name: '.pt',          ztensorZc: 2.04, ztensor: 1.33, native: 0.89, nativeZc: null },
+  { name: '.npz',         ztensorZc: 2.11, ztensor: 1.41, native: 1.04, nativeZc: null },
+  { name: '.gguf',        ztensorZc: 2.11, ztensor: 1.38, native: 1.39, nativeZc: 2.15 },
+  { name: '.onnx',        ztensorZc: 2.07, ztensor: 1.29, native: 0.76, nativeZc: null },
+  { name: '.h5',          ztensorZc: 1.96, ztensor: 1.30, native: 1.35, nativeZc: null },
 ];
 
 // ---- Exported charts ----
