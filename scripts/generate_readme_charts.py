@@ -52,6 +52,7 @@ def _style_ax(ax, ylabel):
 CROSS_FORMAT_DATA = [
     # (label, zt_zerocopy, zt_copy, native_copy, native_zerocopy | None)
     # Llama 3.2 1B shapes (~2.8 GB), median of 5 runs, 2 warmup
+    (".zt",          2.19, 1.37, None, None),
     (".safetensors", 2.19, 1.46, 1.33, 1.35),
     (".pt",          2.04, 1.33, 0.89, None),
     (".npz",         2.11, 1.41, 1.04, None),
@@ -70,7 +71,8 @@ def draw_cross_format_read(path):
     labels = [d[0] for d in CROSS_FORMAT_DATA]
     zt_zc = [d[1] for d in CROSS_FORMAT_DATA]
     zt_cp = [d[2] for d in CROSS_FORMAT_DATA]
-    nat_cp = [d[3] for d in CROSS_FORMAT_DATA]
+    nat_cp = [d[3] if d[3] is not None else 0 for d in CROSS_FORMAT_DATA]
+    has_nat_cp = [d[3] is not None for d in CROSS_FORMAT_DATA]
     nat_zc = [d[4] if d[4] is not None else 0 for d in CROSS_FORMAT_DATA]
     has_nat_zc = [d[4] is not None for d in CROSS_FORMAT_DATA]
 
@@ -89,8 +91,11 @@ def draw_cross_format_read(path):
            color=nat_zc_colors, edgecolor=["white" if h else "none" for h in has_nat_zc],
            linewidth=0.5, zorder=3)
 
+    # Native copy: only draw where available
+    nat_cp_colors = [NATIVE_LIGHT if h else "none" for h in has_nat_cp]
     ax.bar(x + 1.5 * width, nat_cp, width, label="ref. copy",
-           color=NATIVE_LIGHT, edgecolor="white", linewidth=0.5, zorder=3)
+           color=nat_cp_colors, edgecolor=["white" if h else "none" for h in has_nat_cp],
+           linewidth=0.5, zorder=3)
 
     _style_ax(ax, "Read Throughput (GB/s)")
     ax.set_xticks(x)
@@ -105,7 +110,7 @@ def draw_cross_format_read(path):
     ]
     ax.legend(handles=legend_elements, fontsize=8, frameon=False,
               loc="upper center", ncol=4, bbox_to_anchor=(0.5, 1.0))
-    all_vals = zt_zc + zt_cp + nat_cp + [v for v in nat_zc if v > 0]
+    all_vals = zt_zc + zt_cp + [v for v in nat_cp if v > 0] + [v for v in nat_zc if v > 0]
     ax.set_ylim(0, max(all_vals) * 1.15)
 
     fig.tight_layout()

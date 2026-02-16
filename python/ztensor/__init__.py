@@ -3,7 +3,7 @@ zTensor - High-performance tensor serialization format.
 
 This module provides Python bindings for the zTensor library via native
 PyO3 bindings. It supports reading and writing zTensor (.zt) files,
-as well as reading SafeTensors and PyTorch files.
+as well as reading SafeTensors, PyTorch, GGUF, NumPy, ONNX, and HDF5 files.
 
 Example:
     >>> import ztensor

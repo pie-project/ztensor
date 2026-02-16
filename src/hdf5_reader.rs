@@ -68,7 +68,8 @@ impl Hdf5Ctx {
 
 /// Reads a little-endian unsigned integer of `size` bytes (1..=8).
 fn read_uint(data: &[u8], pos: usize, size: usize) -> Result<u64, Error> {
-    if pos + size > data.len() {
+    let end = pos.checked_add(size).ok_or(Error::UnexpectedEof)?;
+    if end > data.len() {
         return Err(Error::UnexpectedEof);
     }
     let mut val: u64 = 0;
@@ -83,14 +84,16 @@ fn read_u8(data: &[u8], pos: usize) -> Result<u8, Error> {
 }
 
 fn read_u16_le(data: &[u8], pos: usize) -> Result<u16, Error> {
-    if pos + 2 > data.len() {
+    let end = pos.checked_add(2).ok_or(Error::UnexpectedEof)?;
+    if end > data.len() {
         return Err(Error::UnexpectedEof);
     }
     Ok(u16::from_le_bytes([data[pos], data[pos + 1]]))
 }
 
 fn read_u32_le(data: &[u8], pos: usize) -> Result<u32, Error> {
-    if pos + 4 > data.len() {
+    let end = pos.checked_add(4).ok_or(Error::UnexpectedEof)?;
+    if end > data.len() {
         return Err(Error::UnexpectedEof);
     }
     Ok(u32::from_le_bytes([
@@ -102,7 +105,8 @@ fn read_u32_le(data: &[u8], pos: usize) -> Result<u32, Error> {
 }
 
 fn read_u64_le(data: &[u8], pos: usize) -> Result<u64, Error> {
-    if pos + 8 > data.len() {
+    let end = pos.checked_add(8).ok_or(Error::UnexpectedEof)?;
+    if end > data.len() {
         return Err(Error::UnexpectedEof);
     }
     Ok(u64::from_le_bytes([
@@ -331,7 +335,8 @@ fn parse_superblock(data: &[u8], sb_offset: usize) -> Result<(Hdf5Ctx, u64, u64)
 /// Reads the local heap data segment address.
 fn read_local_heap_data(data: &[u8], ctx: &Hdf5Ctx, heap_addr: u64) -> Result<usize, Error> {
     let pos = heap_addr as usize;
-    if pos + 4 > data.len() {
+    let end = pos.checked_add(4).ok_or(Error::UnexpectedEof)?;
+    if end > data.len() {
         return Err(Error::UnexpectedEof);
     }
 
@@ -343,7 +348,8 @@ fn read_local_heap_data(data: &[u8], ctx: &Hdf5Ctx, heap_addr: u64) -> Result<us
     }
 
     // HEAP: sig(4) + version(1) + reserved(3) + data_seg_size(L) + free_list_head_offset(L) + data_seg_addr(O)
-    let data_seg_addr_offset = pos + 4 + 1 + 3 + ctx.length_size + ctx.length_size;
+    let data_seg_addr_offset = pos.checked_add(4 + 1 + 3 + ctx.length_size + ctx.length_size)
+        .ok_or(Error::UnexpectedEof)?;
     let data_seg_addr = ctx.read_offset(data, data_seg_addr_offset)?;
 
     Ok(data_seg_addr as usize)
@@ -369,7 +375,8 @@ fn traverse_btree(
     }
 
     let pos = btree_addr as usize;
-    if pos + 4 > data.len() {
+    let end = pos.checked_add(4).ok_or(Error::UnexpectedEof)?;
+    if end > data.len() {
         return Err(Error::UnexpectedEof);
     }
 
@@ -457,7 +464,8 @@ fn parse_snod(
     }
 
     let pos = snod_addr as usize;
-    if pos + 4 > data.len() {
+    let end = pos.checked_add(4).ok_or(Error::UnexpectedEof)?;
+    if end > data.len() {
         return Err(Error::UnexpectedEof);
     }
 
@@ -606,7 +614,7 @@ fn parse_object_header(
         ));
     }
 
-    if addr + 12 > data.len() {
+    if addr.checked_add(12).ok_or(Error::UnexpectedEof)? > data.len() {
         return Err(Error::UnexpectedEof);
     }
 
@@ -786,7 +794,7 @@ fn parse_dataspace(data: &[u8], pos: usize) -> Result<Vec<u64>, Error> {
 // ---- Datatype parsing ----
 
 fn parse_datatype(data: &[u8], pos: usize) -> Result<DType, Error> {
-    if pos + 8 > data.len() {
+    if pos.checked_add(8).ok_or(Error::UnexpectedEof)? > data.len() {
         return Err(Error::UnexpectedEof);
     }
 

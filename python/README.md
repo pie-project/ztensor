@@ -33,6 +33,13 @@ with Reader("model.zt") as r:
     print(f"Shape: {weights.shape}, dtype: {weights.dtype}")
 ```
 
+zTensor can also read `.safetensors`, `.pt`, `.gguf`, `.npz`, `.onnx`, and `.h5` files through the same API — format detection is automatic:
+
+```python
+with Reader("model.safetensors") as r:
+    weights = r["weights"]
+```
+
 ## PyTorch
 
 ```python

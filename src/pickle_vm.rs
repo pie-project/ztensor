@@ -133,11 +133,12 @@ impl<'a> PickleVM<'a> {
     }
 
     fn read_bytes(&mut self, n: usize) -> Result<&'a [u8], Error> {
-        if self.pos + n > self.data.len() {
+        let end = self.pos.checked_add(n).ok_or(Error::UnexpectedEof)?;
+        if end > self.data.len() {
             return Err(Error::UnexpectedEof);
         }
-        let slice = &self.data[self.pos..self.pos + n];
-        self.pos += n;
+        let slice = &self.data[self.pos..end];
+        self.pos = end;
         Ok(slice)
     }
 
@@ -189,7 +190,12 @@ impl<'a> PickleVM<'a> {
                 // FRAME
                 0x95 => {
                     let frame_len = self.read_u64_le()? as usize;
-                    if self.pos + frame_len > self.data.len() {
+                    let end = self.pos.checked_add(frame_len).ok_or_else(|| {
+                        Error::InvalidFileStructure(
+                            "Pickle FRAME length exceeds data bounds".into(),
+                        )
+                    })?;
+                    if end > self.data.len() {
                         return Err(Error::InvalidFileStructure(
                             "Pickle FRAME length exceeds data bounds".into(),
                         ));

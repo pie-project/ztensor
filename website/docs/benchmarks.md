@@ -14,7 +14,7 @@ import {
 
 ## Cross-format reading
 
-zTensor reads `.safetensors`, `.pt`, `.gguf`, `.npz`, `.onnx`, and `.h5` through a single mmap-backed API. The results below measure throughput when loading a Llama 3.2 1B-shaped model (~2.8 GB) from each format, compared against each format's native library.
+zTensor reads `.safetensors`, `.pt`, `.gguf`, `.npz`, `.onnx`, `.h5`, and `.zt` through a single mmap-backed API. The results below measure throughput when loading a Llama 3.2 1B-shaped model (~2.8 GB) from each format, compared against each format's native library.
 
 <CrossFormatChart />
 

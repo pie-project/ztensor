@@ -107,23 +107,25 @@ impl<'a> ProtobufCursor<'a> {
     /// Read a length-delimited field and return the byte slice.
     fn read_bytes(&mut self) -> Result<&'a [u8], Error> {
         let len = self.read_varint()? as usize;
-        if self.pos + len > self.data.len() {
+        let end = self.pos.checked_add(len).ok_or(Error::UnexpectedEof)?;
+        if end > self.data.len() {
             return Err(Error::UnexpectedEof);
         }
-        let slice = &self.data[self.pos..self.pos + len];
-        self.pos += len;
+        let slice = &self.data[self.pos..end];
+        self.pos = end;
         Ok(slice)
     }
 
     /// Read a length-delimited field and return (absolute_offset, length, slice).
     fn read_bytes_with_offset(&mut self) -> Result<(usize, usize, &'a [u8]), Error> {
         let len = self.read_varint()? as usize;
-        if self.pos + len > self.data.len() {
+        let end = self.pos.checked_add(len).ok_or(Error::UnexpectedEof)?;
+        if end > self.data.len() {
             return Err(Error::UnexpectedEof);
         }
         let abs_offset = self.base_offset + self.pos;
-        let slice = &self.data[self.pos..self.pos + len];
-        self.pos += len;
+        let slice = &self.data[self.pos..end];
+        self.pos = end;
         Ok((abs_offset, len, slice))
     }
 
@@ -134,19 +136,21 @@ impl<'a> ProtobufCursor<'a> {
                 self.read_varint()?;
             }
             WIRE_64BIT => {
-                if self.pos + 8 > self.data.len() {
+                let end = self.pos.checked_add(8).ok_or(Error::UnexpectedEof)?;
+                if end > self.data.len() {
                     return Err(Error::UnexpectedEof);
                 }
-                self.pos += 8;
+                self.pos = end;
             }
             WIRE_LENGTH_DELIMITED => {
                 self.read_bytes()?;
             }
             WIRE_32BIT => {
-                if self.pos + 4 > self.data.len() {
+                let end = self.pos.checked_add(4).ok_or(Error::UnexpectedEof)?;
+                if end > self.data.len() {
                     return Err(Error::UnexpectedEof);
                 }
-                self.pos += 4;
+                self.pos = end;
             }
             _ => {
                 return Err(Error::InvalidFileStructure(format!(

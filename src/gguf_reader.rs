@@ -101,11 +101,17 @@ fn gguf_type_to_dtype(type_id: u32) -> Result<(DType, Option<&'static str>), Err
 fn gguf_tensor_byte_size(n_elements: u64, type_id: u32) -> Result<usize, Error> {
     let (block_size, bytes_per_block, _) = gguf_type_info(type_id)?;
     if block_size == 1 {
-        Ok(n_elements as usize * bytes_per_block)
+        (n_elements as usize).checked_mul(bytes_per_block)
+            .ok_or_else(|| Error::InvalidFileStructure(
+                "GGUF tensor byte size overflows".into(),
+            ))
     } else {
         // Quantized: elements must be divisible by block_size
         let n_blocks = n_elements as usize / block_size;
-        Ok(n_blocks * bytes_per_block)
+        n_blocks.checked_mul(bytes_per_block)
+            .ok_or_else(|| Error::InvalidFileStructure(
+                "GGUF tensor byte size overflows".into(),
+            ))
     }
 }
 
@@ -123,11 +129,12 @@ impl<'a> ParseCursor<'a> {
     }
 
     fn read_bytes(&mut self, n: usize) -> Result<&'a [u8], Error> {
-        if self.pos + n > self.data.len() {
+        let end = self.pos.checked_add(n).ok_or(Error::UnexpectedEof)?;
+        if end > self.data.len() {
             return Err(Error::UnexpectedEof);
         }
-        let slice = &self.data[self.pos..self.pos + n];
-        self.pos += n;
+        let slice = &self.data[self.pos..end];
+        self.pos = end;
         Ok(slice)
     }
 
@@ -249,6 +256,14 @@ impl GgufReader {
         let tensor_count = cursor.read_u64_le()?;
         let metadata_kv_count = cursor.read_u64_le()?;
 
+        // Sanity-check counts against file size to prevent huge allocations.
+        let file_len = mmap.len() as u64;
+        if tensor_count > file_len || metadata_kv_count > file_len {
+            return Err(Error::InvalidFileStructure(
+                "GGUF header counts exceed file size".into(),
+            ));
+        }
+
         // 3. Parse metadata KV pairs
         let mut alignment: usize = 32; // default GGUF alignment
 
@@ -269,6 +284,12 @@ impl GgufReader {
         for _ in 0..tensor_count {
             let name = cursor.read_gguf_key()?;
             let n_dims = cursor.read_u32_le()?;
+            if n_dims > 64 {
+                return Err(Error::InvalidFileStructure(format!(
+                    "GGUF tensor has {} dimensions (max 64)",
+                    n_dims
+                )));
+            }
 
             let mut dims = Vec::with_capacity(n_dims as usize);
             for _ in 0..n_dims {
@@ -301,14 +322,24 @@ impl GgufReader {
             let n_elements: u64 = if info.shape.is_empty() {
                 1
             } else {
-                info.shape.iter().product()
+                info.shape.iter().try_fold(1u64, |acc, &d| acc.checked_mul(d))
+                    .ok_or_else(|| Error::InvalidFileStructure(format!(
+                        "Tensor '{}' shape overflows", info.name
+                    )))?
             };
             let byte_size = gguf_tensor_byte_size(n_elements, info.type_id)?;
 
-            let abs_offset = tensor_data_start + info.offset as usize;
+            let abs_offset = tensor_data_start.checked_add(info.offset as usize)
+                .ok_or_else(|| Error::InvalidFileStructure(format!(
+                    "Tensor '{}' offset overflows", info.name
+                )))?;
 
             // Bounds check
-            if abs_offset + byte_size > mmap.len() {
+            let end = abs_offset.checked_add(byte_size)
+                .ok_or_else(|| Error::InvalidFileStructure(format!(
+                    "Tensor '{}' extends beyond file", info.name
+                )))?;
+            if end > mmap.len() {
                 return Err(Error::InvalidFileStructure(format!(
                     "Tensor '{}' extends beyond file: offset {} + size {} > file size {}",
                     info.name,

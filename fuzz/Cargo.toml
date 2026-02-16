@@ -9,13 +9,64 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
+tempfile = "3"
 
 [dependencies.ztensor]
 path = ".."
+features = ["all-formats"]
 
 [[bin]]
-name = "fuzz_reader"
-path = "fuzz_targets/fuzz_reader.rs"
+name = "fuzz_zt"
+path = "fuzz_targets/fuzz_zt.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_safetensors"
+path = "fuzz_targets/fuzz_safetensors.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_pickle"
+path = "fuzz_targets/fuzz_pickle.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_gguf"
+path = "fuzz_targets/fuzz_gguf.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_npz"
+path = "fuzz_targets/fuzz_npz.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_onnx"
+path = "fuzz_targets/fuzz_onnx.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_hdf5"
+path = "fuzz_targets/fuzz_hdf5.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_open"
+path = "fuzz_targets/fuzz_open.rs"
 test = false
 doc = false
 bench = false

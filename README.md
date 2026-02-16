@@ -16,6 +16,7 @@ zTensor reads `.safetensors`, `.pt`, `.gguf`, `.npz`, `.onnx`, `.h5`, and `.zt` 
 
 | Format | zTensor | zTensor (zc off) | Reference impl. |
 | :--- | :--- | :--- | :--- |
+| .zt | **2.19 GB/s** | 1.37 GB/s | n/a |
 | .safetensors | **2.19 GB/s** | 1.46 GB/s | 1.33 GB/s ([safetensors](https://github.com/huggingface/safetensors)) |
 | .pt | **2.04 GB/s** | 1.33 GB/s | 0.89 GB/s ([torch](https://github.com/pytorch/pytorch)) |
 | .npz | **2.11 GB/s** | 1.41 GB/s | 1.04 GB/s ([numpy](https://github.com/numpy/numpy)) |
@@ -25,9 +26,9 @@ zTensor reads `.safetensors`, `.pt`, `.gguf`, `.npz`, `.onnx`, `.h5`, and `.zt` 
 
 *Llama 3.2 1B shapes (~2.8 GB). Linux, NVMe SSD, median of 5 runs, cold reads. ONNX at 1 GB (protobuf limit). †GGUF's native reader also supports mmap (2.15 GB/s). See [Benchmarks](https://pie-project.github.io/ztensor/benchmarks) for details.*
 
-## Writing (.zt format)
+## Writing
 
-Existing tensor formats each solve part of the problem, but none solve it cleanly:
+zTensor writes exclusively to `.zt`, our own format. Existing tensor formats each solve part of the problem, but none solve it cleanly:
 
 - **Pickle-based formats** (`.pt`, `.bin`) execute arbitrary code on load; a model file can run anything on the reader's machine.
 - **SafeTensors** is safe but treats every tensor as a flat, dense array of a fixed dtype. New formats can't be represented without a spec change.
@@ -44,15 +45,17 @@ Most formats equate "tensor" with "flat array of one dtype." Once you need somet
 
 | Format | Large | Mixed | Small |
 | :--- | :--- | :--- | :--- |
-| **ztensor** | 3.62 GB/s | 3.65 GB/s | 1.42 GB/s |
-| safetensors | 1.72 GB/s | 1.77 GB/s | 1.48 GB/s |
-| pickle | 3.62 GB/s | 3.68 GB/s | **2.00 GB/s** |
-| npz | 2.40 GB/s | 2.40 GB/s | 0.51 GB/s |
-| **gguf** | **3.85 GB/s** | **3.86 GB/s** | 1.06 GB/s |
-| onnx | 0.28 GB/s | 0.29 GB/s | 0.32 GB/s |
-| hdf5 | 3.67 GB/s | 3.69 GB/s | 0.27 GB/s |
+| **.zt** | 3.62 GB/s | 3.65 GB/s | 1.42 GB/s |
+| .safetensors | 1.72 GB/s | 1.77 GB/s | 1.48 GB/s |
+| .pt (pickle) | 3.62 GB/s | 3.68 GB/s | **2.00 GB/s** |
+| .npz | 2.40 GB/s | 2.40 GB/s | 0.51 GB/s |
+| **.gguf** | **3.85 GB/s** | **3.86 GB/s** | 1.06 GB/s |
+| .onnx | 0.28 GB/s | 0.29 GB/s | 0.32 GB/s |
+| .h5 | 3.67 GB/s | 3.69 GB/s | 0.27 GB/s |
 
 *Three workloads at 512 MB, `copy=True`: Large (few big matrices), Mixed (realistic model shapes), Small (many ~10 KB parameters). See [Benchmarks](https://pie-project.github.io/ztensor/benchmarks) for details.*
+
+## Format Comparison
 
 | Feature | .zt | .safetensors | .gguf | .pt (pickle) | .npz | .onnx | .h5 |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
