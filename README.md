@@ -1,7 +1,8 @@
 # ztensor
+[![CI](https://github.com/pie-project/ztensor/actions/workflows/check.yml/badge.svg)](https://github.com/pie-project/ztensor/actions/workflows/check.yml)
 [![Crates.io](https://img.shields.io/crates/v/ztensor.svg)](https://crates.io/crates/ztensor)
-[![Docs.rs](https://docs.rs/ztensor/badge.svg)](https://docs.rs/ztensor)
 [![PyPI](https://img.shields.io/pypi/v/ztensor.svg)](https://pypi.org/project/ztensor/)
+[![Docs.rs](https://docs.rs/ztensor/badge.svg)](https://docs.rs/ztensor)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 Unified, zero-copy, and safe I/O for deep learning formats.
