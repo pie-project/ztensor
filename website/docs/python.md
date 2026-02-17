@@ -237,6 +237,59 @@ with Writer("output.zt") as w:
 # finish() called automatically
 ```
 
+### Appending to existing files
+
+`Writer.append(path)` opens an existing `.zt` file for appending new tensors. Existing tensors are preserved; new tensors are written after the existing data.
+
+```python
+w = Writer.append("model.zt")
+w.add("extra_layer", new_weights)
+w.finish()
+```
+
+Duplicate tensor names raise an error.
+
+## Removing tensors
+
+### `ztensor.remove_tensors(input, output, names)`
+
+Removes tensors by name from a `.zt` file, writing the result to a new file. Preserves compression settings, checksums, and per-object attributes.
+
+| Parameter | Type | Description |
+|---|---|---|
+| `input` | `str` | Source `.zt` file |
+| `output` | `str` | Output `.zt` file |
+| `names` | `list[str]` | Tensor names to remove |
+
+```python
+import ztensor
+
+ztensor.remove_tensors("model.zt", "trimmed.zt", ["unused_layer", "old_bias"])
+```
+
+Returns an error if any name is not found in the input file.
+
+## Replacing tensor data in-place
+
+### `ztensor.replace_tensor(path, name, data)`
+
+Replaces the data of a dense tensor in-place within an existing `.zt` file. The replacement array must have the same byte size as the original. Only raw (uncompressed) tensors can be replaced. Checksums are recomputed automatically.
+
+| Parameter | Type | Description |
+|---|---|---|
+| `path` | `str` | Path to the `.zt` file (modified in-place) |
+| `name` | `str` | Name of the tensor to replace |
+| `data` | `np.ndarray` | Replacement array (must be contiguous, same byte size) |
+
+```python
+import numpy as np
+import ztensor
+
+# Replace weights in-place (much faster than rewriting the whole file)
+new_weights = np.zeros((1024, 768), dtype=np.float32)
+ztensor.replace_tensor("model.zt", "weights", new_weights)
+```
+
 ## Bytes API
 
 Serialize to and from raw bytes without touching disk.

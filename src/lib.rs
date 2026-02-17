@@ -197,6 +197,224 @@ pub fn open(path: impl AsRef<std::path::Path>) -> Result<Box<dyn TensorReader + 
     }
 }
 
+/// Removes tensors by name from a `.zt` file, writing the result to a new file.
+///
+/// Reads all tensors from `input`, skips those whose names appear in `names`,
+/// and writes the remaining tensors to `output`. Preserves compression settings.
+///
+/// Returns an error if any name in `names` is not found in the input file.
+///
+/// # Examples
+///
+/// ```no_run
+/// ztensor::remove_tensors("model.zt", "model_trimmed.zt", &["unused_layer"])?;
+/// # Ok::<(), ztensor::Error>(())
+/// ```
+pub fn remove_tensors(
+    input: impl AsRef<std::path::Path>,
+    output: impl AsRef<std::path::Path>,
+    names: &[&str],
+) -> Result<(), Error> {
+    let reader = Reader::open(input)?;
+    let objects = reader.manifest.objects.clone();
+
+    // Validate all names exist
+    for name in names {
+        if !objects.contains_key(*name) {
+            return Err(Error::ObjectNotFound(name.to_string()));
+        }
+    }
+
+    let names_set: std::collections::HashSet<&str> = names.iter().copied().collect();
+    let mut writer = Writer::create(output)?;
+
+    // Copy global attributes
+    if let Some(attrs) = &reader.manifest.attributes {
+        writer.set_attributes(attrs.clone());
+    }
+
+    for (name, obj) in &objects {
+        if names_set.contains(name.as_str()) {
+            continue;
+        }
+
+        if obj.format != Format::Dense {
+            return Err(Error::Other(format!(
+                "Cannot copy tensor '{}' with unsupported format '{}' (only dense tensors supported)",
+                name,
+                obj.format.as_str()
+            )));
+        }
+
+        let data_comp = obj.components.get("data").ok_or_else(|| {
+            Error::InvalidFileStructure(format!("Missing 'data' component for '{}'", name))
+        })?;
+
+        let data = reader.read(name, true)?;
+
+        let compression = match data_comp.encoding {
+            Encoding::Zstd => writer::Compression::Zstd(3),
+            Encoding::Raw => writer::Compression::Raw,
+        };
+
+        let checksum = match &data_comp.digest {
+            Some(d) if d.starts_with("sha256:") => Checksum::Sha256,
+            Some(d) if d.starts_with("crc32c:") => Checksum::Crc32c,
+            _ => Checksum::None,
+        };
+
+        writer.add_bytes(
+            name,
+            obj.shape.clone(),
+            data_comp.dtype,
+            compression,
+            &data,
+            checksum,
+        )?;
+
+        // Preserve per-object attributes
+        if obj.attributes.is_some() {
+            if let Some(written_obj) = writer.manifest_mut().objects.get_mut(name) {
+                written_obj.attributes = obj.attributes.clone();
+            }
+        }
+    }
+
+    writer.finish()?;
+    Ok(())
+}
+
+/// Replaces the data of a dense tensor in-place within an existing `.zt` file.
+///
+/// The replacement data must have the exact same byte size as the original.
+/// Only raw (uncompressed) dense tensors can be replaced in-place.
+/// If the tensor has a checksum, it is recomputed automatically.
+///
+/// This is much faster than a full rewrite for large files because only
+/// the tensor's data region and the manifest are updated — all other
+/// tensor data remains untouched on disk.
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - The tensor is not found
+/// - The tensor is not dense or not raw-encoded
+/// - The replacement data has a different byte size
+///
+/// # Examples
+///
+/// ```no_run
+/// let new_data = vec![0u8; 1024];
+/// ztensor::replace_tensor("model.zt", "weights", &new_data)?;
+/// # Ok::<(), ztensor::Error>(())
+/// ```
+pub fn replace_tensor(
+    path: impl AsRef<std::path::Path>,
+    name: &str,
+    data: &[u8],
+) -> Result<(), Error> {
+    use std::fs::OpenOptions;
+    use std::io::{Read, Seek, SeekFrom, Write};
+
+    let path = path.as_ref();
+    let mut file = OpenOptions::new().read(true).write(true).open(path)?;
+
+    // Read footer: last 16 bytes = [manifest_size: u64 LE] [MAGIC: 8B]
+    file.seek(SeekFrom::End(-16))?;
+    let mut size_buf = [0u8; 8];
+    file.read_exact(&mut size_buf)?;
+    let manifest_size = u64::from_le_bytes(size_buf);
+
+    let mut footer_magic = [0u8; 8];
+    file.read_exact(&mut footer_magic)?;
+    if footer_magic != *models::MAGIC {
+        return Err(Error::InvalidMagicNumber {
+            found: footer_magic.to_vec(),
+        });
+    }
+
+    // Read manifest
+    let file_size = file.seek(SeekFrom::End(0))?;
+    let manifest_start = file_size - 16 - manifest_size;
+    file.seek(SeekFrom::Start(manifest_start))?;
+    let mut cbor_buf = vec![0u8; manifest_size as usize];
+    file.read_exact(&mut cbor_buf)?;
+
+    let mut manifest: Manifest =
+        ciborium::from_reader(std::io::Cursor::new(&cbor_buf)).map_err(Error::CborDeserialize)?;
+
+    // Validate tensor exists and is replaceable
+    let obj = manifest
+        .objects
+        .get(name)
+        .ok_or_else(|| Error::ObjectNotFound(name.to_string()))?;
+
+    if obj.format != Format::Dense {
+        return Err(Error::Other(format!(
+            "Cannot replace tensor '{}': only dense tensors supported (found '{}')",
+            name,
+            obj.format.as_str()
+        )));
+    }
+
+    let component = obj.components.get("data").ok_or_else(|| {
+        Error::InvalidFileStructure(format!("Dense object '{}' missing 'data' component", name))
+    })?;
+
+    if component.encoding != Encoding::Raw {
+        return Err(Error::Other(format!(
+            "Cannot replace tensor '{}': only raw (uncompressed) tensors supported",
+            name
+        )));
+    }
+
+    if data.len() as u64 != component.length {
+        return Err(Error::InconsistentDataSize {
+            expected: component.length,
+            found: data.len() as u64,
+        });
+    }
+
+    // Overwrite data at the component offset
+    file.seek(SeekFrom::Start(component.offset))?;
+    file.write_all(data)?;
+
+    // Recompute checksum if one exists
+    let new_digest = if let Some(ref digest) = component.digest {
+        if digest.starts_with("crc32c:") {
+            Some(format!("crc32c:0x{:08X}", crc32c::crc32c(data)))
+        } else if digest.starts_with("sha256:") {
+            Some(format!("sha256:{}", utils::sha256_hex(data)))
+        } else {
+            component.digest.clone()
+        }
+    } else {
+        None
+    };
+
+    // Update manifest with new digest
+    let obj_mut = manifest.objects.get_mut(name).unwrap();
+    let comp_mut = obj_mut.components.get_mut("data").unwrap();
+    comp_mut.digest = new_digest;
+
+    // Rewrite manifest + footer
+    let mut cbor = Vec::new();
+    ciborium::into_writer(&manifest, &mut cbor).map_err(Error::CborSerialize)?;
+
+    file.seek(SeekFrom::Start(manifest_start))?;
+    file.write_all(&cbor)?;
+    let cbor_size = cbor.len() as u64;
+    file.write_all(&cbor_size.to_le_bytes())?;
+    file.write_all(models::MAGIC)?;
+
+    // Truncate to new size (manifest size may differ due to changed digest)
+    let new_file_size = manifest_start + cbor_size + 16;
+    file.set_len(new_file_size)?;
+    file.flush()?;
+
+    Ok(())
+}
+
 #[cfg(test)]
 
 mod tests {

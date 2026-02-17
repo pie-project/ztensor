@@ -17,7 +17,7 @@ pickle = ["dep:zip"]
 gguf = []
 npz = ["dep:zip"]
 onnx = []
-hdf5 = []
+hdf5 = ["dep:flate2"]
 all-formats = ["safetensors", "pickle", "gguf", "npz", "onnx", "hdf5"]
 cffi = ["dep:libc"]
 python = ["dep:pyo3", "dep:numpy", "all-formats"]
@@ -36,6 +36,7 @@ sha2 = "0.10"
 hex = "0.4"
 safetensors = { version = "0.4", optional = true }
 zip = { version = "2", optional = true, default-features = false, features = ["deflate"] }
+flate2 = { version = "1", optional = true }
 pyo3 = { version = "0.24", features = ["extension-module"], optional = true }
 numpy = { version = "0.24", optional = true }
 

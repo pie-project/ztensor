@@ -30,10 +30,12 @@ target/
 .DS_Store
 
 *.zt
-
 *.safetensors
 *.gguf
 *.bin
+
+# Allow test fixture files
+!tests/fixtures/**
 
 __pycache__/
 

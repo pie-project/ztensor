@@ -742,6 +742,16 @@ impl PyWriter {
         Ok(Self { inner: Some(inner) })
     }
 
+    /// Open an existing .zt file for appending new tensors.
+    ///
+    /// Preserves all existing tensors and their data. New tensors
+    /// can be added with add(), then finish() writes the updated manifest.
+    #[staticmethod]
+    fn append(path: &str) -> PyResult<Self> {
+        let inner = Writer::append(path).map_err(zt_err)?;
+        Ok(Self { inner: Some(inner) })
+    }
+
     /// Add a dense tensor from a NumPy array.
     ///
     /// Args:
@@ -933,6 +943,50 @@ fn save_file(
     Ok(())
 }
 
+/// Remove tensors by name from a .zt file, writing the result to a new file.
+///
+/// Args:
+///     input: Path to the source .zt file.
+///     output: Path to the output .zt file.
+///     names: List of tensor names to remove.
+#[pyfunction]
+fn remove_tensors(input: &str, output: &str, names: Vec<String>) -> PyResult<()> {
+    let name_refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
+    crate::remove_tensors(input, output, &name_refs).map_err(zt_err)
+}
+
+/// Replace the data of a dense tensor in-place within an existing .zt file.
+///
+/// The replacement array must have the same dtype and total byte size as the
+/// original tensor. Only raw (uncompressed) dense tensors can be replaced.
+/// Checksums are recomputed automatically.
+///
+/// Args:
+///     path: Path to the .zt file (modified in-place).
+///     name: Name of the tensor to replace.
+///     data: NumPy array with the replacement data (must be contiguous).
+#[pyfunction]
+fn replace_tensor(
+    py: Python<'_>,
+    path: &str,
+    name: &str,
+    data: &Bound<'_, pyo3::types::PyAny>,
+) -> PyResult<()> {
+    let np = py.import("numpy")?;
+    let arr = np.call_method1("ascontiguousarray", (data,))?;
+
+    let nbytes: usize = arr.getattr("nbytes")?.extract()?;
+
+    // Zero-copy access to numpy array's raw buffer
+    let iface = arr.getattr("__array_interface__")?;
+    let data_tuple = iface.get_item("data")?;
+    let ptr: usize = data_tuple.get_item(0)?.extract()?;
+    // SAFETY: GIL is held, array is contiguous from ascontiguousarray above.
+    let bytes: &[u8] = unsafe { std::slice::from_raw_parts(ptr as *const u8, nbytes) };
+
+    crate::replace_tensor(path, name, bytes).map_err(zt_err)
+}
+
 /// The native zTensor Python module.
 #[pymodule]
 fn _ztensor(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -941,5 +995,7 @@ fn _ztensor(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyTensorMeta>()?;
     m.add_function(wrap_pyfunction!(open, m)?)?;
     m.add_function(wrap_pyfunction!(save_file, m)?)?;
+    m.add_function(wrap_pyfunction!(remove_tensors, m)?)?;
+    m.add_function(wrap_pyfunction!(replace_tensor, m)?)?;
     Ok(())
 }

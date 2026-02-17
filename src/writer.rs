@@ -1,8 +1,8 @@
 //! zTensor file writer.
 
 use std::collections::BTreeMap;
-use std::fs::File;
-use std::io::{BufWriter, Seek, Write};
+use std::fs::{File, OpenOptions};
+use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 use crate::error::Error;
@@ -79,6 +79,64 @@ impl Writer<BufWriter<File>> {
         let file = File::create(path)?;
         Self::new(BufWriter::with_capacity(256 * 1024, file))
     }
+
+    /// Opens an existing `.zt` file for appending new tensors.
+    ///
+    /// Reads the existing manifest, truncates the manifest/footer, and
+    /// positions the writer to append new tensor data. Existing tensors
+    /// and their data are preserved unchanged.
+    ///
+    /// After appending tensors with [`add`](Writer::add) or
+    /// [`add_with`](Writer::add_with), call [`finish`](Writer::finish)
+    /// to write the updated manifest and footer.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use ztensor::Writer;
+    ///
+    /// let mut writer = Writer::append("model.zt")?;
+    /// writer.add("new_tensor", &[4], &[1.0f32, 2.0, 3.0, 4.0])?;
+    /// writer.finish()?;
+    /// # Ok::<(), ztensor::Error>(())
+    /// ```
+    pub fn append(path: impl AsRef<Path>) -> Result<Self, Error> {
+        let mut file = OpenOptions::new().read(true).write(true).open(&path)?;
+
+        // Read footer: last 16 bytes = [manifest_size: u64 LE] [MAGIC: 8B]
+        file.seek(SeekFrom::End(-16))?;
+        let mut size_buf = [0u8; 8];
+        file.read_exact(&mut size_buf)?;
+        let manifest_size = u64::from_le_bytes(size_buf);
+
+        let mut footer_magic = [0u8; 8];
+        file.read_exact(&mut footer_magic)?;
+        if footer_magic != *MAGIC {
+            return Err(Error::InvalidMagicNumber {
+                found: footer_magic.to_vec(),
+            });
+        }
+
+        // Read manifest
+        let file_size = file.seek(SeekFrom::End(0))?;
+        let manifest_start = file_size - 16 - manifest_size;
+        file.seek(SeekFrom::Start(manifest_start))?;
+        let mut cbor_buf = vec![0u8; manifest_size as usize];
+        file.read_exact(&mut cbor_buf)?;
+
+        let manifest: Manifest = ciborium::from_reader(std::io::Cursor::new(&cbor_buf))
+            .map_err(Error::CborDeserialize)?;
+
+        // Truncate file at manifest start (remove old manifest+footer)
+        file.set_len(manifest_start)?;
+        file.seek(SeekFrom::Start(manifest_start))?;
+
+        Ok(Self {
+            writer: BufWriter::with_capacity(256 * 1024, file),
+            manifest,
+            current_offset: manifest_start,
+        })
+    }
 }
 
 impl<W: Write + Seek> Writer<W> {
@@ -95,6 +153,11 @@ impl<W: Write + Seek> Writer<W> {
     /// Sets global attributes on the manifest.
     pub fn set_attributes(&mut self, attrs: BTreeMap<String, ciborium::Value>) {
         self.manifest.attributes = Some(attrs);
+    }
+
+    /// Returns a mutable reference to the internal manifest.
+    pub(crate) fn manifest_mut(&mut self) -> &mut Manifest {
+        &mut self.manifest
     }
 
     /// Adds a dense object from raw bytes (FFI/unsafe usage).

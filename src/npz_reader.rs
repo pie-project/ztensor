@@ -244,22 +244,16 @@ impl NpzReader {
                 let npy_data = &mmap[entry_offset..entry_offset + entry_size];
                 let header = parse_npy_header(npy_data)?;
 
-                if header.fortran_order {
-                    return Err(Error::Other(format!(
-                        "Fortran-order arrays not supported: '{}'",
-                        tensor_name
-                    )));
-                }
+                let shape = if header.fortran_order {
+                    header.shape.into_iter().rev().collect()
+                } else {
+                    header.shape
+                };
 
                 let data_start = entry_offset + header.data_offset;
                 let data_len = entry_size - header.data_offset;
 
-                let obj = Object::dense(
-                    header.shape,
-                    header.dtype,
-                    data_start as u64,
-                    data_len as u64,
-                );
+                let obj = Object::dense(shape, header.dtype, data_start as u64, data_len as u64);
 
                 data_locations.insert(
                     tensor_name.clone(),
@@ -278,17 +272,16 @@ impl NpzReader {
 
                 let header = parse_npy_header(&npy_bytes)?;
 
-                if header.fortran_order {
-                    return Err(Error::Other(format!(
-                        "Fortran-order arrays not supported: '{}'",
-                        tensor_name
-                    )));
-                }
+                let shape = if header.fortran_order {
+                    header.shape.into_iter().rev().collect()
+                } else {
+                    header.shape
+                };
 
                 let raw_data = npy_bytes[header.data_offset..].to_vec();
                 let data_len = raw_data.len();
 
-                let obj = Object::dense(header.shape, header.dtype, 0, data_len as u64);
+                let obj = Object::dense(shape, header.dtype, 0, data_len as u64);
 
                 data_locations.insert(tensor_name.clone(), NpzDataLocation::Owned(raw_data));
                 objects.insert(tensor_name, obj);

@@ -180,6 +180,41 @@ enum Commands {
         delete_original: bool,
     },
 
+    /// Append tensors from one .zt file into another
+    #[command(
+        about = "Append tensors from a source .zt file into an existing .zt file.",
+        long_about = "Append all tensors from a source .zt file into a target .zt file.\n\
+            The target file is modified in-place. Duplicate tensor names cause an error.\n\n\
+            Example:\n  ztensor append model.zt --from extra_weights.zt\n"
+    )]
+    Append {
+        /// Target .zt file to append into
+        target: String,
+
+        /// Source .zt file containing tensors to append
+        #[arg(long = "from", required = true)]
+        source: String,
+    },
+
+    /// Remove tensors by name from a .zt file
+    #[command(
+        about = "Remove named tensors from a .zt file.",
+        long_about = "Remove one or more tensors by name from a .zt file, writing the result to a new file.\n\n\
+            Example:\n  ztensor remove model.zt unused_layer old_bias -o trimmed.zt\n"
+    )]
+    Remove {
+        /// Input .zt file
+        input: String,
+
+        /// Tensor names to remove
+        #[arg(required = true)]
+        names: Vec<String>,
+
+        /// Output .zt file
+        #[arg(short = 'o', long, required = true)]
+        output: String,
+    },
+
     /// Download safetensors from HuggingFace and convert to zTensor format
     #[command(
         about = "Download safetensors from a HuggingFace repository and convert to zTensor.",
@@ -330,6 +365,102 @@ fn main() -> Result<()> {
             let preserve = !delete_original;
             merge_ztensor_files(inputs, output, preserve)?;
             println!("Successfully merged {} files into {}", inputs.len(), output);
+        }
+        Some(Commands::Append { target, source }) => {
+            if !Path::new(target).exists() {
+                bail!("Target file '{}' does not exist.", target);
+            }
+            if !Path::new(source).exists() {
+                bail!("Source file '{}' does not exist.", source);
+            }
+
+            let src_reader = ztensor::Reader::open_any_path(source)
+                .map_err(|e| anyhow::anyhow!("Failed to open source '{}': {}", source, e))?;
+            let src_objects = src_reader.tensors().clone();
+
+            // Check for duplicate names upfront before modifying the target file.
+            // Writer::append truncates the manifest, so we must validate first.
+            {
+                let target_reader = ztensor::Reader::open(target)
+                    .map_err(|e| anyhow::anyhow!("Failed to read target '{}': {}", target, e))?;
+                let existing = target_reader.tensors();
+                for (name, _) in &src_objects {
+                    if existing.contains_key(name.as_str()) {
+                        bail!(
+                            "Duplicate tensor name '{}' already exists in target '{}'",
+                            name,
+                            target
+                        );
+                    }
+                }
+            }
+
+            let mut writer = ztensor::Writer::append(target)
+                .map_err(|e| anyhow::anyhow!("Failed to open target '{}': {}", target, e))?;
+
+            let mut count = 0;
+            for (name, obj) in &src_objects {
+                if obj.format != ztensor::Format::Dense {
+                    eprintln!("Skipping non-dense tensor '{}'", name);
+                    continue;
+                }
+                let data_comp = obj
+                    .components
+                    .get("data")
+                    .ok_or_else(|| anyhow::anyhow!("Missing data component for '{}'", name))?;
+                let data = src_reader
+                    .read(name, true)
+                    .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+                let compression = match data_comp.encoding {
+                    ztensor::Encoding::Zstd => ztensor::writer::Compression::Zstd(3),
+                    ztensor::Encoding::Raw => ztensor::writer::Compression::Raw,
+                };
+
+                let checksum = match &data_comp.digest {
+                    Some(d) if d.starts_with("sha256:") => ztensor::Checksum::Sha256,
+                    Some(d) if d.starts_with("crc32c:") => ztensor::Checksum::Crc32c,
+                    _ => ztensor::Checksum::None,
+                };
+
+                writer
+                    .add_bytes(
+                        name,
+                        obj.shape.clone(),
+                        data_comp.dtype,
+                        compression,
+                        &data,
+                        checksum,
+                    )
+                    .map_err(|e| anyhow::anyhow!("{}", e))?;
+                count += 1;
+            }
+
+            writer.finish().map_err(|e| anyhow::anyhow!("{}", e))?;
+            println!(
+                "Successfully appended {} tensor(s) from {} into {}",
+                count, source, target
+            );
+        }
+        Some(Commands::Remove {
+            input,
+            names,
+            output,
+        }) => {
+            if Path::new(output).exists() {
+                bail!(
+                    "Output file '{}' already exists. Please remove it or choose a different name.",
+                    output
+                );
+            }
+            let name_refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
+            ztensor::remove_tensors(input, output, &name_refs)
+                .map_err(|e| anyhow::anyhow!("{}", e))?;
+            println!(
+                "Successfully removed {} tensor(s), wrote result to {}",
+                names.len(),
+                output
+            );
         }
         Some(Commands::DownloadHf {
             repo,

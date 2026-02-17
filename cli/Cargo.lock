@@ -2477,11 +2477,12 @@ dependencies = [
 
 [[package]]
 name = "ztensor"
-version = "1.2.0"
+version = "1.2.1"
 dependencies = [
  "bytemuck",
  "ciborium",
  "crc32c",
+ "flate2",
  "half",
  "hex",
  "memmap2",
@@ -2495,7 +2496,7 @@ dependencies = [
 
 [[package]]
 name = "ztensor-cli"
-version = "1.2.0"
+version = "1.2.1"
 dependencies = [
  "anyhow",
  "clap",

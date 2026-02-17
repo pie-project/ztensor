@@ -981,6 +981,7 @@ dependencies = [
  "bytemuck",
  "ciborium",
  "crc32c",
+ "flate2",
  "half",
  "hex",
  "libc",

@@ -30,6 +30,34 @@ pub fn build_npy(descr: &str, shape: &[usize], data: &[u8]) -> Vec<u8> {
     npy
 }
 
+/// Build a Fortran-order .npy file in memory.
+pub fn build_npy_fortran(descr: &str, shape: &[usize], data: &[u8]) -> Vec<u8> {
+    let shape_str = if shape.len() == 1 {
+        format!("({},)", shape[0])
+    } else {
+        let parts: Vec<String> = shape.iter().map(|d| d.to_string()).collect();
+        format!("({})", parts.join(", "))
+    };
+    let header_dict = format!(
+        "{{'descr': '{}', 'fortran_order': True, 'shape': {} }}",
+        descr, shape_str
+    );
+    let preamble_len = 10;
+    let total = preamble_len + header_dict.len() + 1;
+    let pad = ((total + 63) / 64) * 64 - total;
+    let padded_header = format!("{}{}\n", header_dict, " ".repeat(pad));
+
+    let mut npy = Vec::new();
+    npy.extend_from_slice(b"\x93NUMPY");
+    npy.push(1);
+    npy.push(0);
+    let header_len = padded_header.len() as u16;
+    npy.extend_from_slice(&header_len.to_le_bytes());
+    npy.extend_from_slice(padded_header.as_bytes());
+    npy.extend_from_slice(data);
+    npy
+}
+
 /// Build an .npz file (ZIP of .npy entries) with STORED compression.
 pub fn build_npz_file(entries: Vec<(&str, &str, &[usize], &[u8])>) -> NamedTempFile {
     let mut file = NamedTempFile::with_suffix(".npz").unwrap();

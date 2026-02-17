@@ -13,7 +13,14 @@ Example:
     ['weights', 'bias']
 """
 
-from ._ztensor import Reader, Writer, TensorMetadata, open
+from ._ztensor import (
+    Reader,
+    Writer,
+    TensorMetadata,
+    open,
+    remove_tensors,
+    replace_tensor,
+)
 
 import numpy as np
 
@@ -78,4 +85,12 @@ if TORCH_AVAILABLE:
     DTYPE_ZT_TO_TORCH = {v: k for k, v in DTYPE_TORCH_TO_ZT.items()}
 
 
-__all__ = ["Reader", "Writer", "TensorMetadata", "ZTensorError", "open"]
+__all__ = [
+    "Reader",
+    "Writer",
+    "TensorMetadata",
+    "ZTensorError",
+    "open",
+    "remove_tensors",
+    "replace_tensor",
+]

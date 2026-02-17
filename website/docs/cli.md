@@ -85,6 +85,26 @@ Converts legacy v0.1.0 files to the current v1.2.0 format.
 ztensor migrate old_model.zt -o new_model.zt
 ```
 
+### `append` - Append tensors
+
+Appends all tensors from a source `.zt` file into an existing target `.zt` file. The target file is modified in-place. Compression and checksum settings from the source are preserved.
+
+```bash
+ztensor append model.zt --from extra_weights.zt
+```
+
+Errors if any tensor name in the source already exists in the target.
+
+### `remove` - Remove tensors
+
+Removes one or more tensors by name from a `.zt` file, writing the result to a new file.
+
+```bash
+ztensor remove model.zt unused_layer old_bias -o trimmed.zt
+```
+
+Errors if any specified name is not found in the input.
+
 ### `download-hf` - Download from HuggingFace
 
 Downloads safetensors from HuggingFace Hub and converts to zTensor.

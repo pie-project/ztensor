@@ -14,6 +14,8 @@ cargo install ztensor-cli
 - Convert from multiple formats to zTensor (auto-detected from extension)
 - Download from HuggingFace and convert to zTensor in one step
 - Merge multiple `.zt` files into one
+- Append tensors from one `.zt` file into another
+- Remove tensors by name from a `.zt` file
 - Compress and decompress zTensor files (zstd encoding)
 - Migrate legacy v0.1.0 files to v1.2.0
 
@@ -46,6 +48,12 @@ ztensor merge part1.zt part2.zt -o merged.zt
 
 # Download from HuggingFace
 ztensor download-hf microsoft/resnet-18 -o ./models
+
+# Append tensors from another file
+ztensor append model.zt --from extra_weights.zt
+
+# Remove tensors by name
+ztensor remove model.zt unused_layer -o trimmed.zt
 
 # Compress / decompress
 ztensor compress raw.zt -o compressed.zt

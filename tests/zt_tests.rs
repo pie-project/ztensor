@@ -4,7 +4,7 @@ use half::{bf16, f16};
 use tempfile::NamedTempFile;
 
 use ztensor::writer::Compression;
-use ztensor::{Checksum, DType, Encoding, Error, Format, Reader, TensorReader, Writer};
+use ztensor::{Checksum, DType, Encoding, Error, Format, Reader, Writer};
 
 mod common;
 use common::data_generators::*;
@@ -485,4 +485,448 @@ fn writer_rejects_byte_size_overflow() {
         Checksum::None,
     );
     assert!(result.is_err(), "byte size should overflow");
+}
+
+// ----- Append tests -----
+
+#[test]
+fn zt_append_single_tensor() {
+    let mut file = NamedTempFile::with_suffix(".zt").unwrap();
+    {
+        let mut w = Writer::new(&mut file).unwrap();
+        w.add("a", &[3], &[1.0f32, 2.0, 3.0]).unwrap();
+        w.add("b", &[2], &[4.0f32, 5.0]).unwrap();
+        w.finish().unwrap();
+    }
+
+    {
+        let mut w = Writer::append(file.path()).unwrap();
+        w.add("c", &[2], &[6.0f32, 7.0]).unwrap();
+        w.finish().unwrap();
+    }
+
+    let r = Reader::open(file.path()).unwrap();
+    assert_eq!(r.tensors().len(), 3);
+    assert_eq!(r.read_as::<f32>("a").unwrap(), vec![1.0, 2.0, 3.0]);
+    assert_eq!(r.read_as::<f32>("b").unwrap(), vec![4.0, 5.0]);
+    assert_eq!(r.read_as::<f32>("c").unwrap(), vec![6.0, 7.0]);
+}
+
+#[test]
+fn zt_append_preserves_existing() {
+    let mut file = NamedTempFile::with_suffix(".zt").unwrap();
+    let original_data = make_f32_data(1024);
+    {
+        let mut w = Writer::new(&mut file).unwrap();
+        w.add("weights", &[1024], &original_data).unwrap();
+        w.finish().unwrap();
+    }
+
+    {
+        let mut w = Writer::append(file.path()).unwrap();
+        w.add("bias", &[4], &[0.1f32, 0.2, 0.3, 0.4]).unwrap();
+        w.finish().unwrap();
+    }
+
+    let r = Reader::open(file.path()).unwrap();
+    assert_eq!(r.read_as::<f32>("weights").unwrap(), original_data);
+    assert_eq!(r.read_as::<f32>("bias").unwrap(), vec![0.1, 0.2, 0.3, 0.4]);
+}
+
+#[test]
+fn zt_append_duplicate_name_errors() {
+    let mut file = NamedTempFile::with_suffix(".zt").unwrap();
+    {
+        let mut w = Writer::new(&mut file).unwrap();
+        w.add("a", &[2], &[1.0f32, 2.0]).unwrap();
+        w.finish().unwrap();
+    }
+
+    let mut w = Writer::append(file.path()).unwrap();
+    let result = w.add("a", &[2], &[3.0f32, 4.0]);
+    assert!(result.is_err(), "duplicate name should error");
+}
+
+#[test]
+fn zt_append_compressed() {
+    let mut file = NamedTempFile::with_suffix(".zt").unwrap();
+    let data1 = make_f32_data(256);
+    {
+        let mut w = Writer::new(&mut file).unwrap();
+        w.add_with("t1", &[256], &data1)
+            .compress(Compression::Zstd(3))
+            .write()
+            .unwrap();
+        w.finish().unwrap();
+    }
+
+    let data2 = make_f32_data(128);
+    {
+        let mut w = Writer::append(file.path()).unwrap();
+        w.add_with("t2", &[128], &data2)
+            .compress(Compression::Zstd(3))
+            .write()
+            .unwrap();
+        w.finish().unwrap();
+    }
+
+    let r = Reader::open(file.path()).unwrap();
+    assert_eq!(r.read_as::<f32>("t1").unwrap(), data1);
+    assert_eq!(r.read_as::<f32>("t2").unwrap(), data2);
+}
+
+#[test]
+fn zt_append_mmap_readable() {
+    let mut file = NamedTempFile::with_suffix(".zt").unwrap();
+    {
+        let mut w = Writer::new(&mut file).unwrap();
+        w.add("a", &[4], &[1.0f32, 2.0, 3.0, 4.0]).unwrap();
+        w.finish().unwrap();
+    }
+
+    {
+        let mut w = Writer::append(file.path()).unwrap();
+        w.add("b", &[3], &[5.0f32, 6.0, 7.0]).unwrap();
+        w.finish().unwrap();
+    }
+
+    // Verify mmap reader also works on appended file
+    let r = Reader::open_mmap(file.path()).unwrap();
+    assert_eq!(r.read_as::<f32>("a").unwrap(), vec![1.0, 2.0, 3.0, 4.0]);
+    assert_eq!(r.read_as::<f32>("b").unwrap(), vec![5.0, 6.0, 7.0]);
+}
+
+// ----- Remove tests -----
+
+#[test]
+fn zt_remove_single_tensor() {
+    let mut file = NamedTempFile::with_suffix(".zt").unwrap();
+    let output = NamedTempFile::with_suffix(".zt").unwrap();
+    {
+        let mut w = Writer::new(&mut file).unwrap();
+        w.add("a", &[2], &[1.0f32, 2.0]).unwrap();
+        w.add("b", &[3], &[3.0f32, 4.0, 5.0]).unwrap();
+        w.add("c", &[1], &[6.0f32]).unwrap();
+        w.finish().unwrap();
+    }
+
+    ztensor::remove_tensors(file.path(), output.path(), &["b"]).unwrap();
+
+    let r = Reader::open(output.path()).unwrap();
+    assert_eq!(r.tensors().len(), 2);
+    assert_eq!(r.read_as::<f32>("a").unwrap(), vec![1.0, 2.0]);
+    assert_eq!(r.read_as::<f32>("c").unwrap(), vec![6.0]);
+    assert!(r.get("b").is_none());
+}
+
+#[test]
+fn zt_remove_multiple_tensors() {
+    let mut file = NamedTempFile::with_suffix(".zt").unwrap();
+    let output = NamedTempFile::with_suffix(".zt").unwrap();
+    {
+        let mut w = Writer::new(&mut file).unwrap();
+        w.add("a", &[2], &[1.0f32, 2.0]).unwrap();
+        w.add("b", &[2], &[3.0f32, 4.0]).unwrap();
+        w.add("c", &[2], &[5.0f32, 6.0]).unwrap();
+        w.finish().unwrap();
+    }
+
+    ztensor::remove_tensors(file.path(), output.path(), &["a", "c"]).unwrap();
+
+    let r = Reader::open(output.path()).unwrap();
+    assert_eq!(r.tensors().len(), 1);
+    assert_eq!(r.read_as::<f32>("b").unwrap(), vec![3.0, 4.0]);
+}
+
+#[test]
+fn zt_remove_nonexistent_errors() {
+    let mut file = NamedTempFile::with_suffix(".zt").unwrap();
+    let output = NamedTempFile::with_suffix(".zt").unwrap();
+    {
+        let mut w = Writer::new(&mut file).unwrap();
+        w.add("a", &[2], &[1.0f32, 2.0]).unwrap();
+        w.finish().unwrap();
+    }
+
+    match ztensor::remove_tensors(file.path(), output.path(), &["nonexistent"]) {
+        Err(Error::ObjectNotFound(name)) => assert_eq!(name, "nonexistent"),
+        other => panic!("Expected ObjectNotFound, got {:?}", other),
+    }
+}
+
+// ----- Replace tests -----
+
+#[test]
+fn zt_replace_basic() {
+    let mut file = NamedTempFile::with_suffix(".zt").unwrap();
+    let original = [1.0f32, 2.0, 3.0, 4.0];
+    let replacement = [10.0f32, 20.0, 30.0, 40.0];
+    {
+        let mut w = Writer::new(&mut file).unwrap();
+        w.add("t", &[4], &original).unwrap();
+        w.finish().unwrap();
+    }
+
+    ztensor::replace_tensor(file.path(), "t", bytemuck::cast_slice(&replacement)).unwrap();
+
+    let r = Reader::open(file.path()).unwrap();
+    assert_eq!(r.read_as::<f32>("t").unwrap(), replacement);
+}
+
+#[test]
+fn zt_replace_preserves_other_tensors() {
+    let mut file = NamedTempFile::with_suffix(".zt").unwrap();
+    let data_a = make_f32_data(64);
+    let data_b = make_f32_data(32);
+    let new_b: Vec<f32> = (0..32).map(|i| i as f32 * 100.0).collect();
+    {
+        let mut w = Writer::new(&mut file).unwrap();
+        w.add("a", &[64], &data_a).unwrap();
+        w.add("b", &[32], &data_b).unwrap();
+        w.finish().unwrap();
+    }
+
+    ztensor::replace_tensor(file.path(), "b", bytemuck::cast_slice(&new_b)).unwrap();
+
+    let r = Reader::open(file.path()).unwrap();
+    assert_eq!(
+        r.read_as::<f32>("a").unwrap(),
+        data_a,
+        "other tensor should be unchanged"
+    );
+    assert_eq!(r.read_as::<f32>("b").unwrap(), new_b);
+}
+
+#[test]
+fn zt_replace_recomputes_crc32c() {
+    let mut file = NamedTempFile::with_suffix(".zt").unwrap();
+    let original = [1.0f32, 2.0, 3.0];
+    let replacement = [4.0f32, 5.0, 6.0];
+    {
+        let mut w = Writer::new(&mut file).unwrap();
+        w.add_with("t", &[3], &original)
+            .checksum(Checksum::Crc32c)
+            .write()
+            .unwrap();
+        w.finish().unwrap();
+    }
+
+    let old_digest = {
+        let r = Reader::open(file.path()).unwrap();
+        r.get("t")
+            .unwrap()
+            .components
+            .get("data")
+            .unwrap()
+            .digest
+            .clone()
+    };
+
+    ztensor::replace_tensor(file.path(), "t", bytemuck::cast_slice(&replacement)).unwrap();
+
+    let r = Reader::open(file.path()).unwrap();
+    let new_digest = r
+        .get("t")
+        .unwrap()
+        .components
+        .get("data")
+        .unwrap()
+        .digest
+        .clone();
+    assert_ne!(old_digest, new_digest, "checksum should be recomputed");
+    assert!(new_digest.unwrap().starts_with("crc32c:0x"));
+    // Verify data reads correctly (checksum verification is automatic)
+    assert_eq!(r.read_as::<f32>("t").unwrap(), replacement);
+}
+
+#[test]
+fn zt_replace_recomputes_sha256() {
+    let mut file = NamedTempFile::with_suffix(".zt").unwrap();
+    let original = [1.0f32, 2.0, 3.0];
+    let replacement = [4.0f32, 5.0, 6.0];
+    {
+        let mut w = Writer::new(&mut file).unwrap();
+        w.add_with("t", &[3], &original)
+            .checksum(Checksum::Sha256)
+            .write()
+            .unwrap();
+        w.finish().unwrap();
+    }
+
+    ztensor::replace_tensor(file.path(), "t", bytemuck::cast_slice(&replacement)).unwrap();
+
+    let r = Reader::open(file.path()).unwrap();
+    let digest = r
+        .get("t")
+        .unwrap()
+        .components
+        .get("data")
+        .unwrap()
+        .digest
+        .as_ref()
+        .unwrap();
+    assert!(digest.starts_with("sha256:"));
+    assert_eq!(r.read_as::<f32>("t").unwrap(), replacement);
+}
+
+#[test]
+fn zt_replace_size_mismatch_errors() {
+    let mut file = NamedTempFile::with_suffix(".zt").unwrap();
+    {
+        let mut w = Writer::new(&mut file).unwrap();
+        w.add("t", &[4], &[1.0f32, 2.0, 3.0, 4.0]).unwrap();
+        w.finish().unwrap();
+    }
+
+    // Too short
+    let result = ztensor::replace_tensor(file.path(), "t", &[0u8; 8]);
+    assert!(result.is_err(), "wrong byte size should error");
+
+    // Too long
+    let result = ztensor::replace_tensor(file.path(), "t", &[0u8; 32]);
+    assert!(result.is_err(), "wrong byte size should error");
+}
+
+#[test]
+fn zt_replace_compressed_errors() {
+    let mut file = NamedTempFile::with_suffix(".zt").unwrap();
+    let data = make_f32_data(256);
+    {
+        let mut w = Writer::new(&mut file).unwrap();
+        w.add_with("t", &[256], &data)
+            .compress(Compression::Zstd(3))
+            .write()
+            .unwrap();
+        w.finish().unwrap();
+    }
+
+    let new_data = vec![0u8; 256 * 4];
+    let result = ztensor::replace_tensor(file.path(), "t", &new_data);
+    assert!(
+        result.is_err(),
+        "compressed tensor should not be replaceable"
+    );
+}
+
+#[test]
+fn zt_replace_nonexistent_errors() {
+    let mut file = NamedTempFile::with_suffix(".zt").unwrap();
+    {
+        let mut w = Writer::new(&mut file).unwrap();
+        w.add("a", &[2], &[1.0f32, 2.0]).unwrap();
+        w.finish().unwrap();
+    }
+
+    match ztensor::replace_tensor(file.path(), "missing", &[0u8; 8]) {
+        Err(Error::ObjectNotFound(name)) => assert_eq!(name, "missing"),
+        other => panic!("Expected ObjectNotFound, got {:?}", other),
+    }
+}
+
+#[test]
+fn zt_replace_mmap_readable() {
+    let mut file = NamedTempFile::with_suffix(".zt").unwrap();
+    let original = [1.0f32, 2.0, 3.0];
+    let replacement = [7.0f32, 8.0, 9.0];
+    {
+        let mut w = Writer::new(&mut file).unwrap();
+        w.add("t", &[3], &original).unwrap();
+        w.finish().unwrap();
+    }
+
+    ztensor::replace_tensor(file.path(), "t", bytemuck::cast_slice(&replacement)).unwrap();
+
+    // Verify mmap reader works on replaced file
+    let r = Reader::open_mmap(file.path()).unwrap();
+    assert_eq!(r.view_as::<f32>("t").unwrap(), &replacement[..]);
+}
+
+#[test]
+fn zt_replace_after_append() {
+    let mut file = NamedTempFile::with_suffix(".zt").unwrap();
+    {
+        let mut w = Writer::new(&mut file).unwrap();
+        w.add("a", &[3], &[1.0f32, 2.0, 3.0]).unwrap();
+        w.finish().unwrap();
+    }
+    {
+        let mut w = Writer::append(file.path()).unwrap();
+        w.add("b", &[2], &[4.0f32, 5.0]).unwrap();
+        w.finish().unwrap();
+    }
+
+    // Replace the appended tensor
+    let new_b = [40.0f32, 50.0];
+    ztensor::replace_tensor(file.path(), "b", bytemuck::cast_slice(&new_b)).unwrap();
+
+    let r = Reader::open(file.path()).unwrap();
+    assert_eq!(r.read_as::<f32>("a").unwrap(), vec![1.0, 2.0, 3.0]);
+    assert_eq!(r.read_as::<f32>("b").unwrap(), new_b);
+}
+
+#[test]
+fn zt_replace_multiple_tensors() {
+    let mut file = NamedTempFile::with_suffix(".zt").unwrap();
+    {
+        let mut w = Writer::new(&mut file).unwrap();
+        w.add("a", &[2], &[1.0f32, 2.0]).unwrap();
+        w.add("b", &[2], &[3.0f32, 4.0]).unwrap();
+        w.add("c", &[2], &[5.0f32, 6.0]).unwrap();
+        w.finish().unwrap();
+    }
+
+    let new_a = [10.0f32, 20.0];
+    let new_c = [50.0f32, 60.0];
+    ztensor::replace_tensor(file.path(), "a", bytemuck::cast_slice(&new_a)).unwrap();
+    ztensor::replace_tensor(file.path(), "c", bytemuck::cast_slice(&new_c)).unwrap();
+
+    let r = Reader::open(file.path()).unwrap();
+    assert_eq!(r.read_as::<f32>("a").unwrap(), new_a);
+    assert_eq!(
+        r.read_as::<f32>("b").unwrap(),
+        vec![3.0, 4.0],
+        "untouched tensor unchanged"
+    );
+    assert_eq!(r.read_as::<f32>("c").unwrap(), new_c);
+}
+
+#[test]
+fn zt_replace_same_tensor_twice() {
+    let mut file = NamedTempFile::with_suffix(".zt").unwrap();
+    {
+        let mut w = Writer::new(&mut file).unwrap();
+        w.add("t", &[3], &[1.0f32, 2.0, 3.0]).unwrap();
+        w.finish().unwrap();
+    }
+
+    let v1 = [10.0f32, 20.0, 30.0];
+    let v2 = [100.0f32, 200.0, 300.0];
+    ztensor::replace_tensor(file.path(), "t", bytemuck::cast_slice(&v1)).unwrap();
+    ztensor::replace_tensor(file.path(), "t", bytemuck::cast_slice(&v2)).unwrap();
+
+    let r = Reader::open(file.path()).unwrap();
+    assert_eq!(r.read_as::<f32>("t").unwrap(), v2);
+}
+
+#[test]
+fn zt_replace_sparse_errors() {
+    let mut file = NamedTempFile::with_suffix(".zt").unwrap();
+    {
+        let mut w = Writer::new(&mut file).unwrap();
+        w.add_csr(
+            "sparse",
+            vec![2, 3],
+            DType::F32,
+            &[1.0f32, 2.0],
+            &[1u64, 2],
+            &[0u64, 1, 2],
+            Compression::Raw,
+            Checksum::None,
+        )
+        .unwrap();
+        w.finish().unwrap();
+    }
+
+    let result = ztensor::replace_tensor(file.path(), "sparse", &[0u8; 8]);
+    assert!(result.is_err(), "sparse tensor should not be replaceable");
 }

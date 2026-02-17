@@ -123,6 +123,89 @@ fn npz_error_not_found() {
     }
 }
 
+// ----- Fortran-order tests -----
+
+#[test]
+fn npz_fortran_order_1d() {
+    // 1D: fortran_order doesn't change layout, shape stays [4]
+    let data: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0];
+    let bytes = bytemuck::cast_slice::<f32, u8>(&data);
+    let npy_data = build_npy_fortran("<f4", &[4], bytes);
+
+    let mut file = NamedTempFile::with_suffix(".npz").unwrap();
+    {
+        let mut zip = zip::ZipWriter::new(&mut file);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        zip.start_file("arr.npy", options).unwrap();
+        std::io::Write::write_all(&mut zip, &npy_data).unwrap();
+        zip.finish().unwrap();
+    }
+    file.flush().unwrap();
+
+    let reader = NpzReader::open(file.path()).unwrap();
+    let obj = reader.get("arr").unwrap();
+    assert_eq!(obj.shape, vec![4]); // 1D reversed is still [4]
+
+    let result: Vec<f32> = reader.read_as("arr").unwrap();
+    assert_eq!(result, data);
+}
+
+#[test]
+fn npz_fortran_order_2d() {
+    // F-order [3,2] data: columns are contiguous in memory
+    // Memory layout: [a00, a10, a20, a01, a11, a21]
+    // = column 0 first, then column 1
+    // This is identical to C-order [2,3] (rows contiguous)
+    let data: Vec<f32> = vec![1.0, 3.0, 5.0, 2.0, 4.0, 6.0];
+    let bytes = bytemuck::cast_slice::<f32, u8>(&data);
+    let npy_data = build_npy_fortran("<f4", &[3, 2], bytes);
+
+    let mut file = NamedTempFile::with_suffix(".npz").unwrap();
+    {
+        let mut zip = zip::ZipWriter::new(&mut file);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        zip.start_file("mat.npy", options).unwrap();
+        std::io::Write::write_all(&mut zip, &npy_data).unwrap();
+        zip.finish().unwrap();
+    }
+    file.flush().unwrap();
+
+    let reader = NpzReader::open(file.path()).unwrap();
+    let obj = reader.get("mat").unwrap();
+    // F-order [3,2] → shape reversed to [2,3]
+    assert_eq!(obj.shape, vec![2, 3]);
+
+    let result: Vec<f32> = reader.read_as("mat").unwrap();
+    assert_eq!(result, data);
+}
+
+#[test]
+fn npz_fortran_order_compressed() {
+    let data: Vec<f32> = vec![1.0, 3.0, 5.0, 2.0, 4.0, 6.0];
+    let bytes = bytemuck::cast_slice::<f32, u8>(&data);
+    let npy_data = build_npy_fortran("<f4", &[3, 2], bytes);
+
+    let mut file = NamedTempFile::with_suffix(".npz").unwrap();
+    {
+        let mut zip = zip::ZipWriter::new(&mut file);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        zip.start_file("mat.npy", options).unwrap();
+        std::io::Write::write_all(&mut zip, &npy_data).unwrap();
+        zip.finish().unwrap();
+    }
+    file.flush().unwrap();
+
+    let reader = NpzReader::open(file.path()).unwrap();
+    let obj = reader.get("mat").unwrap();
+    assert_eq!(obj.shape, vec![2, 3]);
+
+    let result: Vec<f32> = reader.read_as("mat").unwrap();
+    assert_eq!(result, data);
+}
+
 // ----- Robustness tests -----
 
 #[test]

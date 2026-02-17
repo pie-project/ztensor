@@ -1,16 +1,17 @@
 //! HDF5 format reader.
 //!
 //! Provides read-only access to `.h5` / `.hdf5` files through the unified
-//! `TensorReader` API. Uses memory mapping for zero-copy access.
+//! `TensorReader` API. Supports contiguous and chunked storage layouts
+//! with optional deflate/shuffle filter pipelines.
 //!
-//! Scoped to superblock v0/v1, contiguous storage layout, and IEEE
-//! float/integer datatypes. This covers the common case of Keras/h5py
-//! model weight files saved with default settings.
+//! Scoped to superblock v0/v1, IEEE float/integer datatypes.
+//! This covers Keras/h5py model weight files.
 //!
 //! Requires the `hdf5` feature.
 
 use std::collections::BTreeMap;
 use std::fs::File;
+use std::io::Read;
 use std::path::Path;
 
 use memmap2::{Mmap, MmapOptions};
@@ -31,6 +32,7 @@ const HEAP_SIGNATURE: &[u8; 4] = b"HEAP";
 const MSG_DATASPACE: u16 = 0x0001;
 const MSG_DATATYPE: u16 = 0x0003;
 const MSG_DATA_LAYOUT: u16 = 0x0008;
+const MSG_FILTER_PIPELINE: u16 = 0x000B;
 const MSG_ATTRIBUTE: u16 = 0x000C;
 const MSG_CONTINUATION: u16 = 0x0010;
 const MSG_SYMBOL_TABLE: u16 = 0x0011;
@@ -39,6 +41,11 @@ const MSG_SYMBOL_TABLE: u16 = 0x0011;
 
 const DT_CLASS_FIXED_POINT: u8 = 0; // integer
 const DT_CLASS_FLOATING_POINT: u8 = 1; // float
+
+// ---- HDF5 filter IDs ----
+
+const FILTER_DEFLATE: u16 = 1;
+const FILTER_SHUFFLE: u16 = 2;
 
 // ---- Limits ----
 
@@ -135,27 +142,74 @@ fn read_cstring(data: &[u8], pos: usize) -> Result<String, Error> {
         .map_err(|e| Error::InvalidFileStructure(format!("Invalid UTF-8 in HDF5 string: {}", e)))
 }
 
+// ---- Filter pipeline ----
+
+/// A single filter in the HDF5 filter pipeline.
+#[derive(Clone, Debug)]
+struct Hdf5Filter {
+    id: u16,
+    _cd_values: Vec<u32>,
+}
+
+// ---- Data layout result ----
+
+/// Result of parsing a data layout message.
+enum DataLayoutResult {
+    Contiguous {
+        addr: u64,
+        size: u64,
+    },
+    Chunked {
+        btree_addr: u64,
+        chunk_dims: Vec<u32>,
+    },
+    Unsupported,
+}
+
+// ---- Data location ----
+
+/// Where a dataset's data lives after parsing.
+enum Hdf5DataLocation {
+    /// Contiguous: zero-copy range in the mmap.
+    MmapRange { offset: usize, length: usize },
+    /// Chunked/compressed: reassembled into owned buffer.
+    Owned(Vec<u8>),
+}
+
 // ---- Parsed dataset info ----
 
 /// Info extracted from an HDF5 dataset's object header.
 struct DatasetInfo {
     dtype: DType,
     shape: Vec<u64>,
-    data_addr: u64,
-    data_size: u64,
+    layout: DataLayoutResult,
+    filters: Vec<Hdf5Filter>,
+}
+
+// ---- Chunk location for B-tree type 1 ----
+
+/// A single chunk's location in the file.
+struct ChunkLocation {
+    /// Linear byte offset within the reassembled dataset (for sorting).
+    linear_offset: u64,
+    /// Address in file where the (possibly compressed) chunk data starts.
+    file_addr: u64,
+    /// Size of the chunk data on disk (possibly compressed).
+    chunk_size: u32,
+    /// Filter mask: bit i set means filter i was NOT applied to this chunk.
+    filter_mask: u32,
 }
 
 // ---- Hdf5Reader ----
 
 /// Reader for HDF5 (.h5 / .hdf5) files.
 ///
-/// Uses memory mapping for efficient zero-copy access to tensor data.
-/// Supports superblock v0/v1 with contiguous storage and IEEE numeric types.
+/// Uses memory mapping for efficient access to tensor data.
+/// Supports contiguous and chunked storage with deflate/shuffle filters.
 pub struct Hdf5Reader {
     mmap: Mmap,
     pub manifest: Manifest,
-    /// Maps tensor name -> (byte_offset, byte_length) in the mmap.
-    data_ranges: BTreeMap<String, (usize, usize)>,
+    data_locations: BTreeMap<String, Hdf5DataLocation>,
 }
 
 impl Hdf5Reader {
@@ -173,7 +227,6 @@ impl Hdf5Reader {
         let data = &mmap[..];
 
         // 1. Find and validate superblock
-        //    HDF5 superblock can be at offset 0, 512, 1024, 2048, ... (powers of 2 starting at 512)
         let sb_offset = find_superblock(data)?;
 
         // 2. Parse superblock v0 or v1
@@ -181,7 +234,7 @@ impl Hdf5Reader {
 
         // 3. Traverse the root group to collect datasets
         let mut objects = BTreeMap::new();
-        let mut data_ranges = BTreeMap::new();
+        let mut data_locations = BTreeMap::new();
 
         traverse_group(
             data,
@@ -190,7 +243,7 @@ impl Hdf5Reader {
             root_heap_addr,
             "",
             &mut objects,
-            &mut data_ranges,
+            &mut data_locations,
             0,
         )?;
 
@@ -203,17 +256,37 @@ impl Hdf5Reader {
         Ok(Self {
             mmap,
             manifest,
-            data_ranges,
+            data_locations,
         })
     }
 
     /// Gets a zero-copy reference to an object's raw data.
     pub fn view(&self, name: &str) -> Result<&[u8], Error> {
-        let (offset, length) = self
-            .data_ranges
+        match self.data_locations.get(name) {
+            Some(Hdf5DataLocation::MmapRange { offset, length }) => {
+                Ok(&self.mmap[*offset..*offset + *length])
+            }
+            Some(Hdf5DataLocation::Owned(data)) => Ok(data.as_slice()),
+            None => Err(Error::ObjectNotFound(name.to_string())),
+        }
+    }
+
+    /// Reads tensor data as a typed vector.
+    pub fn read_as<T: crate::reader::TensorElement>(&self, name: &str) -> Result<Vec<T>, Error> {
+        let dtype = self
+            .manifest
+            .objects
             .get(name)
-            .ok_or_else(|| Error::ObjectNotFound(name.to_string()))?;
-        Ok(&self.mmap[*offset..*offset + *length])
+            .ok_or_else(|| Error::ObjectNotFound(name.to_string()))?
+            .data_dtype()?;
+        if T::DTYPE != dtype {
+            return Err(Error::TypeMismatch {
+                expected: dtype.as_str().to_string(),
+                found: std::any::type_name::<T>().to_string(),
+                context: format!("object '{}'", name),
+            });
+        }
+        crate::reader::bytes_to_typed_vec(self.view(name)?)
     }
 }
 
@@ -262,22 +335,6 @@ fn parse_superblock(data: &[u8], sb_offset: usize) -> Result<(Hdf5Ctx, u64, u64)
         )));
     }
 
-    // Superblock layout after magic (at pos = sb_offset + 8):
-    //   +0: sb_version (1)
-    //   +1: free_space_version (1)
-    //   +2: root_group_sttab_version (1)
-    //   +3: reserved (1)
-    //   +4: shared_header_msg_version (1)
-    //   +5: sizeof_offsets (1)
-    //   +6: sizeof_lengths (1)
-    //   +7: reserved (1)
-    //   +8..9: group_leaf_node_K (2)
-    //   +10..11: group_internal_node_K (2)
-    //   +12..15: consistency_flags (4)                [v0]
-    //     OR
-    //   +12..13: indexed_storage_internal_node_K (2)  [v1]
-    //   +14..15: reserved (2)                         [v1]
-    //   +16..19: consistency_flags (4)                [v1]
     let offset_size = read_u8(data, pos + 5)? as usize;
     let length_size = read_u8(data, pos + 6)? as usize;
 
@@ -289,9 +346,9 @@ fn parse_superblock(data: &[u8], sb_offset: usize) -> Result<(Hdf5Ctx, u64, u64)
     }
 
     let var_start = if sb_version == 0 {
-        pos + 8 + 2 + 2 + 4 // 8 fixed bytes + leaf_K(2) + internal_K(2) + flags(4)
+        pos + 8 + 2 + 2 + 4
     } else {
-        pos + 8 + 2 + 2 + 2 + 2 + 4 // + indexed_K(2) + reserved(2) + flags(4)
+        pos + 8 + 2 + 2 + 2 + 2 + 4
     };
 
     let ctx = Hdf5Ctx {
@@ -299,17 +356,7 @@ fn parse_superblock(data: &[u8], sb_offset: usize) -> Result<(Hdf5Ctx, u64, u64)
         length_size,
     };
 
-    // Variable-width fields: base_addr, <free_space_addr>, <end_of_file_addr>, <driver_info_addr>
-    // base_address (O), free_space_addr (O), eof_addr (O), driver_info_addr (O)
-    // Then: root group symbol table entry (symbol_table_entry size = O + O + 24 for cache)
     let root_entry_offset = var_start + 4 * offset_size;
-
-    // Root group symbol table entry:
-    //   link_name_offset (O) — always 0
-    //   object_header_addr (O)
-    //   cache_type (4 bytes)
-    //   reserved (4 bytes)
-    //   scratch-pad (16 bytes): btree_addr (O) + heap_addr (O)
     let _link_name_offset = ctx.read_offset(data, root_entry_offset)?;
     let _obj_header_addr = ctx.read_offset(data, root_entry_offset + offset_size)?;
     let cache_type = read_u32_le(data, root_entry_offset + 2 * offset_size)?;
@@ -321,7 +368,6 @@ fn parse_superblock(data: &[u8], sb_offset: usize) -> Result<(Hdf5Ctx, u64, u64)
         )));
     }
 
-    // scratch-pad starts after cache_type(4) + reserved(4)
     let scratch_offset = root_entry_offset + 2 * offset_size + 8;
     let btree_addr = ctx.read_offset(data, scratch_offset)?;
     let heap_addr = ctx.read_offset(data, scratch_offset + offset_size)?;
@@ -339,7 +385,6 @@ fn read_local_heap_data(data: &[u8], ctx: &Hdf5Ctx, heap_addr: u64) -> Result<us
         return Err(Error::UnexpectedEof);
     }
 
-    // Validate signature
     if &data[pos..pos + 4] != HEAP_SIGNATURE {
         return Err(Error::InvalidFileStructure(format!(
             "Expected HEAP signature at offset {}",
@@ -347,7 +392,6 @@ fn read_local_heap_data(data: &[u8], ctx: &Hdf5Ctx, heap_addr: u64) -> Result<us
         )));
     }
 
-    // HEAP: sig(4) + version(1) + reserved(3) + data_seg_size(L) + free_list_head_offset(L) + data_seg_addr(O)
     let data_seg_addr_offset = pos
         .checked_add(4 + 1 + 3 + ctx.length_size + ctx.length_size)
         .ok_or(Error::UnexpectedEof)?;
@@ -356,17 +400,17 @@ fn read_local_heap_data(data: &[u8], ctx: &Hdf5Ctx, heap_addr: u64) -> Result<us
     Ok(data_seg_addr as usize)
 }
 
-// ---- B-tree v1 traversal ----
+// ---- B-tree v1 traversal (type 0: groups) ----
 
 /// Traverses a v1 B-tree (type 0, group) to collect SNODs.
-fn traverse_btree(
+fn traverse_btree_group(
     data: &[u8],
     ctx: &Hdf5Ctx,
     btree_addr: u64,
     heap_data_addr: usize,
     prefix: &str,
     objects: &mut BTreeMap<String, Object>,
-    data_ranges: &mut BTreeMap<String, (usize, usize)>,
+    data_locations: &mut BTreeMap<String, Hdf5DataLocation>,
     depth: usize,
 ) -> Result<(), Error> {
     if depth > MAX_RECURSION_DEPTH {
@@ -381,7 +425,6 @@ fn traverse_btree(
         return Err(Error::UnexpectedEof);
     }
 
-    // Validate signature
     if &data[pos..pos + 4] != TREE_SIGNATURE {
         return Err(Error::InvalidFileStructure(format!(
             "Expected TREE signature at offset {}",
@@ -391,7 +434,7 @@ fn traverse_btree(
 
     let node_type = read_u8(data, pos + 4)?;
     if node_type != 0 {
-        // Type 0 = group nodes. Type 1 = raw data chunks (not needed for contiguous).
+        // Not a group B-tree; skip
         return Ok(());
     }
 
@@ -400,33 +443,27 @@ fn traverse_btree(
     let _left_sibling = ctx.read_offset(data, pos + 8)?;
     let _right_sibling = ctx.read_offset(data, pos + 8 + ctx.offset_size)?;
 
-    // Keys and child pointers
-    // For group B-trees (type 0): key = size_of_lengths bytes (offset into local heap)
-    // Layout: (entries_used+1) keys interleaved with entries_used child pointers
-    // key[0], child[0], key[1], child[1], ..., key[entries_used]
     let keys_start = pos + 8 + 2 * ctx.offset_size;
 
     if node_level > 0 {
-        // Internal node: children are B-tree nodes
         for i in 0..entries_used {
             let child_offset =
                 keys_start + ctx.length_size + i * (ctx.length_size + ctx.offset_size);
             let child_addr = ctx.read_offset(data, child_offset)?;
             if child_addr != UNDEF_ADDR {
-                traverse_btree(
+                traverse_btree_group(
                     data,
                     ctx,
                     child_addr,
                     heap_data_addr,
                     prefix,
                     objects,
-                    data_ranges,
+                    data_locations,
                     depth + 1,
                 )?;
             }
         }
     } else {
-        // Leaf node: children are SNOD addresses
         for i in 0..entries_used {
             let child_offset =
                 keys_start + ctx.length_size + i * (ctx.length_size + ctx.offset_size);
@@ -439,7 +476,7 @@ fn traverse_btree(
                     heap_data_addr,
                     prefix,
                     objects,
-                    data_ranges,
+                    data_locations,
                     depth + 1,
                 )?;
             }
@@ -447,6 +484,340 @@ fn traverse_btree(
     }
 
     Ok(())
+}
+
+// ---- B-tree v1 traversal (type 1: raw data chunks) ----
+
+/// Collects chunk locations from a type-1 B-tree for chunked datasets.
+fn collect_chunk_locations(
+    data: &[u8],
+    ctx: &Hdf5Ctx,
+    btree_addr: u64,
+    ndims: usize,
+    shape: &[u64],
+    chunk_dims: &[u32],
+    element_size: usize,
+    depth: usize,
+) -> Result<Vec<ChunkLocation>, Error> {
+    if depth > MAX_RECURSION_DEPTH {
+        return Err(Error::InvalidFileStructure(
+            "HDF5 chunk B-tree recursion depth exceeded".to_string(),
+        ));
+    }
+
+    let pos = btree_addr as usize;
+    if pos + 4 > data.len() {
+        return Err(Error::UnexpectedEof);
+    }
+
+    if &data[pos..pos + 4] != TREE_SIGNATURE {
+        return Err(Error::InvalidFileStructure(format!(
+            "Expected TREE signature at offset {} for chunk B-tree",
+            pos
+        )));
+    }
+
+    let node_type = read_u8(data, pos + 4)?;
+    if node_type != 1 {
+        return Err(Error::InvalidFileStructure(format!(
+            "Expected B-tree type 1 (raw data), got type {}",
+            node_type
+        )));
+    }
+
+    let node_level = read_u8(data, pos + 5)?;
+    let entries_used = read_u16_le(data, pos + 6)? as usize;
+    let _left_sibling = ctx.read_offset(data, pos + 8)?;
+    let _right_sibling = ctx.read_offset(data, pos + 8 + ctx.offset_size)?;
+
+    // Type-1 B-tree key: chunk_size(4) + filter_mask(4) + chunk_offsets(ndims * 8)
+    // Note: ndims here includes the extra "element size" dimension in the B-tree key
+    let key_size = 4 + 4 + (ndims + 1) * 8; // +1 for element size dimension
+    let keys_start = pos + 8 + 2 * ctx.offset_size;
+
+    let mut chunks = Vec::new();
+
+    if node_level > 0 {
+        // Internal node: recurse into children
+        for i in 0..entries_used {
+            let child_offset = keys_start + key_size + i * (key_size + ctx.offset_size);
+            let child_addr = ctx.read_offset(data, child_offset)?;
+            if child_addr != UNDEF_ADDR {
+                let mut sub_chunks = collect_chunk_locations(
+                    data,
+                    ctx,
+                    child_addr,
+                    ndims,
+                    shape,
+                    chunk_dims,
+                    element_size,
+                    depth + 1,
+                )?;
+                chunks.append(&mut sub_chunks);
+            }
+        }
+    } else {
+        // Leaf node: extract chunk locations
+        for i in 0..entries_used {
+            let key_offset = keys_start + i * (key_size + ctx.offset_size);
+            let chunk_size = read_u32_le(data, key_offset)?;
+            let filter_mask = read_u32_le(data, key_offset + 4)?;
+
+            // Read chunk offset coordinates (ndims dimensions)
+            let mut offsets = Vec::with_capacity(ndims);
+            for d in 0..ndims {
+                offsets.push(read_u64_le(data, key_offset + 8 + d * 8)?);
+            }
+
+            // Compute linear byte offset from chunk coordinates using dataset shape
+            let mut linear_offset: u64 = 0;
+            let mut stride: u64 = element_size as u64;
+            for d in (0..ndims).rev() {
+                linear_offset += offsets[d] * stride;
+                stride *= shape[d];
+            }
+
+            // Child pointer follows the key
+            let child_offset = key_offset + key_size;
+            let file_addr = ctx.read_offset(data, child_offset)?;
+
+            if file_addr != UNDEF_ADDR {
+                chunks.push(ChunkLocation {
+                    linear_offset,
+                    file_addr,
+                    chunk_size,
+                    filter_mask,
+                });
+            }
+        }
+    }
+
+    Ok(chunks)
+}
+
+// ---- Filter application ----
+
+/// Applies the reverse filter pipeline to decompress chunk data.
+/// Filters whose corresponding bit is set in `filter_mask` are skipped
+/// (per HDF5 spec, bit i set means filter i was NOT applied during write).
+fn apply_filters(
+    mut chunk_data: Vec<u8>,
+    filters: &[Hdf5Filter],
+    filter_mask: u32,
+    element_size: usize,
+) -> Result<Vec<u8>, Error> {
+    // Filters are applied in reverse order during decompression
+    for (i, filter) in filters.iter().enumerate().rev() {
+        if filter_mask & (1 << i) != 0 {
+            continue; // This filter was not applied to this chunk
+        }
+        match filter.id {
+            FILTER_DEFLATE => {
+                let mut decoder = flate2::read::ZlibDecoder::new(chunk_data.as_slice());
+                let mut decompressed = Vec::new();
+                decoder.read_to_end(&mut decompressed).map_err(|e| {
+                    Error::Other(format!("HDF5 deflate decompression failed: {}", e))
+                })?;
+                chunk_data = decompressed;
+            }
+            FILTER_SHUFFLE => {
+                chunk_data = unshuffle(&chunk_data, element_size);
+            }
+            _ => {
+                return Err(Error::Other(format!(
+                    "Unsupported HDF5 filter ID: {}",
+                    filter.id
+                )));
+            }
+        }
+    }
+    Ok(chunk_data)
+}
+
+/// Reverses the HDF5 shuffle filter (byte un-transposition).
+fn unshuffle(data: &[u8], element_size: usize) -> Vec<u8> {
+    if element_size <= 1 || data.is_empty() {
+        return data.to_vec();
+    }
+    let num_elements = data.len() / element_size;
+    let mut output = vec![0u8; data.len()];
+    for i in 0..num_elements {
+        for b in 0..element_size {
+            output[i * element_size + b] = data[b * num_elements + i];
+        }
+    }
+    output
+}
+
+/// Reads and reassembles a chunked dataset.
+fn read_chunked_dataset(
+    data: &[u8],
+    ctx: &Hdf5Ctx,
+    btree_addr: u64,
+    shape: &[u64],
+    chunk_dims: &[u32],
+    dtype: DType,
+    filters: &[Hdf5Filter],
+) -> Result<Vec<u8>, Error> {
+    let ndims = shape.len();
+    let element_size = dtype.byte_size();
+
+    // Total dataset size in bytes (checked to prevent overflow)
+    let total_elements: u64 = shape.iter().product();
+    let total_bytes = (total_elements as usize)
+        .checked_mul(element_size)
+        .ok_or_else(|| {
+            Error::Other(format!(
+                "Dataset size overflow: {} elements * {} bytes",
+                total_elements, element_size
+            ))
+        })?;
+
+    // Collect all chunk locations
+    let mut chunks = collect_chunk_locations(
+        data,
+        ctx,
+        btree_addr,
+        ndims,
+        shape,
+        chunk_dims,
+        element_size,
+        0,
+    )?;
+
+    // Sort by linear offset for sequential assembly
+    chunks.sort_by_key(|c| c.linear_offset);
+
+    let mut output = vec![0u8; total_bytes];
+
+    for chunk in &chunks {
+        let addr = chunk.file_addr as usize;
+        let size = chunk.chunk_size as usize;
+
+        let chunk_end = addr.checked_add(size).ok_or_else(|| {
+            Error::InvalidFileStructure(format!(
+                "Chunk at offset {} with size {} overflows address space",
+                addr, size
+            ))
+        })?;
+        if chunk_end > data.len() {
+            return Err(Error::InvalidFileStructure(format!(
+                "Chunk at offset {} with size {} extends beyond file",
+                addr, size
+            )));
+        }
+
+        let raw = data[addr..addr + size].to_vec();
+
+        let decompressed = if filters.is_empty() {
+            raw
+        } else {
+            apply_filters(raw, filters, chunk.filter_mask, element_size)?
+        };
+
+        // Copy decompressed chunk into the correct position in the output.
+        // For multi-dimensional datasets, we need to handle partial edge chunks
+        // by computing per-chunk coordinates and copying row by row.
+        let chunk_offset = chunk.linear_offset as usize;
+
+        if ndims <= 1 {
+            // 1D: simple linear copy
+            let copy_len = decompressed
+                .len()
+                .min(total_bytes.saturating_sub(chunk_offset));
+            output[chunk_offset..chunk_offset + copy_len]
+                .copy_from_slice(&decompressed[..copy_len]);
+        } else {
+            // Multi-dimensional: copy chunk data considering partial edge chunks.
+            // Compute chunk grid coordinates from linear_offset.
+            let mut remaining = chunk_offset / element_size;
+            let mut chunk_coords = vec![0u64; ndims];
+            for d in (0..ndims).rev() {
+                chunk_coords[d] = remaining as u64 % shape[d];
+                remaining /= shape[d] as usize;
+            }
+
+            // For each element in the chunk, compute its position in the output
+            copy_chunk_to_output(
+                &decompressed,
+                &mut output,
+                shape,
+                chunk_dims,
+                &chunk_coords,
+                element_size,
+            );
+        }
+    }
+
+    Ok(output)
+}
+
+/// Copies a decompressed chunk into the output buffer, handling edge chunks.
+fn copy_chunk_to_output(
+    chunk_data: &[u8],
+    output: &mut [u8],
+    shape: &[u64],
+    chunk_dims: &[u32],
+    chunk_start: &[u64],
+    element_size: usize,
+) {
+    let ndims = shape.len();
+
+    // Compute actual dimensions of this chunk (may be smaller at edges)
+    let mut actual_dims = Vec::with_capacity(ndims);
+    for d in 0..ndims {
+        let remaining = shape[d] - chunk_start[d];
+        actual_dims.push((chunk_dims[d] as u64).min(remaining) as usize);
+    }
+
+    // For the last two dimensions, copy contiguous rows
+    // For higher dims, iterate over the outer dimensions
+
+    // Compute dataset row stride (bytes per row in the last dimension)
+    let row_len = actual_dims[ndims - 1] * element_size;
+
+    // Total number of rows to copy (product of all dims except the last)
+    let num_rows: usize = actual_dims[..ndims - 1].iter().product();
+
+    let total_elements: u64 = shape.iter().product();
+    let total_bytes = total_elements as usize * element_size;
+
+    for row_idx in 0..num_rows {
+        // Convert flat row index to per-dimension indices within the chunk
+        let mut rem = row_idx;
+        let mut src_offset = 0usize;
+        let mut dst_linear = 0u64;
+
+        // Compute strides for both chunk and dataset
+        for d in (0..ndims - 1).rev() {
+            let coord_in_chunk = rem % actual_dims[d];
+            rem /= actual_dims[d];
+
+            // Source offset within chunk data
+            let mut chunk_stride = chunk_dims[ndims - 1] as usize * element_size;
+            for dd in (d + 1..ndims - 1).rev() {
+                chunk_stride *= chunk_dims[dd] as usize;
+            }
+            src_offset += coord_in_chunk * chunk_stride;
+
+            // Destination linear index
+            let abs_coord = chunk_start[d] + coord_in_chunk as u64;
+            let mut ds_stride: u64 = 1;
+            for dd in (d + 1..ndims).rev() {
+                ds_stride *= shape[dd];
+            }
+            dst_linear += abs_coord * ds_stride;
+        }
+
+        // Add the last dimension's chunk_start offset
+        dst_linear += chunk_start[ndims - 1];
+        let dst_byte = dst_linear as usize * element_size;
+
+        if dst_byte + row_len <= total_bytes && src_offset + row_len <= chunk_data.len() {
+            output[dst_byte..dst_byte + row_len]
+                .copy_from_slice(&chunk_data[src_offset..src_offset + row_len]);
+        }
+    }
 }
 
 // ---- Symbol table node (SNOD) ----
@@ -458,7 +829,7 @@ fn parse_snod(
     heap_data_addr: usize,
     prefix: &str,
     objects: &mut BTreeMap<String, Object>,
-    data_ranges: &mut BTreeMap<String, (usize, usize)>,
+    data_locations: &mut BTreeMap<String, Hdf5DataLocation>,
     depth: usize,
 ) -> Result<(), Error> {
     if depth > MAX_RECURSION_DEPTH {
@@ -473,7 +844,6 @@ fn parse_snod(
         return Err(Error::UnexpectedEof);
     }
 
-    // Validate signature
     if &data[pos..pos + 4] != SNOD_SIGNATURE {
         return Err(Error::InvalidFileStructure(format!(
             "Expected SNOD signature at offset {}",
@@ -485,8 +855,6 @@ fn parse_snod(
     let _reserved = read_u8(data, pos + 5)?;
     let num_symbols = read_u16_le(data, pos + 6)? as usize;
 
-    // Symbol table entries start at offset 8
-    // Each entry: link_name_offset(O) + obj_header_addr(O) + cache_type(4) + reserved(4) + scratch(16)
     let entry_size = 2 * ctx.offset_size + 4 + 4 + 16;
     let entries_start = pos + 8;
 
@@ -504,7 +872,6 @@ fn parse_snod(
             continue;
         }
 
-        // Read name from local heap
         let name = read_cstring(data, heap_data_addr + link_name_offset as usize)?;
         if name.is_empty() {
             continue;
@@ -517,54 +884,92 @@ fn parse_snod(
         };
 
         if cache_type == 1 {
-            // Group: scratch-pad has btree_addr and heap_addr
+            // Group
             let scratch_pos = entry_pos + 2 * ctx.offset_size + 8;
             let child_btree = ctx.read_offset(data, scratch_pos)?;
             let child_heap = ctx.read_offset(data, scratch_pos + ctx.offset_size)?;
 
             let child_heap_data = read_local_heap_data(data, ctx, child_heap)?;
-            traverse_btree(
+            traverse_btree_group(
                 data,
                 ctx,
                 child_btree,
                 child_heap_data,
                 &full_name,
                 objects,
-                data_ranges,
+                data_locations,
                 depth + 1,
             )?;
         } else {
-            // Dataset (or other): parse object header
+            // Dataset
             match parse_object_header(data, ctx, obj_header_addr as usize, &full_name, depth + 1)? {
                 ObjectHeaderResult::Dataset(info) => {
-                    let abs_offset = info.data_addr as usize;
-                    let byte_size = info.data_size as usize;
+                    let total_elems = info.shape.iter().product::<u64>();
+                    let byte_size = (total_elems as usize)
+                        .checked_mul(info.dtype.byte_size())
+                        .ok_or_else(|| {
+                            Error::Other(format!(
+                                "Dataset '{}' size overflow: {} elements * {} bytes",
+                                full_name,
+                                total_elems,
+                                info.dtype.byte_size()
+                            ))
+                        })?;
+                    let location = match info.layout {
+                        DataLayoutResult::Contiguous { addr, size } => {
+                            if addr == UNDEF_ADDR {
+                                continue;
+                            }
+                            let abs_offset = addr as usize;
+                            let bsize = size as usize;
+                            if abs_offset + bsize > data.len() {
+                                return Err(Error::InvalidFileStructure(format!(
+                                    "Dataset '{}' extends beyond file",
+                                    full_name
+                                )));
+                            }
+                            Hdf5DataLocation::MmapRange {
+                                offset: abs_offset,
+                                length: bsize,
+                            }
+                        }
+                        DataLayoutResult::Chunked {
+                            btree_addr,
+                            chunk_dims,
+                        } => {
+                            let reassembled = read_chunked_dataset(
+                                data,
+                                ctx,
+                                btree_addr,
+                                &info.shape,
+                                &chunk_dims,
+                                info.dtype,
+                                &info.filters,
+                            )?;
+                            Hdf5DataLocation::Owned(reassembled)
+                        }
+                        DataLayoutResult::Unsupported => continue,
+                    };
 
-                    if abs_offset + byte_size > data.len() {
-                        return Err(Error::InvalidFileStructure(format!(
-                            "Dataset '{}' extends beyond file: offset {} + size {} > file size {}",
-                            full_name,
-                            abs_offset,
-                            byte_size,
-                            data.len()
-                        )));
-                    }
-
-                    let obj =
-                        Object::dense(info.shape, info.dtype, abs_offset as u64, byte_size as u64);
-                    data_ranges.insert(full_name.clone(), (abs_offset, byte_size));
+                    let obj = Object::dense(
+                        info.shape,
+                        info.dtype,
+                        0, // offset not meaningful for owned data
+                        byte_size as u64,
+                    );
+                    data_locations.insert(full_name.clone(), location);
                     objects.insert(full_name, obj);
                 }
                 ObjectHeaderResult::Group(btree, heap) => {
                     let child_heap_data = read_local_heap_data(data, ctx, heap)?;
-                    traverse_btree(
+                    traverse_btree_group(
                         data,
                         ctx,
                         btree,
                         child_heap_data,
                         &full_name,
                         objects,
-                        data_ranges,
+                        data_locations,
                         depth + 1,
                     )?;
                 }
@@ -585,18 +990,18 @@ fn traverse_group(
     heap_addr: u64,
     prefix: &str,
     objects: &mut BTreeMap<String, Object>,
-    data_ranges: &mut BTreeMap<String, (usize, usize)>,
+    data_locations: &mut BTreeMap<String, Hdf5DataLocation>,
     depth: usize,
 ) -> Result<(), Error> {
     let heap_data_addr = read_local_heap_data(data, ctx, heap_addr)?;
-    traverse_btree(
+    traverse_btree_group(
         data,
         ctx,
         btree_addr,
         heap_data_addr,
         prefix,
         objects,
-        data_ranges,
+        data_locations,
         depth,
     )
 }
@@ -605,7 +1010,7 @@ fn traverse_group(
 
 enum ObjectHeaderResult {
     Dataset(DatasetInfo),
-    Group(u64, u64), // btree_addr, heap_addr
+    Group(u64, u64),
     Skip,
 }
 
@@ -627,26 +1032,21 @@ fn parse_object_header(
         return Err(Error::UnexpectedEof);
     }
 
-    // v1 object header prefix: version(1) + reserved(1) + num_messages(2) + obj_ref_count(4) + obj_header_size(4)
     let version = read_u8(data, addr)?;
     if version != 1 {
-        // v2 object headers not supported
         return Ok(ObjectHeaderResult::Skip);
     }
 
     let num_messages = read_u16_le(data, addr + 2)? as usize;
     let header_size = read_u32_le(data, addr + 8)? as usize;
 
-    // Messages start after the 12-byte prefix, but we also need to handle padding
-    // v1: prefix is 16 bytes (12 + 4 bytes padding to 8-byte boundary)
     let msg_start = addr + 16;
     let msg_end = msg_start + header_size;
 
     let mut dtype: Option<DType> = None;
     let mut shape: Option<Vec<u64>> = None;
-    let mut data_addr: Option<u64> = None;
-    let mut data_size: Option<u64> = None;
-    let mut is_contiguous = false;
+    let mut layout: Option<DataLayoutResult> = None;
+    let mut filters: Vec<Hdf5Filter> = Vec::new();
     let mut group_info: Option<(u64, u64)> = None;
 
     parse_messages(
@@ -657,31 +1057,23 @@ fn parse_object_header(
         num_messages,
         &mut dtype,
         &mut shape,
-        &mut data_addr,
-        &mut data_size,
-        &mut is_contiguous,
+        &mut layout,
+        &mut filters,
         &mut group_info,
         name,
         depth,
     )?;
 
-    // If a symbol table message was found, this is a group
     if let Some((btree, heap)) = group_info {
         return Ok(ObjectHeaderResult::Group(btree, heap));
     }
 
-    if let (Some(dt), Some(sh), Some(da), Some(ds)) = (dtype, shape, data_addr, data_size) {
-        if !is_contiguous {
-            return Ok(ObjectHeaderResult::Skip);
-        }
-        if da == UNDEF_ADDR {
-            return Ok(ObjectHeaderResult::Skip);
-        }
+    if let (Some(dt), Some(sh), Some(lay)) = (dtype, shape, layout) {
         Ok(ObjectHeaderResult::Dataset(DatasetInfo {
             dtype: dt,
             shape: sh,
-            data_addr: da,
-            data_size: ds,
+            layout: lay,
+            filters,
         }))
     } else {
         Ok(ObjectHeaderResult::Skip)
@@ -698,9 +1090,8 @@ fn parse_messages(
     max_messages: usize,
     dtype: &mut Option<DType>,
     shape: &mut Option<Vec<u64>>,
-    data_addr: &mut Option<u64>,
-    data_size: &mut Option<u64>,
-    is_contiguous: &mut bool,
+    layout: &mut Option<DataLayoutResult>,
+    filters: &mut Vec<Hdf5Filter>,
     group_info: &mut Option<(u64, u64)>,
     name: &str,
     depth: usize,
@@ -709,7 +1100,6 @@ fn parse_messages(
     let mut messages_parsed = 0;
 
     while pos + 8 <= end && messages_parsed < max_messages {
-        // v1 message header: type(2) + size(2) + flags(1) + reserved(3)
         let msg_type = read_u16_le(data, pos)?;
         let msg_size = read_u16_le(data, pos + 2)? as usize;
         let _flags = read_u8(data, pos + 4)?;
@@ -728,12 +1118,10 @@ fn parse_messages(
                 *dtype = parse_datatype(data, msg_data_start).ok();
             }
             MSG_DATA_LAYOUT => {
-                let layout = parse_data_layout(data, ctx, msg_data_start)?;
-                if let Some((addr, size, contiguous)) = layout {
-                    *data_addr = Some(addr);
-                    *data_size = Some(size);
-                    *is_contiguous = contiguous;
-                }
+                *layout = Some(parse_data_layout(data, ctx, msg_data_start)?);
+            }
+            MSG_FILTER_PIPELINE => {
+                *filters = parse_filter_pipeline(data, msg_data_start)?;
             }
             MSG_CONTINUATION => {
                 let cont_offset = ctx.read_offset(data, msg_data_start)?;
@@ -747,9 +1135,8 @@ fn parse_messages(
                         max_messages - messages_parsed,
                         dtype,
                         shape,
-                        data_addr,
-                        data_size,
-                        is_contiguous,
+                        layout,
+                        filters,
                         group_info,
                         name,
                         depth + 1,
@@ -761,21 +1148,93 @@ fn parse_messages(
                 let heap = ctx.read_offset(data, msg_data_start + ctx.offset_size)?;
                 *group_info = Some((btree, heap));
             }
-            MSG_ATTRIBUTE | 0 => {
-                // Skip attributes and nil messages
-            }
-            _ => {
-                // Skip unknown message types
-            }
+            MSG_ATTRIBUTE | 0 => {}
+            _ => {}
         }
 
-        // Advance to next message (8-byte aligned)
         let next = msg_data_start + msg_size;
         pos = (next + 7) & !7;
         messages_parsed += 1;
     }
 
     Ok(())
+}
+
+// ---- Filter pipeline parsing ----
+
+/// Parses a filter pipeline message (type 0x000B).
+fn parse_filter_pipeline(data: &[u8], pos: usize) -> Result<Vec<Hdf5Filter>, Error> {
+    let version = read_u8(data, pos)?;
+    let nfilters = read_u8(data, pos + 1)? as usize;
+
+    let mut filters = Vec::with_capacity(nfilters);
+
+    // v1: version(1) + nfilters(1) + reserved(6)
+    // v2: version(1) + nfilters(1)
+    let mut fpos = if version == 1 { pos + 8 } else { pos + 2 };
+
+    for _ in 0..nfilters {
+        if fpos + 4 > data.len() {
+            break;
+        }
+
+        let filter_id = read_u16_le(data, fpos)?;
+
+        if version == 1 || filter_id >= 256 {
+            // v1 layout: id(2) + name_len(2) + flags(2) + cd_nelmts(2) + name(padded) + cd_values
+            let name_len = read_u16_le(data, fpos + 2)? as usize;
+            let _flags = read_u16_le(data, fpos + 4)?;
+            let cd_nelmts = read_u16_le(data, fpos + 6)? as usize;
+
+            fpos += 8;
+
+            // Name is padded to 8-byte multiple
+            if name_len > 0 {
+                let padded = (name_len + 7) & !7;
+                fpos += padded;
+            }
+
+            // Client data values
+            let mut cd_values = Vec::with_capacity(cd_nelmts);
+            for _ in 0..cd_nelmts {
+                if fpos + 4 > data.len() {
+                    break;
+                }
+                cd_values.push(read_u32_le(data, fpos)?);
+                fpos += 4;
+            }
+            // Pad cd_values to even count (v1 only)
+            if version == 1 && cd_nelmts % 2 != 0 {
+                fpos += 4;
+            }
+
+            filters.push(Hdf5Filter {
+                id: filter_id,
+                _cd_values: cd_values,
+            });
+        } else {
+            // v2 with id < 256: id(2) + flags(2) + cd_nelmts(2) + cd_values
+            let _flags = read_u16_le(data, fpos + 2)?;
+            let cd_nelmts = read_u16_le(data, fpos + 4)? as usize;
+            fpos += 6;
+
+            let mut cd_values = Vec::with_capacity(cd_nelmts);
+            for _ in 0..cd_nelmts {
+                if fpos + 4 > data.len() {
+                    break;
+                }
+                cd_values.push(read_u32_le(data, fpos)?);
+                fpos += 4;
+            }
+
+            filters.push(Hdf5Filter {
+                id: filter_id,
+                _cd_values: cd_values,
+            });
+        }
+    }
+
+    Ok(filters)
 }
 
 // ---- Dataspace parsing ----
@@ -786,7 +1245,6 @@ fn parse_dataspace(data: &[u8], pos: usize) -> Result<Vec<u64>, Error> {
 
     match version {
         1 => {
-            // v1: version(1) + ndims(1) + flags(1) + reserved(5) + dims(ndims*8) + [max_dims]
             let dims_start = pos + 8;
             let mut shape = Vec::with_capacity(ndims);
             for i in 0..ndims {
@@ -795,7 +1253,6 @@ fn parse_dataspace(data: &[u8], pos: usize) -> Result<Vec<u64>, Error> {
             Ok(shape)
         }
         2 => {
-            // v2: version(1) + ndims(1) + flags(1) + type(1) + dims(ndims*8) + [max_dims]
             let dims_start = pos + 4;
             let mut shape = Vec::with_capacity(ndims);
             for i in 0..ndims {
@@ -817,16 +1274,21 @@ fn parse_datatype(data: &[u8], pos: usize) -> Result<DType, Error> {
         return Err(Error::UnexpectedEof);
     }
 
-    // Datatype message: class_and_version(1) + class_bit_fields(3) + size(4)
     let class_and_version = read_u8(data, pos)?;
     let dt_class = class_and_version & 0x0F;
-    let _dt_version = (class_and_version >> 4) & 0x0F;
     let class_bits_0 = read_u8(data, pos + 1)?;
     let dt_size = read_u32_le(data, pos + 4)? as usize;
 
+    // Bit 0 of class_bits_0 is the byte order: 0 = little-endian, 1 = big-endian
+    let is_big_endian = (class_bits_0 & 0x01) != 0;
+    if is_big_endian && dt_size > 1 {
+        return Err(Error::Other(
+            "Big-endian HDF5 datatypes are not supported".to_string(),
+        ));
+    }
+
     match dt_class {
         DT_CLASS_FIXED_POINT => {
-            // Integer: bit 3 of class_bits_0 = sign (0=unsigned, 1=signed)
             let signed = (class_bits_0 & 0x08) != 0;
             match (dt_size, signed) {
                 (8, true) => Ok(DType::I64),
@@ -861,62 +1323,79 @@ fn parse_datatype(data: &[u8], pos: usize) -> Result<DType, Error> {
 
 // ---- Data layout parsing ----
 
-/// Parses a data layout message. Returns (address, size, is_contiguous).
-fn parse_data_layout(
-    data: &[u8],
-    ctx: &Hdf5Ctx,
-    pos: usize,
-) -> Result<Option<(u64, u64, bool)>, Error> {
+/// Parses a data layout message. Returns DataLayoutResult.
+fn parse_data_layout(data: &[u8], ctx: &Hdf5Ctx, pos: usize) -> Result<DataLayoutResult, Error> {
     let version = read_u8(data, pos)?;
 
     match version {
         1 | 2 => {
-            // v1/v2: version(1) + ndims(1) + layout_class(1) + reserved(5)
             let ndims = read_u8(data, pos + 1)? as usize;
             let layout_class = read_u8(data, pos + 2)?;
 
-            if layout_class != 1 {
-                // 0=compact, 1=contiguous, 2=chunked
-                return Ok(Some((0, 0, false)));
+            match layout_class {
+                1 => {
+                    // Contiguous
+                    let addr_pos = pos + 8;
+                    let addr = ctx.read_offset(data, addr_pos)?;
+                    let dims_start = addr_pos + ctx.offset_size;
+                    let mut total_size: u64 = 1;
+                    for i in 0..ndims {
+                        total_size *= read_u32_le(data, dims_start + i * 4)? as u64;
+                    }
+                    Ok(DataLayoutResult::Contiguous {
+                        addr,
+                        size: total_size,
+                    })
+                }
+                2 => {
+                    // Chunked v1/v2
+                    let addr_pos = pos + 8;
+                    let btree_addr = ctx.read_offset(data, addr_pos)?;
+                    let dims_start = addr_pos + ctx.offset_size;
+                    // ndims includes element size dimension for v1/v2
+                    let mut chunk_dims = Vec::with_capacity(ndims.saturating_sub(1));
+                    for i in 0..ndims.saturating_sub(1) {
+                        chunk_dims.push(read_u32_le(data, dims_start + i * 4)?);
+                    }
+                    Ok(DataLayoutResult::Chunked {
+                        btree_addr,
+                        chunk_dims,
+                    })
+                }
+                _ => Ok(DataLayoutResult::Unsupported),
             }
-
-            // Contiguous: data_addr(O) + dims(ndims * 4)
-            let addr_pos = pos + 8;
-            let addr = ctx.read_offset(data, addr_pos)?;
-
-            // Size: product of dimension sizes (each 4 bytes) — but last dim is element size
-            let dims_start = addr_pos + ctx.offset_size;
-            let mut total_size: u64 = 1;
-            for i in 0..ndims {
-                total_size *= read_u32_le(data, dims_start + i * 4)? as u64;
-            }
-
-            Ok(Some((addr, total_size, true)))
         }
         3 => {
-            // v3: version(1) + layout_class(1)
             let layout_class = read_u8(data, pos + 1)?;
 
             match layout_class {
-                0 => {
-                    // Compact: size(2) + data(size)
-                    // Not supported for zero-copy
-                    Ok(Some((0, 0, false)))
-                }
+                0 => Ok(DataLayoutResult::Unsupported), // Compact
                 1 => {
-                    // Contiguous: address(O) + size(L)
+                    // Contiguous
                     let addr = ctx.read_offset(data, pos + 2)?;
                     let size = ctx.read_length(data, pos + 2 + ctx.offset_size)?;
-                    Ok(Some((addr, size, true)))
+                    Ok(DataLayoutResult::Contiguous { addr, size })
                 }
                 2 => {
-                    // Chunked: not supported
-                    Ok(Some((0, 0, false)))
+                    // Chunked v3: dimensionality(1) + btree_addr(O) + chunk_dims[dim](4 each)
+                    let dimensionality = read_u8(data, pos + 2)? as usize;
+                    let btree_addr = ctx.read_offset(data, pos + 3)?;
+                    let dims_start = pos + 3 + ctx.offset_size;
+                    // dimensionality includes the extra element-size dimension
+                    let ndims = dimensionality.saturating_sub(1);
+                    let mut chunk_dims = Vec::with_capacity(ndims);
+                    for i in 0..ndims {
+                        chunk_dims.push(read_u32_le(data, dims_start + i * 4)?);
+                    }
+                    Ok(DataLayoutResult::Chunked {
+                        btree_addr,
+                        chunk_dims,
+                    })
                 }
-                _ => Ok(None),
+                _ => Ok(DataLayoutResult::Unsupported),
             }
         }
-        _ => Ok(None),
+        _ => Ok(DataLayoutResult::Unsupported),
     }
 }
 
@@ -962,18 +1441,15 @@ mod tests {
 
     #[test]
     fn test_parse_datatype_f32() {
-        // class=1 (float), version=1, size=4
         let data = [
-            0x11, 0x20, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00,
-            // properties (bit offset, bit precision, exponent location, etc.)
-            0x00, 0x00, 0x20, 0x00, 0x17, 0x08, 0x00, 0x00, 0x7f, 0x00, 0x00, 0x00,
+            0x11, 0x20, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x20, 0x00, 0x17, 0x08,
+            0x00, 0x00, 0x7f, 0x00, 0x00, 0x00,
         ];
         assert_eq!(parse_datatype(&data, 0).unwrap(), DType::F32);
     }
 
     #[test]
     fn test_parse_datatype_i64_signed() {
-        // class=0 (integer), signed (bit 3 set in class_bits_0), size=8
         let data = [
             0x00, 0x08, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40, 0x00,
         ];
@@ -982,10 +1458,26 @@ mod tests {
 
     #[test]
     fn test_parse_datatype_u32_unsigned() {
-        // class=0 (integer), unsigned (bit 3 clear), size=4
         let data = [
             0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x20, 0x00,
         ];
         assert_eq!(parse_datatype(&data, 0).unwrap(), DType::U32);
+    }
+
+    #[test]
+    fn test_unshuffle() {
+        // 3 elements of 4 bytes each
+        // Shuffled: all byte-0s, all byte-1s, all byte-2s, all byte-3s
+        let shuffled = vec![
+            0x01, 0x05, 0x09, // byte 0 of elements 0,1,2
+            0x02, 0x06, 0x0A, // byte 1
+            0x03, 0x07, 0x0B, // byte 2
+            0x04, 0x08, 0x0C, // byte 3
+        ];
+        let unshuffled = unshuffle(&shuffled, 4);
+        assert_eq!(
+            unshuffled,
+            vec![0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C]
+        );
     }
 }

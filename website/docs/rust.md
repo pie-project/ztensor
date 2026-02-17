@@ -124,6 +124,44 @@ writer.add_coo(
 )?;
 ```
 
+## Appending to existing files
+
+```rust
+use ztensor::Writer;
+
+// Open an existing .zt file for appending
+let mut writer = Writer::append("model.zt")?;
+
+// Add new tensors (existing ones are preserved)
+let extra: Vec<f32> = vec![1.0, 2.0, 3.0];
+writer.add("extra_weights", &[3], &extra)?;
+
+writer.finish()?;
+```
+
+Append reads the existing manifest, truncates only the manifest/footer, writes new tensor data after the existing data, and rewrites the combined manifest. Existing tensor data and offsets are untouched.
+
+## Removing tensors
+
+```rust
+// Remove tensors by name, writing the result to a new file
+ztensor::remove_tensors("model.zt", "trimmed.zt", &["unused_layer", "old_bias"])?;
+```
+
+Returns an error if any name is not found. Preserves compression settings, checksums, and per-object attributes.
+
+## Replacing tensor data in-place
+
+```rust
+// Overwrite a tensor's data without rewriting the entire file
+let new_weights: Vec<f32> = vec![0.0; 2 * 3];
+ztensor::replace_tensor("model.zt", "weights", bytemuck::cast_slice(&new_weights))?;
+```
+
+The replacement data must have the exact same byte size as the original. Only raw (uncompressed) dense tensors can be replaced. Checksums are recomputed automatically.
+
+This is much faster than a full rewrite for large files — only the tensor's data region and the manifest are updated.
+
 ## Feature flags
 
 Each external format reader is behind a feature flag:
