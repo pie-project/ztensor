@@ -2,16 +2,31 @@
 
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::Once;
 
 use tempfile::NamedTempFile;
 
 use ztensor::{DType, Hdf5Reader, TensorReader};
 
+static GENERATE: Once = Once::new();
+
 fn fixture(name: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests")
-        .join("fixtures")
-        .join(name)
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let dir = manifest.join("target").join("hdf5_fixtures");
+    GENERATE.call_once(|| {
+        if !dir.join("contiguous_simple.h5").exists() {
+            std::fs::create_dir_all(&dir).unwrap();
+            let script = manifest.join("tests").join("generate_hdf5_fixtures.py");
+            let python = manifest.join(".venv").join("bin").join("python");
+            let status = std::process::Command::new(&python)
+                .arg(&script)
+                .arg(&dir)
+                .status()
+                .expect("Failed to run h5py fixture generator");
+            assert!(status.success(), "h5py fixture generator failed");
+        }
+    });
+    dir.join(name)
 }
 
 // ---- Error tests ----
