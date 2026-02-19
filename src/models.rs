@@ -128,7 +128,7 @@ impl Format {
         }
     }
 
-    fn from_str(s: &str) -> Self {
+    pub fn from_str(s: &str) -> Self {
         match s {
             "dense" => Self::Dense,
             "sparse_csr" => Self::SparseCsr,

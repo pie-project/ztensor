@@ -16,6 +16,7 @@ Example:
 from ._ztensor import (
     Reader,
     Writer,
+    Tensor,
     TensorMetadata,
     open,
     remove_tensors,
@@ -88,6 +89,7 @@ if TORCH_AVAILABLE:
 __all__ = [
     "Reader",
     "Writer",
+    "Tensor",
     "TensorMetadata",
     "ZTensorError",
     "open",

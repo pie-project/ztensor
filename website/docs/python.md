@@ -8,28 +8,29 @@ sidebar_position: 3
 pip install ztensor
 ```
 
-## Quick start
+## Migrating from safetensors
+
+ztensor provides drop-in replacements for `safetensors.torch` and `safetensors.numpy`:
 
 ```python
-import numpy as np
-from ztensor.numpy import save_file, load_file
+# Before
+from safetensors.torch import save_file, load_file
 
-# Save
-save_file({"weight": np.random.randn(1024, 768).astype(np.float32)}, "model.zt")
-
-# Load (any format)
-tensors = load_file("model.zt")           # .zt
-tensors = load_file("model.safetensors")  # .safetensors, .pt, .gguf, .npz, .onnx, .h5
+# After — one-line change
+from ztensor.torch import save_file, load_file
 ```
 
-The `ztensor.torch` and `ztensor.numpy` modules share the same interface:
+Both `ztensor.torch` and `ztensor.numpy` share the same interface:
 
 ```python
 from ztensor.torch import save_file, load_file   # PyTorch tensors
 from ztensor.numpy import save_file, load_file   # NumPy arrays
 ```
 
-## Saving
+ztensor additionally supports:
+- `compression` parameter on save functions
+- `copy=False` for zero-copy mmap loading (the default)
+- Reading other tensor formats through the same `load_file` call
 
 ### `save_file(tensors, filename, metadata=None, compression=False)`
 
@@ -54,8 +55,6 @@ save_file(tensors, "model.zt", compression=10)   # zstd level 10
 ```
 
 Compressed files are decompressed automatically on load.
-
-## Loading
 
 ### `load_file(filename, ...)`
 
@@ -100,6 +99,212 @@ The default `copy=False` uses `MAP_PRIVATE` (copy-on-write) memory mapping. Tens
 - When you need tensors that outlive the file handle
 - When you plan to heavily mutate tensor data in-place
 
+### Bytes API
+
+Serialize to and from raw bytes without touching disk.
+
+```python
+# PyTorch
+from ztensor.torch import save, load
+data = save({"x": torch.zeros(10)})
+loaded = load(data)
+
+# NumPy
+from ztensor.numpy import save, load
+data = save({"x": np.zeros(10, dtype=np.float32)})
+loaded = load(data)
+```
+
+## Tensor
+
+The `ztensor.Tensor` class represents a tensor object with its component arrays, shape, dtype, and format metadata. It is the primary return type of `reader.read()`.
+
+### Construction
+
+```python
+import numpy as np
+import ztensor
+
+# Dense tensor — shape and dtype inferred from the "data" component
+t = ztensor.Tensor({"data": np.ones((3, 4), dtype=np.float32)})
+
+# Sparse CSR — explicit shape required
+t = ztensor.Tensor(
+    {"values": values, "indices": indices, "indptr": indptr},
+    shape=[4096, 4096], dtype="float32", format="sparse_csr"
+)
+```
+
+### Properties
+
+| Property | Type | Description |
+|---|---|---|
+| `shape` | `list[int]` | Tensor dimensions |
+| `dtype` | `str` | Storage dtype (e.g., `"float32"`) |
+| `type` | `str \| None` | Logical type (e.g., `"f8_e4m3fn"`), `None` when same as dtype |
+| `format` | `str` | Layout format (`"dense"`, `"sparse_csr"`, etc.) |
+| `components` | `dict[str, np.ndarray]` | Component name to array mapping |
+| `attributes` | `dict \| None` | Per-object attributes |
+
+### Conversion (dense only)
+
+```python
+arr = t.numpy()              # -> np.ndarray
+tensor = t.torch(device="cpu")  # -> torch.Tensor
+```
+
+## Reader
+
+The `Reader` class provides direct, per-tensor access to files.
+
+```python
+from ztensor import Reader
+
+reader = Reader("model.zt")
+```
+
+**Supported formats:** `.zt`, `.safetensors`, `.pt` / `.pth` / `.bin`, `.gguf`, `.npz`, `.onnx`, `.h5` / `.hdf5`
+
+### Dict-like access
+
+```python
+tensor = reader["layer1.weight"]       # ztensor.Tensor, zero-copy
+exists = "bias" in reader               # membership test
+count = len(reader)                     # number of tensors
+names = list(reader)                    # iterate tensor names
+```
+
+### `keys()`
+
+Returns a list of all tensor names.
+
+```python
+names = reader.keys()
+```
+
+### `metadata(name)`
+
+Returns metadata. Accepts a single name (returns `TensorMetadata`) or a list (returns `list[TensorMetadata]`).
+
+```python
+meta = reader.metadata("weights")
+print(meta.shape, meta.dtype)  # [1024, 768] float32
+
+metas = reader.metadata(["weight", "bias"])
+```
+
+### `read(name, *, copy=False)`
+
+Reads tensor(s) as `ztensor.Tensor` objects. Supports all formats (dense, sparse, quantized).
+
+```python
+t = reader.read("weights")                    # -> ztensor.Tensor
+d = reader.read(["weight", "bias"])            # -> dict[str, ztensor.Tensor]
+t = reader.read("weights", copy=True)          # independent copy
+```
+
+### `read_numpy(name, *, copy=False)`
+
+Reads dense tensor(s) as NumPy arrays.
+
+```python
+arr = reader.read_numpy("weights")                  # -> np.ndarray
+d = reader.read_numpy(["weight", "bias"])            # -> dict[str, np.ndarray]
+arr = reader.read_numpy("weights", copy=True)        # independent copy
+```
+
+### `read_torch(name, *, copy=False, device="cpu")`
+
+Reads dense tensor(s) as torch.Tensors.
+
+```python
+t = reader.read_torch("weights")                         # -> torch.Tensor
+d = reader.read_torch(["weight", "bias"])                 # -> dict[str, torch.Tensor]
+t = reader.read_torch("weights", device="cuda:0")        # load to GPU
+t = reader.read_torch("weights", copy=True)               # independent copy
+```
+
+### `format`
+
+The detected file format: `"zt"`, `"safetensors"`, `"pickle"`, `"gguf"`, `"npz"`, `"onnx"`, `"hdf5"`, or `"unknown"`.
+
+### Context manager
+
+```python
+with Reader("model.zt") as r:
+    weights = r["weights"]
+```
+
+## Writer
+
+Creates `.zt` files with per-tensor control over compression and checksums.
+
+```python
+from ztensor import Writer
+```
+
+### `write(name, tensor, *, compress=None, checksum="none")`
+
+Writes a `ztensor.Tensor` object. Supports any format (dense, sparse, quantized).
+
+```python
+t = ztensor.Tensor({"data": np.ones((3, 4), dtype=np.float32)})
+w.write("weights", t)
+```
+
+### `write_numpy(name, data, *, compress=None, checksum="none")`
+
+Writes a dense tensor from a NumPy array.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `name` | `str` | required | Tensor name |
+| `data` | `np.ndarray` | required | Contiguous array |
+| `compress` | `bool` or `int` | `None` | `None`/`False` = raw, `True` = zstd level 3, `int` = specific level |
+| `checksum` | `str` | `"none"` | `"none"`, `"crc32c"`, or `"sha256"` |
+
+```python
+w.write_numpy("weights", np_array)
+w.write_numpy("compressed", np_array, compress=True)
+w.write_numpy("verified", np_array, checksum="crc32c")
+```
+
+### `write_torch(name, data, *, compress=None, checksum="none")`
+
+Writes a dense tensor from a torch.Tensor. Handles CPU transfer, contiguity, and bfloat16 automatically.
+
+```python
+w.write_torch("weights", torch_tensor)
+w.write_torch("compressed", torch_tensor, compress=True)
+```
+
+### `add(name, data, compress=None, checksum="none")`
+
+Alias for `write_numpy`. Maintained for backward compatibility.
+
+### `finish()`
+
+Writes the manifest and footer. Returns the total file size. Called automatically when using the context manager.
+
+```python
+with Writer("output.zt") as w:
+    w.write_numpy("weights", weights)
+    w.write_numpy("bias", bias)
+# finish() called automatically
+```
+
+### Appending to existing files
+
+`Writer.append(path)` opens an existing `.zt` file for appending new tensors. Existing tensors are preserved; new tensors are written after the existing data.
+
+```python
+w = Writer.append("model.zt")
+w.write_numpy("extra_layer", new_weights)
+w.finish()
+```
+
+Duplicate tensor names raise an error.
+
 ## Model save/load
 
 These functions are specific to `ztensor.torch`.
@@ -133,121 +338,6 @@ from ztensor.torch import load_model
 model = torch.nn.Linear(10, 5)
 missing, unexpected = load_model(model, "model.zt")
 ```
-
-## Reader
-
-The `Reader` class provides direct, per-tensor access to files. For most use cases, `load_file` above is simpler.
-
-```python
-from ztensor import Reader
-
-reader = Reader("model.zt")
-```
-
-**Supported formats:** `.zt`, `.safetensors`, `.pt` / `.pth` / `.bin`, `.gguf`, `.npz`, `.onnx`, `.h5` / `.hdf5`
-
-### Dict-like access
-
-```python
-weights = reader["layer1.weight"]       # numpy array, zero-copy
-exists = "bias" in reader               # membership test
-count = len(reader)                     # number of tensors
-names = list(reader)                    # iterate tensor names
-```
-
-### `keys()`
-
-Returns a list of all tensor names.
-
-```python
-names = reader.keys()
-```
-
-### `metadata(name)`
-
-Returns a [`TensorMetadata`](#tensormetadata) object.
-
-```python
-meta = reader.metadata("weights")
-print(meta.shape, meta.dtype)  # [1024, 768] float32
-```
-
-### `read_tensor(name)` / `read_tensors(names)`
-
-Reads individual or multiple tensors as NumPy arrays.
-
-```python
-arr = reader.read_tensor("weights")
-result = reader.read_tensors(["weight", "bias"])
-```
-
-### `load_torch(*, device="cpu", copy=False)` / `load_numpy(*, copy=False)`
-
-Loads all tensors at once.
-
-```python
-tensors = reader.load_torch(device="cuda:0")
-arrays = reader.load_numpy()
-```
-
-### `format`
-
-The detected file format: `"zt"`, `"safetensors"`, `"pickle"`, `"gguf"`, `"npz"`, `"onnx"`, `"hdf5"`, or `"unknown"`.
-
-### Context manager
-
-```python
-with Reader("model.zt") as r:
-    weights = r["weights"]
-```
-
-## Writer
-
-Creates `.zt` files with per-tensor control over compression and checksums.
-
-```python
-from ztensor import Writer
-```
-
-### `add(name, data, compress=None, checksum="none")`
-
-Adds a dense tensor from a NumPy array.
-
-| Parameter | Type | Default | Description |
-|---|---|---|---|
-| `name` | `str` | required | Tensor name |
-| `data` | `np.ndarray` | required | Contiguous array |
-| `compress` | `bool` or `int` | `None` | `None`/`False` = raw, `True` = zstd level 3, `int` = specific level |
-| `checksum` | `str` | `"none"` | `"none"`, `"crc32c"`, or `"sha256"` |
-
-```python
-w.add("weights", np_array)
-w.add("compressed", np_array, compress=True)
-w.add("verified", np_array, checksum="crc32c")
-```
-
-### `finish()`
-
-Writes the manifest and footer. Returns the total file size. Called automatically when using the context manager.
-
-```python
-with Writer("output.zt") as w:
-    w.add("weights", weights)
-    w.add("bias", bias)
-# finish() called automatically
-```
-
-### Appending to existing files
-
-`Writer.append(path)` opens an existing `.zt` file for appending new tensors. Existing tensors are preserved; new tensors are written after the existing data.
-
-```python
-w = Writer.append("model.zt")
-w.add("extra_layer", new_weights)
-w.finish()
-```
-
-Duplicate tensor names raise an error.
 
 ## Removing tensors
 
@@ -288,22 +378,6 @@ import ztensor
 # Replace weights in-place (much faster than rewriting the whole file)
 new_weights = np.zeros((1024, 768), dtype=np.float32)
 ztensor.replace_tensor("model.zt", "weights", new_weights)
-```
-
-## Bytes API
-
-Serialize to and from raw bytes without touching disk.
-
-```python
-# PyTorch
-from ztensor.torch import save, load
-data = save({"x": torch.zeros(10)})
-loaded = load(data)
-
-# NumPy
-from ztensor.numpy import save, load
-data = save({"x": np.zeros(10, dtype=np.float32)})
-loaded = load(data)
 ```
 
 ## Reference
@@ -352,20 +426,3 @@ Custom exception for ztensor errors. Subclass of `Exception`.
 pip install ztensor[bfloat16]
 ```
 :::
-
-### Migrating from safetensors
-
-The API is a drop-in replacement:
-
-```python
-# Before
-from safetensors.torch import save_file, load_file
-
-# After
-from ztensor.torch import save_file, load_file
-```
-
-zTensor additionally supports:
-- `compression` parameter on save functions
-- `copy=False` for zero-copy mmap loading (the default)
-- Reading other tensor formats through the same `load_file` call

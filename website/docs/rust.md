@@ -124,6 +124,63 @@ writer.add_coo(
 )?;
 ```
 
+## Generic tensor I/O
+
+The `read_object` / `write_object` API reads and writes tensors of any format (dense, sparse, quantized, custom) through a single interface. This is the recommended way to copy or transform tensors across files.
+
+### Reading
+
+```rust
+use ztensor::TensorReader;
+
+let reader = ztensor::open("model.zt")?;  // any format works
+let tensor = reader.read_object("weights")?;
+
+println!("shape: {:?}, format: {}", tensor.shape, tensor.format);
+println!("components: {:?}", tensor.components.keys().collect::<Vec<_>>());
+```
+
+### Converting to typed data
+
+```rust
+// Dense tensor -> Vec<T>
+let data: Vec<f32> = tensor.into_dense()?;
+
+// Sparse CSR -> CsrTensor<T>
+let csr = tensor.into_csr::<f32>()?;
+
+// Sparse COO -> CooTensor<T>
+let coo = tensor.into_coo::<i32>()?;
+```
+
+### Copying tensors between files
+
+```rust
+use ztensor::{Writer, TensorReader};
+use ztensor::writer::Compression;
+use ztensor::Checksum;
+
+let reader = ztensor::open("model.zt")?;
+let mut writer = Writer::create("copy.zt")?;
+
+for name in reader.keys() {
+    let tensor = reader.read_object(name)?;
+    writer.write_object(name, &tensor, Compression::Raw, Checksum::None)?;
+}
+writer.finish()?;
+```
+
+### Owning tensor data
+
+When a tensor borrows from an mmap reader, use `into_owned()` to create a `Tensor<'static>` that outlives the reader:
+
+```rust
+let tensor = reader.read_object("weights")?;
+let owned = tensor.into_owned();
+drop(reader);  // reader can be dropped
+let data: Vec<f32> = owned.into_dense()?;  // still works
+```
+
 ## Appending to existing files
 
 ```rust

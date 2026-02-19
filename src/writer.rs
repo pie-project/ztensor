@@ -7,7 +7,7 @@ use std::path::Path;
 
 use crate::error::Error;
 use crate::models::{Checksum, Component, DType, Encoding, Format, Manifest, Object, MAGIC};
-use crate::reader::TensorElement;
+use crate::reader::{Tensor, TensorElement};
 use crate::utils::{align_offset, is_little_endian, swap_endianness_in_place, DigestWriter};
 
 /// Zero-filled padding buffer (avoids heap allocation per tensor).
@@ -153,11 +153,6 @@ impl<W: Write + Seek> Writer<W> {
     /// Sets global attributes on the manifest.
     pub fn set_attributes(&mut self, attrs: BTreeMap<String, ciborium::Value>) {
         self.manifest.attributes = Some(attrs);
-    }
-
-    /// Returns a mutable reference to the internal manifest.
-    pub(crate) fn manifest_mut(&mut self) -> &mut Manifest {
-        &mut self.manifest
     }
 
     /// Adds a dense object from raw bytes (FFI/unsafe usage).
@@ -451,6 +446,102 @@ impl<W: Write + Seek> Writer<W> {
             dtype,
             values_bytes,
             coords,
+            compression,
+            checksum,
+        )
+    }
+
+    /// Adds a generic object with arbitrary components.
+    ///
+    /// This is the general-purpose method that supports any format (dense, sparse,
+    /// quantized, custom). Each component is specified as `(name, dtype, logical_type, bytes)`.
+    ///
+    /// # Arguments
+    /// * `name` — Object name (must be unique).
+    /// * `shape` — Logical shape dimensions.
+    /// * `format` — Layout format (dense, sparse_csr, etc.).
+    /// * `component_data` — Slice of `(component_name, dtype, logical_type, raw_bytes)`.
+    /// * `attributes` — Optional per-object attributes.
+    /// * `compression` — Compression method for all components.
+    /// * `checksum` — Checksum algorithm for all components.
+    pub fn add_object(
+        &mut self,
+        name: &str,
+        shape: Vec<u64>,
+        format: Format,
+        component_data: &[(&str, DType, Option<&str>, &[u8])],
+        attributes: Option<BTreeMap<String, ciborium::Value>>,
+        compression: Compression,
+        checksum: Checksum,
+    ) -> Result<(), Error> {
+        if self.manifest.objects.contains_key(name) {
+            return Err(Error::Other(format!("Duplicate tensor name: '{}'", name)));
+        }
+
+        let mut components = BTreeMap::new();
+        for (comp_name, dtype, logical_type, bytes) in component_data {
+            let mut component = self.write_component(bytes, *dtype, compression, checksum)?;
+            if let Some(lt) = logical_type {
+                component.r#type = Some(lt.to_string());
+            }
+            components.insert(comp_name.to_string(), component);
+        }
+
+        let obj = Object {
+            shape,
+            format,
+            attributes,
+            components,
+        };
+
+        self.manifest.objects.insert(name.to_string(), obj);
+        Ok(())
+    }
+
+    /// Writes a [`Tensor`] object (from [`TensorReader::read_object`]) to the file.
+    ///
+    /// This is the write counterpart of `read_object()`, enabling generic copy
+    /// of any tensor (dense, sparse, quantized, custom) between files.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use ztensor::{TensorReader, Writer, Compression, Checksum};
+    ///
+    /// let reader = ztensor::open("input.zt")?;
+    /// let mut writer = Writer::create("output.zt")?;
+    /// for name in reader.keys() {
+    ///     let tensor = reader.read_object(name)?;
+    ///     writer.write_object(name, &tensor, Compression::Raw, Checksum::None)?;
+    /// }
+    /// writer.finish()?;
+    /// # Ok::<(), ztensor::Error>(())
+    /// ```
+    pub fn write_object(
+        &mut self,
+        name: &str,
+        tensor: &Tensor<'_>,
+        compression: Compression,
+        checksum: Checksum,
+    ) -> Result<(), Error> {
+        let comp_data: Vec<(&str, DType, Option<&str>, &[u8])> = tensor
+            .components
+            .iter()
+            .map(|(k, v)| {
+                (
+                    k.as_str(),
+                    v.dtype,
+                    v.logical_type.as_deref(),
+                    v.data.as_slice(),
+                )
+            })
+            .collect();
+        self.add_object(
+            name,
+            tensor.shape.clone(),
+            tensor.format.clone(),
+            &comp_data,
+            tensor.attributes.clone(),
             compression,
             checksum,
         )

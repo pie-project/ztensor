@@ -317,7 +317,10 @@ def benchmark_read_selective(format_name, filepath, fraction=0.1):
         all_keys = reader.keys()
         step = max(1, int(1.0 / fraction))
         selected = all_keys[::step]
-        loaded_tensors = dict(reader.read_tensors(selected))
+        if config.BACKEND == "torch":
+            loaded_tensors = reader.read_torch(selected)
+        else:
+            loaded_tensors = reader.read_numpy(selected)
 
     elif format_name == "safetensors":
         from safetensors import safe_open

@@ -7,7 +7,7 @@ use hf_hub::Repo;
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 use ztensor::writer::Compression;
-use ztensor::{Checksum, Format, Reader, Writer};
+use ztensor::{Checksum, Reader, TensorReader, Writer};
 
 use crate::utils::create_progress_bar;
 
@@ -148,27 +148,19 @@ pub fn run_conversion(
         pb.set_message(format!("Processing {}", input));
         let reader = ztensor::open(input).with_context(|| format!("Failed to open '{}'", input))?;
 
-        for (name, obj) in reader.tensors() {
-            if !seen_names.insert(name.clone()) {
+        for name in reader.keys() {
+            if !seen_names.insert(name.to_string()) {
                 bail!(
                     "Duplicate tensor name '{}' found in file '{}'. Aborting.",
                     name,
                     input
                 );
             }
-            let dtype = obj.data_dtype().map_err(|e| anyhow::anyhow!("{}", e))?;
-            let data = reader
-                .read_data(name)
+            let tensor = reader
+                .read_object(name)
                 .map_err(|e| anyhow::anyhow!("Failed to read tensor '{}': {}", name, e))?;
             writer
-                .add_bytes(
-                    name,
-                    obj.shape.clone(),
-                    dtype,
-                    compression,
-                    data.as_slice(),
-                    checksum,
-                )
+                .write_object(name, &tensor, compression, checksum)
                 .map_err(|e| anyhow::anyhow!("{}", e))?;
         }
 
@@ -194,38 +186,20 @@ pub fn compress_ztensor(input: &str, output: &str, level: Option<i32>) -> Result
         .with_context(|| format!("Failed to open input file '{}'", input))?;
     let mut writer = Writer::create(output)
         .with_context(|| format!("Failed to create output file '{}'", output))?;
-    let objects = reader.tensors().clone();
-
     let compression = if let Some(l) = level {
         Compression::Zstd(l)
     } else {
         Compression::Zstd(3)
     };
 
-    let pb = create_progress_bar(objects.len() as u64)?;
+    let pb = create_progress_bar(reader.tensors().len() as u64)?;
 
-    for (name, obj) in &objects {
-        if obj.format != Format::Dense {
-            eprintln!("Skipping non-dense tensor '{}' during compression", name);
-            pb.inc(1);
-            continue;
-        }
-        let data_comp = obj
-            .components
-            .get("data")
-            .ok_or_else(|| anyhow::anyhow!("Missing data component for tensor '{}'", name))?;
-        let data = reader
-            .read(&name, true)
+    for name in reader.keys() {
+        let tensor = reader
+            .read_object(name)
             .map_err(|e| anyhow::anyhow!("{}", e))?;
         writer
-            .add_bytes(
-                name,
-                obj.shape.clone(),
-                data_comp.dtype,
-                compression,
-                &data,
-                Checksum::None,
-            )
+            .write_object(name, &tensor, compression, Checksum::None)
             .map_err(|e| anyhow::anyhow!("{}", e))?;
         pb.inc(1);
     }
@@ -241,32 +215,15 @@ pub fn decompress_ztensor(input: &str, output: &str) -> Result<()> {
         .with_context(|| format!("Failed to open input file '{}'", input))?;
     let mut writer = Writer::create(output)
         .with_context(|| format!("Failed to create output file '{}'", output))?;
-    let objects = reader.tensors().clone();
 
-    let pb = create_progress_bar(objects.len() as u64)?;
+    let pb = create_progress_bar(reader.tensors().len() as u64)?;
 
-    for (name, obj) in &objects {
-        if obj.format != Format::Dense {
-            eprintln!("Skipping non-dense tensor '{}' during decompression", name);
-            pb.inc(1);
-            continue;
-        }
-        let data_comp = obj
-            .components
-            .get("data")
-            .ok_or_else(|| anyhow::anyhow!("Missing data component for tensor '{}'", name))?;
-        let data = reader
-            .read(&name, true)
+    for name in reader.keys() {
+        let tensor = reader
+            .read_object(name)
             .map_err(|e| anyhow::anyhow!("{}", e))?;
         writer
-            .add_bytes(
-                name,
-                obj.shape.clone(),
-                data_comp.dtype,
-                Compression::Raw,
-                &data,
-                Checksum::None,
-            )
+            .write_object(name, &tensor, Compression::Raw, Checksum::None)
             .map_err(|e| anyhow::anyhow!("{}", e))?;
         pb.inc(1);
     }
@@ -288,36 +245,20 @@ pub fn merge_ztensor_files(inputs: &[String], output: &str, preserve_original: b
         pb.set_message(format!("Processing {}", input));
         let reader = Reader::open_any_path(input)
             .with_context(|| format!("Failed to open input file '{}'", input))?;
-        let objects = reader.tensors().clone();
 
-        for (name, obj) in &objects {
-            if !seen_names.insert(name.clone()) {
+        for name in reader.keys() {
+            if !seen_names.insert(name.to_string()) {
                 bail!(
                     "Duplicate tensor name '{}' found in file '{}'. Aborting merge.",
                     name,
                     input
                 );
             }
-            if obj.format != Format::Dense {
-                eprintln!("Skipping non-dense tensor '{}' during merge", name);
-                continue;
-            }
-            let data_comp = obj
-                .components
-                .get("data")
-                .ok_or_else(|| anyhow::anyhow!("Missing data component for tensor '{}'", name))?;
-            let data = reader
-                .read(&name, true)
+            let tensor = reader
+                .read_object(name)
                 .map_err(|e| anyhow::anyhow!("{}", e))?;
             writer
-                .add_bytes(
-                    name,
-                    obj.shape.clone(),
-                    data_comp.dtype,
-                    Compression::Raw,
-                    &data,
-                    Checksum::None,
-                )
+                .write_object(name, &tensor, Compression::Raw, Checksum::None)
                 .map_err(|e| anyhow::anyhow!("{}", e))?;
         }
 
@@ -355,32 +296,17 @@ pub fn migrate_ztensor(
     let mut writer = Writer::create(output)
         .with_context(|| format!("Failed to create output file '{}'", output))?;
 
-    let objects = reader.tensors().clone();
-    let pb = create_progress_bar(objects.len() as u64)?;
-
     let compression = get_compression(compress, level);
 
-    for (name, obj) in &objects {
+    let pb = create_progress_bar(reader.tensors().len() as u64)?;
+
+    for name in reader.keys() {
         pb.set_message(format!("Migrating {}", name));
-
-        let data_comp = obj
-            .components
-            .get("data")
-            .ok_or_else(|| anyhow::anyhow!("Missing data component for tensor '{}'", name))?;
-
-        let data = reader
-            .read(&name, true)
+        let tensor = reader
+            .read_object(name)
             .map_err(|e| anyhow::anyhow!("{}", e))?;
-
         writer
-            .add_bytes(
-                name,
-                obj.shape.clone(),
-                data_comp.dtype,
-                compression,
-                &data,
-                Checksum::None,
-            )
+            .write_object(name, &tensor, compression, Checksum::None)
             .map_err(|e| anyhow::anyhow!("{}", e))?;
         pb.inc(1);
     }
@@ -494,20 +420,12 @@ pub fn download_hf(
         let mut writer = Writer::create(&output_file)
             .with_context(|| format!("Failed to create output file '{}'", output_file.display()))?;
 
-        for (name, obj) in reader.tensors() {
-            let dtype = obj.data_dtype().map_err(|e| anyhow::anyhow!("{}", e))?;
-            let data = reader
-                .read_data(name)
+        for name in reader.keys() {
+            let tensor = reader
+                .read_object(name)
                 .map_err(|e| anyhow::anyhow!("Failed to read tensor '{}': {}", name, e))?;
             writer
-                .add_bytes(
-                    name,
-                    obj.shape.clone(),
-                    dtype,
-                    compression,
-                    data.as_slice(),
-                    Checksum::None,
-                )
+                .write_object(name, &tensor, compression, Checksum::None)
                 .map_err(|e| anyhow::anyhow!("{}", e))?;
         }
 

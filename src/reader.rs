@@ -194,6 +194,181 @@ impl<'a> TensorData<'a> {
 }
 
 // =========================================================================
+// ComponentData / Tensor — unified multi-component abstraction
+// =========================================================================
+
+/// Metadata and data for a single component of a tensor object.
+///
+/// Returned as part of [`Tensor`] from [`TensorReader::read_object`].
+pub struct ComponentData<'a> {
+    /// Storage data type (e.g., F32, U64).
+    pub dtype: DType,
+    /// Optional logical type (e.g., "f8_e4m3fn"). When absent, equals `dtype`.
+    pub logical_type: Option<String>,
+    /// The raw byte data, possibly zero-copy from mmap.
+    pub data: TensorData<'a>,
+}
+
+/// A fully-read tensor object with all its components.
+///
+/// This is the Rust counterpart of Python's `PyTensor`. It provides unified
+/// access to dense, sparse, quantized, and custom tensor formats through
+/// [`TensorReader::read_object`].
+///
+/// # Examples
+///
+/// ```no_run
+/// use ztensor::TensorReader;
+///
+/// let reader = ztensor::open("model.zt")?;
+/// let tensor = reader.read_object("weights")?;
+/// println!("shape: {:?}, format: {}", tensor.shape, tensor.format);
+///
+/// // For dense tensors, convert to typed vec:
+/// let data: Vec<f32> = tensor.into_dense()?;
+/// # Ok::<(), ztensor::Error>(())
+/// ```
+pub struct Tensor<'a> {
+    /// Logical dimensions.
+    pub shape: Vec<u64>,
+    /// Layout format (dense, sparse_csr, sparse_coo, etc.).
+    pub format: Format,
+    /// Optional per-object attributes.
+    pub attributes: Option<BTreeMap<String, ciborium::Value>>,
+    /// All components, keyed by role name (e.g., "data", "values", "indices").
+    pub components: BTreeMap<String, ComponentData<'a>>,
+}
+
+impl<'a> Tensor<'a> {
+    /// Converts a dense tensor into a typed `Vec<T>`.
+    ///
+    /// Returns an error if the tensor is not dense or the dtype doesn't match `T`.
+    pub fn into_dense<T: TensorElement>(self) -> Result<Vec<T>, Error> {
+        if self.format != Format::Dense {
+            return Err(Error::TypeMismatch {
+                expected: Format::Dense.as_str().to_string(),
+                found: self.format.as_str().to_string(),
+                context: "Tensor::into_dense".to_string(),
+            });
+        }
+        let mut components = self.components;
+        let comp = components
+            .remove("data")
+            .ok_or_else(|| Error::InvalidFileStructure("Missing 'data' component".to_string()))?;
+        comp.data.into_typed(comp.dtype)
+    }
+
+    /// Converts a CSR sparse tensor into a [`CsrTensor<T>`].
+    ///
+    /// Returns an error if the tensor is not sparse_csr or the dtype doesn't match `T`.
+    pub fn into_csr<T: TensorElement>(self) -> Result<CsrTensor<T>, Error> {
+        if self.format != Format::SparseCsr {
+            return Err(Error::TypeMismatch {
+                expected: Format::SparseCsr.as_str().to_string(),
+                found: self.format.as_str().to_string(),
+                context: "Tensor::into_csr".to_string(),
+            });
+        }
+        let mut components = self.components;
+
+        let values_comp = components
+            .remove("values")
+            .ok_or_else(|| Error::InvalidFileStructure("Missing 'values' component".to_string()))?;
+        let indices_comp = components.remove("indices").ok_or_else(|| {
+            Error::InvalidFileStructure("Missing 'indices' component".to_string())
+        })?;
+        let indptr_comp = components
+            .remove("indptr")
+            .ok_or_else(|| Error::InvalidFileStructure("Missing 'indptr' component".to_string()))?;
+
+        let values: Vec<T> = values_comp.data.into_typed(values_comp.dtype)?;
+        let indices: Vec<u64> = indices_comp.data.into_typed(indices_comp.dtype)?;
+        let indptr: Vec<u64> = indptr_comp.data.into_typed(indptr_comp.dtype)?;
+
+        Ok(CsrTensor {
+            shape: self.shape,
+            indptr,
+            indices,
+            values,
+        })
+    }
+
+    /// Converts a COO sparse tensor into a [`CooTensor<T>`].
+    ///
+    /// Returns an error if the tensor is not sparse_coo or the dtype doesn't match `T`.
+    pub fn into_coo<T: TensorElement>(self) -> Result<CooTensor<T>, Error> {
+        if self.format != Format::SparseCoo {
+            return Err(Error::TypeMismatch {
+                expected: Format::SparseCoo.as_str().to_string(),
+                found: self.format.as_str().to_string(),
+                context: "Tensor::into_coo".to_string(),
+            });
+        }
+        let mut components = self.components;
+
+        let values_comp = components
+            .remove("values")
+            .ok_or_else(|| Error::InvalidFileStructure("Missing 'values' component".to_string()))?;
+        let coords_comp = components
+            .remove("coords")
+            .ok_or_else(|| Error::InvalidFileStructure("Missing 'coords' component".to_string()))?;
+
+        let values: Vec<T> = values_comp.data.into_typed(values_comp.dtype)?;
+        let all_coords: Vec<u64> = coords_comp.data.into_typed(coords_comp.dtype)?;
+
+        let nnz = values.len();
+        let ndim = self.shape.len();
+
+        if all_coords.len() != nnz * ndim {
+            return Err(Error::DataConversionError(
+                "COO coords size mismatch".to_string(),
+            ));
+        }
+
+        let mut indices = Vec::with_capacity(nnz);
+        for i in 0..nnz {
+            let mut idx = Vec::with_capacity(ndim);
+            for d in 0..ndim {
+                idx.push(all_coords[d * nnz + i]);
+            }
+            indices.push(idx);
+        }
+
+        Ok(CooTensor {
+            shape: self.shape,
+            indices,
+            values,
+        })
+    }
+
+    /// Converts all borrowed data to owned, producing a `Tensor<'static>`.
+    ///
+    /// This is useful when you need the tensor to outlive the reader.
+    pub fn into_owned(self) -> Tensor<'static> {
+        let components = self
+            .components
+            .into_iter()
+            .map(|(k, v)| {
+                (
+                    k,
+                    ComponentData {
+                        dtype: v.dtype,
+                        logical_type: v.logical_type,
+                        data: TensorData::Owned(v.data.into_owned()),
+                    },
+                )
+            })
+            .collect();
+        Tensor {
+            shape: self.shape,
+            format: self.format,
+            attributes: self.attributes,
+            components,
+        }
+    }
+}
+
+// =========================================================================
 // TensorReader trait — unified read interface
 // =========================================================================
 
@@ -239,6 +414,61 @@ pub trait TensorReader {
     /// Returns the names of all tensors in the file.
     fn keys(&self) -> Vec<&str> {
         self.manifest().objects.keys().map(|s| s.as_str()).collect()
+    }
+
+    /// Reads the raw byte data for a named component of a tensor.
+    ///
+    /// For non-`.zt` formats (safetensors, pytorch, etc.), only the `"data"`
+    /// component is supported. `.zt` files support arbitrary component names
+    /// (e.g., `"values"`, `"indices"`, `"indptr"` for sparse tensors).
+    fn read_component_data(&self, name: &str, component: &str) -> Result<TensorData<'_>, Error> {
+        if component == "data" {
+            self.read_data(name)
+        } else {
+            Err(Error::Other(format!(
+                "Component '{}' reading only supported for .zt files",
+                component
+            )))
+        }
+    }
+
+    /// Reads a complete tensor object with all its components.
+    ///
+    /// Returns a [`Tensor`] containing all component data, shape, format,
+    /// and attributes. Works for any format (dense, sparse, quantized, custom).
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use ztensor::TensorReader;
+    ///
+    /// let reader = ztensor::open("model.zt")?;
+    /// let tensor = reader.read_object("weights")?;
+    /// println!("format: {}, components: {}", tensor.format, tensor.components.len());
+    /// # Ok::<(), ztensor::Error>(())
+    /// ```
+    fn read_object(&self, name: &str) -> Result<Tensor<'_>, Error> {
+        let obj = self
+            .get(name)
+            .ok_or_else(|| Error::ObjectNotFound(name.to_string()))?;
+        let mut components = BTreeMap::new();
+        for (comp_name, comp_meta) in &obj.components {
+            let data = self.read_component_data(name, comp_name)?;
+            components.insert(
+                comp_name.clone(),
+                ComponentData {
+                    dtype: comp_meta.dtype,
+                    logical_type: comp_meta.r#type.clone(),
+                    data,
+                },
+            );
+        }
+        Ok(Tensor {
+            shape: obj.shape.clone(),
+            format: obj.format.clone(),
+            attributes: obj.attributes.clone(),
+            components,
+        })
     }
 
     /// Reads tensor data as a typed vector.
@@ -466,6 +696,57 @@ macro_rules! impl_mmap_reader {
                 Ok(unsafe { std::slice::from_raw_parts(slice.as_ptr(), slice.len()) })
             }
 
+            /// Gets a zero-copy byte slice of a specific component of an object.
+            ///
+            /// Generalizes [`view`](Reader::view) to any component, not just
+            /// the `"data"` component of dense objects.
+            pub fn view_component(&self, name: &str, component_name: &str) -> Result<&[u8], Error> {
+                let obj = self
+                    .manifest
+                    .objects
+                    .get(name)
+                    .ok_or_else(|| Error::ObjectNotFound(name.to_string()))?;
+
+                let component = obj.components.get(component_name).ok_or_else(|| {
+                    Error::InvalidFileStructure(format!(
+                        "Object '{}' missing '{}' component",
+                        name, component_name
+                    ))
+                })?;
+
+                if component.encoding != Encoding::Raw {
+                    return Err(Error::Other(format!(
+                        "Zero-copy not supported for compressed component '{}' in '{}'",
+                        component_name, name
+                    )));
+                }
+
+                if component.offset % ALIGNMENT != 0 {
+                    return Err(Error::InvalidAlignment {
+                        offset: component.offset,
+                        alignment: ALIGNMENT,
+                    });
+                }
+
+                let borrow = self.reader.borrow();
+                let mmap: &$mmap_type = borrow.get_ref();
+                let start = component.offset as usize;
+                let end = start + component.length as usize;
+
+                if end > mmap.len() {
+                    return Err(Error::InvalidFileStructure(format!(
+                        "Component '{}/{}' out of bounds (end={} > file_len={})",
+                        name,
+                        component_name,
+                        end,
+                        mmap.len()
+                    )));
+                }
+
+                let slice = &mmap[start..end];
+                Ok(unsafe { std::slice::from_raw_parts(slice.as_ptr(), slice.len()) })
+            }
+
             /// Gets a typed zero-copy slice of an object's data.
             ///
             /// Returns an error if the stored dtype doesn't match `T`.
@@ -509,6 +790,35 @@ macro_rules! impl_mmap_reader {
                         let data = self.read(name, true)?;
                         Ok(TensorData::Owned(data))
                     }
+                }
+            }
+
+            fn read_component_data(
+                &self,
+                name: &str,
+                component_name: &str,
+            ) -> Result<TensorData<'_>, Error> {
+                // Look up object and component first — real errors propagate.
+                let obj = self
+                    .manifest
+                    .objects
+                    .get(name)
+                    .ok_or_else(|| Error::ObjectNotFound(name.to_string()))?;
+                let comp = obj.components.get(component_name).ok_or_else(|| {
+                    Error::InvalidFileStructure(format!(
+                        "Missing '{}' component for '{}'",
+                        component_name, name
+                    ))
+                })?;
+
+                if comp.encoding == Encoding::Raw {
+                    // Try zero-copy for raw components
+                    let slice = self.view_component(name, component_name)?;
+                    Ok(TensorData::Borrowed(slice))
+                } else {
+                    // Compressed: must read + decompress
+                    let data = Self::read_component_impl(&mut *self.reader.borrow_mut(), comp)?;
+                    Ok(TensorData::Owned(data))
                 }
             }
         }
@@ -1229,6 +1539,26 @@ impl TensorReader for Reader<BufReader<File>> {
 
     fn read_data(&self, name: &str) -> Result<TensorData<'_>, Error> {
         let data = self.read(name, true)?;
+        Ok(TensorData::Owned(data))
+    }
+
+    fn read_component_data(
+        &self,
+        name: &str,
+        component_name: &str,
+    ) -> Result<TensorData<'_>, Error> {
+        let obj = self
+            .manifest
+            .objects
+            .get(name)
+            .ok_or_else(|| Error::ObjectNotFound(name.to_string()))?;
+        let comp = obj.components.get(component_name).ok_or_else(|| {
+            Error::InvalidFileStructure(format!(
+                "Missing '{}' component for '{}'",
+                component_name, name
+            ))
+        })?;
+        let data = Self::read_component_impl(&mut *self.reader.borrow_mut(), comp)?;
         Ok(TensorData::Owned(data))
     }
 }

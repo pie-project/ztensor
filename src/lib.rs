@@ -93,8 +93,10 @@ mod pylib;
 
 pub use compat::{is_legacy_file, is_legacy_format, LegacyReader};
 pub use error::Error;
-pub use models::{Checksum, Component, DType, Encoding, Format, Manifest, Object};
-pub use reader::{Reader, TensorData, TensorElement, TensorReader};
+pub use models::{
+    Checksum, Component, CooTensor, CsrTensor, DType, Encoding, Format, Manifest, Object,
+};
+pub use reader::{ComponentData, Reader, Tensor, TensorData, TensorElement, TensorReader};
 pub use writer::{Compression, Writer};
 
 #[cfg(feature = "safetensors")]
@@ -238,46 +240,26 @@ pub fn remove_tensors(
             continue;
         }
 
-        if obj.format != Format::Dense {
-            return Err(Error::Other(format!(
-                "Cannot copy tensor '{}' with unsupported format '{}' (only dense tensors supported)",
-                name,
-                obj.format.as_str()
-            )));
-        }
+        let tensor = reader.read_object(name)?;
 
-        let data_comp = obj.components.get("data").ok_or_else(|| {
-            Error::InvalidFileStructure(format!("Missing 'data' component for '{}'", name))
-        })?;
+        // Infer compression/checksum from first component
+        let first_comp =
+            obj.components.values().next().ok_or_else(|| {
+                Error::InvalidFileStructure(format!("No components for '{}'", name))
+            })?;
 
-        let data = reader.read(name, true)?;
-
-        let compression = match data_comp.encoding {
+        let compression = match first_comp.encoding {
             Encoding::Zstd => writer::Compression::Zstd(3),
             Encoding::Raw => writer::Compression::Raw,
         };
 
-        let checksum = match &data_comp.digest {
+        let checksum = match &first_comp.digest {
             Some(d) if d.starts_with("sha256:") => Checksum::Sha256,
             Some(d) if d.starts_with("crc32c:") => Checksum::Crc32c,
             _ => Checksum::None,
         };
 
-        writer.add_bytes(
-            name,
-            obj.shape.clone(),
-            data_comp.dtype,
-            compression,
-            &data,
-            checksum,
-        )?;
-
-        // Preserve per-object attributes
-        if obj.attributes.is_some() {
-            if let Some(written_obj) = writer.manifest_mut().objects.get_mut(name) {
-                written_obj.attributes = obj.attributes.clone();
-            }
-        }
+        writer.write_object(name, &tensor, compression, checksum)?;
     }
 
     writer.finish()?;
@@ -941,6 +923,377 @@ mod tests {
         let reader = Reader::new(&mut buffer)?;
         assert_eq!(reader.manifest.version, "1.2.0");
 
+        Ok(())
+    }
+
+    // =========================================================================
+    // read_object / write_object tests
+    // =========================================================================
+
+    /// Helper: write to a temp file, return (reader, path).
+    fn write_temp(
+        name: &str,
+        f: impl FnOnce(&mut Writer<std::io::BufWriter<std::fs::File>>) -> Result<(), Error>,
+    ) -> Result<
+        (
+            Reader<std::io::BufReader<std::fs::File>>,
+            std::path::PathBuf,
+        ),
+        Error,
+    > {
+        let path = std::env::temp_dir().join(format!("ztensor_test_{}.zt", name));
+        {
+            let mut w = Writer::create(&path)?;
+            f(&mut w)?;
+            w.finish()?;
+        }
+        let r = Reader::open(&path)?;
+        Ok((r, path))
+    }
+
+    #[test]
+    fn test_read_object_dense() -> Result<(), Error> {
+        let data: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0];
+        let (reader, path) = write_temp("read_object_dense", |w| w.add("weights", &[2, 2], &data))?;
+        let tensor = reader.read_object("weights")?;
+
+        assert_eq!(tensor.shape, vec![2, 2]);
+        assert_eq!(tensor.format, Format::Dense);
+        assert!(tensor.attributes.is_none());
+        assert_eq!(tensor.components.len(), 1);
+        assert!(tensor.components.contains_key("data"));
+        let comp = tensor.components.get("data").unwrap();
+        assert_eq!(comp.dtype, DType::F32);
+        assert_eq!(comp.data.as_slice().len(), 16); // 4 * f32
+
+        drop(reader);
+        std::fs::remove_file(path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_read_object_sparse_csr() -> Result<(), Error> {
+        let (reader, path) = write_temp("read_object_csr", |w| {
+            w.add_csr(
+                "sparse",
+                vec![2, 3],
+                DType::F32,
+                &[1.0f32, 2.0],
+                &[1u64, 2],
+                &[0u64, 1, 2],
+                Compression::Raw,
+                Checksum::None,
+            )
+        })?;
+        let tensor = reader.read_object("sparse")?;
+
+        assert_eq!(tensor.shape, vec![2, 3]);
+        assert_eq!(tensor.format, Format::SparseCsr);
+        assert_eq!(tensor.components.len(), 3);
+        assert!(tensor.components.contains_key("values"));
+        assert!(tensor.components.contains_key("indices"));
+        assert!(tensor.components.contains_key("indptr"));
+
+        drop(reader);
+        std::fs::remove_file(path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_read_object_sparse_coo() -> Result<(), Error> {
+        let (reader, path) = write_temp("read_object_coo", |w| {
+            w.add_coo(
+                "coo_mat",
+                vec![2, 3],
+                DType::I32,
+                &[10i32, 20],
+                &[0u64, 1, 0, 2],
+                Compression::Raw,
+                Checksum::None,
+            )
+        })?;
+        let tensor = reader.read_object("coo_mat")?;
+
+        assert_eq!(tensor.shape, vec![2, 3]);
+        assert_eq!(tensor.format, Format::SparseCoo);
+        assert_eq!(tensor.components.len(), 2);
+        assert!(tensor.components.contains_key("values"));
+        assert!(tensor.components.contains_key("coords"));
+
+        drop(reader);
+        std::fs::remove_file(path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_tensor_into_dense() -> Result<(), Error> {
+        let data: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0];
+        let (reader, path) = write_temp("into_dense", |w| w.add("t", &[4], &data))?;
+        let tensor = reader.read_object("t")?;
+        let result: Vec<f32> = tensor.into_dense()?;
+        assert_eq!(result, data);
+
+        drop(reader);
+        std::fs::remove_file(path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_tensor_into_csr() -> Result<(), Error> {
+        let values: Vec<f32> = vec![1.0, 2.0];
+        let indices: Vec<u64> = vec![1, 2];
+        let indptr: Vec<u64> = vec![0, 1, 2];
+
+        let (reader, path) = write_temp("into_csr", |w| {
+            w.add_csr(
+                "csr",
+                vec![2, 3],
+                DType::F32,
+                &[1.0f32, 2.0],
+                &[1u64, 2],
+                &[0u64, 1, 2],
+                Compression::Raw,
+                Checksum::None,
+            )
+        })?;
+        let tensor = reader.read_object("csr")?;
+        let csr = tensor.into_csr::<f32>()?;
+
+        assert_eq!(csr.shape, vec![2, 3]);
+        assert_eq!(csr.values, values);
+        assert_eq!(csr.indices, indices);
+        assert_eq!(csr.indptr, indptr);
+
+        drop(reader);
+        std::fs::remove_file(path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_tensor_into_coo() -> Result<(), Error> {
+        let values: Vec<i32> = vec![10, 20];
+
+        let (reader, path) = write_temp("into_coo", |w| {
+            w.add_coo(
+                "coo",
+                vec![2, 3],
+                DType::I32,
+                &[10i32, 20],
+                &[0u64, 1, 0, 2],
+                Compression::Raw,
+                Checksum::None,
+            )
+        })?;
+        let tensor = reader.read_object("coo")?;
+        let coo = tensor.into_coo::<i32>()?;
+
+        assert_eq!(coo.shape, vec![2, 3]);
+        assert_eq!(coo.values, values);
+        assert_eq!(coo.indices[0], vec![0, 0]);
+        assert_eq!(coo.indices[1], vec![1, 2]);
+
+        drop(reader);
+        std::fs::remove_file(path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_tensor_format_mismatch() -> Result<(), Error> {
+        let (reader, path) = write_temp("format_mismatch", |w| {
+            w.add_csr(
+                "csr",
+                vec![2, 3],
+                DType::F32,
+                &[1.0f32, 2.0],
+                &[1u64, 2],
+                &[0u64, 1, 2],
+                Compression::Raw,
+                Checksum::None,
+            )
+        })?;
+        let tensor = reader.read_object("csr")?;
+
+        // Calling into_dense on a CSR tensor should fail
+        match tensor.into_dense::<f32>() {
+            Err(Error::TypeMismatch { .. }) => {}
+            _ => panic!("Expected TypeMismatch error"),
+        }
+
+        drop(reader);
+        std::fs::remove_file(path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_write_object_roundtrip() -> Result<(), Error> {
+        let data: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let (reader1, path1) =
+            write_temp("write_roundtrip_src", |w| w.add("dense", &[2, 3], &data))?;
+        let tensor = reader1.read_object("dense")?;
+
+        let path2 = std::env::temp_dir().join("ztensor_test_write_roundtrip_dst.zt");
+        {
+            let mut writer2 = Writer::create(&path2)?;
+            writer2.write_object("dense", &tensor, Compression::Raw, Checksum::None)?;
+            writer2.finish()?;
+        }
+        let reader2 = Reader::open(&path2)?;
+        let result: Vec<f32> = reader2.read_as("dense")?;
+        assert_eq!(result, data);
+
+        drop(reader1);
+        drop(reader2);
+        std::fs::remove_file(path1)?;
+        std::fs::remove_file(path2)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_write_object_sparse_roundtrip() -> Result<(), Error> {
+        let values: Vec<f32> = vec![1.0, 2.0, 3.0];
+        let indices: Vec<u64> = vec![0, 1, 2];
+        let indptr: Vec<u64> = vec![0, 1, 2, 3];
+
+        let (reader1, path1) = write_temp("write_sparse_roundtrip_src", |w| {
+            w.add_csr(
+                "csr",
+                vec![3, 3],
+                DType::F32,
+                &[1.0f32, 2.0, 3.0],
+                &[0u64, 1, 2],
+                &[0u64, 1, 2, 3],
+                Compression::Raw,
+                Checksum::None,
+            )
+        })?;
+        let tensor = reader1.read_object("csr")?;
+
+        let path2 = std::env::temp_dir().join("ztensor_test_write_sparse_roundtrip_dst.zt");
+        {
+            let mut writer2 = Writer::create(&path2)?;
+            writer2.write_object("csr", &tensor, Compression::Raw, Checksum::None)?;
+            writer2.finish()?;
+        }
+        let reader2 = Reader::open(&path2)?;
+        let csr = reader2.read_csr::<f32>("csr")?;
+
+        assert_eq!(csr.shape, vec![3, 3]);
+        assert_eq!(csr.values, values);
+        assert_eq!(csr.indices, indices);
+        assert_eq!(csr.indptr, indptr);
+
+        drop(reader1);
+        drop(reader2);
+        std::fs::remove_file(path1)?;
+        std::fs::remove_file(path2)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_tensor_into_owned() -> Result<(), Error> {
+        let data: Vec<f32> = vec![1.0, 2.0, 3.0];
+        let (reader, path) = write_temp("into_owned", |w| w.add("t", &[3], &data))?;
+        let tensor = reader.read_object("t")?;
+        let owned = tensor.into_owned();
+        drop(reader); // reader dropped, owned tensor survives
+
+        let result: Vec<f32> = owned.into_dense()?;
+        assert_eq!(result, data);
+
+        std::fs::remove_file(path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_remove_tensors_with_sparse() -> Result<(), Error> {
+        let dir = std::env::temp_dir();
+        let input_path = dir.join("test_remove_sparse_input.zt");
+        let output_path = dir.join("test_remove_sparse_output.zt");
+
+        {
+            let mut writer = Writer::create(&input_path)?;
+            let dense_data: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0];
+            writer.add("dense", &[4], &dense_data)?;
+
+            let values: Vec<f32> = vec![1.0, 2.0];
+            let indices: Vec<u64> = vec![1, 2];
+            let indptr: Vec<u64> = vec![0, 1, 2];
+            writer.add_csr(
+                "sparse",
+                vec![2, 3],
+                DType::F32,
+                &values,
+                &indices,
+                &indptr,
+                Compression::Raw,
+                Checksum::None,
+            )?;
+            writer.finish()?;
+        }
+
+        // Remove the dense tensor, sparse should survive
+        remove_tensors(&input_path, &output_path, &["dense"])?;
+
+        let reader = Reader::open(&output_path)?;
+        assert!(!reader.tensors().contains_key("dense"));
+        assert!(reader.tensors().contains_key("sparse"));
+
+        let csr = reader.read_csr::<f32>("sparse")?;
+        assert_eq!(csr.values, vec![1.0, 2.0]);
+        assert_eq!(csr.indices, vec![1, 2]);
+        assert_eq!(csr.indptr, vec![0, 1, 2]);
+
+        std::fs::remove_file(input_path)?;
+        std::fs::remove_file(output_path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_write_object_compressed_sparse_roundtrip() -> Result<(), Error> {
+        let values: Vec<f32> = vec![1.0, 2.0, 3.0];
+        let indices: Vec<u64> = vec![0, 1, 2];
+        let indptr: Vec<u64> = vec![0, 1, 2, 3];
+
+        let (reader1, path1) = write_temp("compressed_sparse_src", |w| {
+            w.add_csr(
+                "csr",
+                vec![3, 3],
+                DType::F32,
+                &[1.0f32, 2.0, 3.0],
+                &[0u64, 1, 2],
+                &[0u64, 1, 2, 3],
+                Compression::Zstd(3),
+                Checksum::Crc32c,
+            )
+        })?;
+        let tensor = reader1.read_object("csr")?;
+
+        // Write to a second file preserving compression
+        let path2 = std::env::temp_dir().join("ztensor_test_compressed_sparse_dst.zt");
+        {
+            let mut w2 = Writer::create(&path2)?;
+            w2.write_object("csr", &tensor, Compression::Zstd(3), Checksum::Crc32c)?;
+            w2.finish()?;
+        }
+        let reader2 = Reader::open(&path2)?;
+        let csr = reader2.read_csr::<f32>("csr")?;
+
+        assert_eq!(csr.shape, vec![3, 3]);
+        assert_eq!(csr.values, values);
+        assert_eq!(csr.indices, indices);
+        assert_eq!(csr.indptr, indptr);
+
+        // Verify all 3 components have zstd encoding + crc32c
+        let obj = reader2.get("csr").unwrap();
+        for (_, comp) in &obj.components {
+            assert_eq!(comp.encoding, Encoding::Zstd);
+            assert!(comp.digest.as_ref().unwrap().starts_with("crc32c:"));
+        }
+
+        drop(reader1);
+        drop(reader2);
+        std::fs::remove_file(path1)?;
+        std::fs::remove_file(path2)?;
         Ok(())
     }
 

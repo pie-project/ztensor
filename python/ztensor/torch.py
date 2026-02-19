@@ -72,7 +72,7 @@ def save_file(
     # Convert all tensors to numpy, then use native batch save
     np_tensors = {}
     for name, tensor in tensors.items():
-        if tensor.is_cuda:
+        if tensor.device.type != "cpu":
             tensor = tensor.cpu()
         if not tensor.is_contiguous():
             tensor = tensor.contiguous()
@@ -158,7 +158,7 @@ def load_file(
         device = f"cuda:{device}"
 
     reader = Reader(str(filename))
-    return reader.load_torch(device=device, copy=copy)
+    return reader.read_torch(reader.keys(), device=device, copy=copy)
 
 
 def load(data: bytes) -> Dict[str, torch.Tensor]:
@@ -183,7 +183,7 @@ def load(data: bytes) -> Dict[str, torch.Tensor]:
         tmp_path = tmp.name
     try:
         reader = Reader(tmp_path)
-        return reader.load_torch(device="cpu")
+        return reader.read_torch(reader.keys(), device="cpu")
     finally:
         if os.path.exists(tmp_path):
             os.unlink(tmp_path)

@@ -7,6 +7,7 @@ use anyhow::{bail, Result};
 use clap::CommandFactory;
 use clap::{Parser, Subcommand, ValueEnum};
 use std::path::Path;
+use ztensor::TensorReader;
 
 use commands::{
     compress_ztensor, decompress_ztensor, download_hf, merge_ztensor_files, migrate_ztensor,
@@ -400,38 +401,30 @@ fn main() -> Result<()> {
 
             let mut count = 0;
             for (name, obj) in &src_objects {
-                if obj.format != ztensor::Format::Dense {
-                    eprintln!("Skipping non-dense tensor '{}'", name);
-                    continue;
-                }
-                let data_comp = obj
-                    .components
-                    .get("data")
-                    .ok_or_else(|| anyhow::anyhow!("Missing data component for '{}'", name))?;
-                let data = src_reader
-                    .read(name, true)
+                let tensor = src_reader
+                    .read_object(name)
                     .map_err(|e| anyhow::anyhow!("{}", e))?;
 
-                let compression = match data_comp.encoding {
+                // Infer compression/checksum from first component
+                let first_comp = obj
+                    .components
+                    .values()
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("No components for '{}'", name))?;
+
+                let compression = match first_comp.encoding {
                     ztensor::Encoding::Zstd => ztensor::writer::Compression::Zstd(3),
                     ztensor::Encoding::Raw => ztensor::writer::Compression::Raw,
                 };
 
-                let checksum = match &data_comp.digest {
+                let checksum = match &first_comp.digest {
                     Some(d) if d.starts_with("sha256:") => ztensor::Checksum::Sha256,
                     Some(d) if d.starts_with("crc32c:") => ztensor::Checksum::Crc32c,
                     _ => ztensor::Checksum::None,
                 };
 
                 writer
-                    .add_bytes(
-                        name,
-                        obj.shape.clone(),
-                        data_comp.dtype,
-                        compression,
-                        &data,
-                        checksum,
-                    )
+                    .write_object(name, &tensor, compression, checksum)
                     .map_err(|e| anyhow::anyhow!("{}", e))?;
                 count += 1;
             }

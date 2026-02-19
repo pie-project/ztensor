@@ -131,7 +131,7 @@ def load_file(
         >>> loaded = load_file("model.zt", copy=True)
     """
     reader = Reader(str(filename))
-    return reader.load_numpy(copy=copy)
+    return reader.read_numpy(reader.keys(), copy=copy)
 
 
 def load(data: bytes) -> Dict[str, np.ndarray]:
