@@ -17,12 +17,17 @@ fn fixture(name: &str) -> PathBuf {
         if !dir.join("contiguous_simple.h5").exists() {
             std::fs::create_dir_all(&dir).unwrap();
             let script = manifest.join("tests").join("generate_hdf5_fixtures.py");
-            let python = manifest.join(".venv").join("bin").join("python");
+            let venv_python = manifest.join(".venv").join("bin").join("python");
+            let python = if venv_python.exists() {
+                venv_python
+            } else {
+                PathBuf::from("python3")
+            };
             let status = std::process::Command::new(&python)
                 .arg(&script)
                 .arg(&dir)
                 .status()
-                .expect("Failed to run h5py fixture generator");
+                .expect("Failed to run h5py fixture generator (need python3 with h5py)");
             assert!(status.success(), "h5py fixture generator failed");
         }
     });
