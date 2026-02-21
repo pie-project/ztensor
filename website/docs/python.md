@@ -224,6 +224,47 @@ t = reader.read_torch("weights", device="cuda:0")        # load to GPU
 t = reader.read_torch("weights", copy=True)               # independent copy
 ```
 
+### `read_into(name, dst)`
+
+Copies tensor data directly into a pre-allocated destination array or tensor. This avoids intermediate allocations, which is useful for filling contiguous GPU arenas (e.g. on MPS or CUDA) without per-tensor allocation overhead.
+
+The destination can be a `np.ndarray` or `torch.Tensor` on any device. Its shape and dtype must match the stored tensor — validation is delegated to `np.copyto` / `torch.Tensor.copy_()`.
+
+**Single tensor:**
+
+```python
+dst = torch.empty(1024, 768, dtype=torch.float32, device="mps")
+reader.read_into("layer.0.weight", dst)
+```
+
+**Batch (dict):**
+
+Pass a `dict[str, dst]` to read multiple tensors. Reads are sorted by file offset internally for sequential I/O.
+
+```python
+reader.read_into({
+    "layer.0.weight": weight_view,
+    "layer.0.bias": bias_view,
+})
+```
+
+**Arena pattern — contiguous GPU buffer with views:**
+
+```python
+reader = ztensor.Reader("model.zt")
+for layer_idx in range(num_layers):
+    arena = torch.empty(layer_bytes, dtype=torch.uint8, device="mps")
+    offset = 0
+    views = {}
+    for name in layer_tensor_names(layer_idx):
+        meta = reader.metadata(name)
+        nbytes = meta.components["data"]["length"]
+        view = arena[offset:offset+nbytes].view(torch_dtype).reshape(meta.shape)
+        views[name] = view
+        offset += nbytes
+    reader.read_into(views)
+```
+
 ### `format`
 
 The detected file format: `"zt"`, `"safetensors"`, `"pickle"`, `"gguf"`, `"npz"`, `"onnx"`, `"hdf5"`, or `"unknown"`.

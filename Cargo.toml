@@ -1,6 +1,6 @@
 [package]
 name = "ztensor"
-version = "1.2.2"
+version = "1.2.3"
 edition = "2021"
 authors = ["In Gim <in.gim@icloud.com>"]
 description = "Unified, zero-copy, and safe I/O for deep learning formats"

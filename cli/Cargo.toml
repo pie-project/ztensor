@@ -1,6 +1,6 @@
 [package]
 name = "ztensor-cli"
-version = "1.2.2"
+version = "1.2.3"
 edition = "2024"
 authors = ["In Gim <in.gim@icloud.com>"]
 description = "Command-line tool for zTensor"
@@ -12,7 +12,7 @@ name = "ztensor"
 path = "src/main.rs"
 
 [dependencies]
-ztensor = { version = "1.2.2", path = "../", features = ["all-formats"] }
+ztensor = { version = "1.2.3", path = "../", features = ["all-formats"] }
 clap = { version = "4", features = ["derive"] }
 comfy-table = "7.1.0"
 humansize = "2.1.3"

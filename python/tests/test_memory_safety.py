@@ -26,6 +26,7 @@ import numpy as np
 import pytest
 
 from ztensor import Reader, Writer
+from ztensor._ztensor import _Reader as RustReader
 
 try:
     import torch
@@ -108,7 +109,7 @@ class TestBaseChain:
         arr = reader["small"]
 
         # Walk the chain: reshaped → viewed → raw u8 (base=Reader)
-        found_reader = any(isinstance(b, Reader) for b in _walk_base_chain(arr))
+        found_reader = any(isinstance(b, RustReader) for b in _walk_base_chain(arr))
         assert found_reader, (
             f"Reader not found in base chain. "
             f"Chain types: {[type(b).__name__ for b in _walk_base_chain(arr)]}"
@@ -119,26 +120,26 @@ class TestBaseChain:
         path, _ = zt_file
 
         reader = Reader(path)
-        tensors = reader.load_numpy(copy=True)
+        tensors = reader.read_numpy(reader.keys(), copy=True)
 
         for name, arr in tensors.items():
-            found_reader = any(isinstance(b, Reader) for b in _walk_base_chain(arr))
+            found_reader = any(isinstance(b, RustReader) for b in _walk_base_chain(arr))
             assert (
                 not found_reader
             ), f"copy=True array '{name}' has Reader in base chain"
 
     def test_load_numpy_zerocopy_base_chain(self, zt_file):
-        """load_numpy(copy=False) arrays must all have the Reader in their base chain."""
+        """read_numpy(copy=False) arrays must all have the _Reader in their base chain."""
         path, _ = zt_file
 
         reader = Reader(path)
-        tensors = reader.load_numpy(copy=False)
+        tensors = reader.read_numpy(reader.keys(), copy=False)
 
         for name, arr in tensors.items():
-            found_reader = any(isinstance(b, Reader) for b in _walk_base_chain(arr))
+            found_reader = any(isinstance(b, RustReader) for b in _walk_base_chain(arr))
             assert (
                 found_reader
-            ), f"copy=False array '{name}' missing Reader in base chain"
+            ), f"copy=False array '{name}' missing _Reader in base chain"
 
     def test_view_preserves_base_chain(self, zt_file):
         """Slicing a zero-copy array should preserve the base chain to the Reader."""
@@ -197,11 +198,11 @@ class TestLifetime:
         np.testing.assert_array_equal(arr, expected["small"])
 
     def test_bulk_load_survives(self, zt_file):
-        """All arrays from load_numpy(copy=False) survive del reader."""
+        """All arrays from read_numpy(copy=False) survive del reader."""
         path, expected = zt_file
 
         reader = Reader(path)
-        tensors = reader.load_numpy(copy=False)
+        tensors = reader.read_numpy(reader.keys(), copy=False)
         del reader
         gc.collect()
 
@@ -226,12 +227,12 @@ class TestLifetime:
         np.testing.assert_array_equal(arr_vector, expected["vector"])
 
     def test_mixed_single_and_bulk_reads(self, zt_file):
-        """Mixing reader["x"] with load_numpy on the same Reader."""
+        """Mixing reader["x"] with read_numpy on the same Reader."""
         path, expected = zt_file
 
         reader = Reader(path)
         single = reader["small"]
-        bulk = reader.load_numpy(copy=False)
+        bulk = reader.read_numpy(reader.keys(), copy=False)
 
         del reader
         gc.collect()
@@ -310,11 +311,11 @@ class TestTorchZeroCopy:
     """Tests for the torch.from_numpy zero-copy chain."""
 
     def test_torch_zerocopy_survives_reader_deletion(self, zt_file):
-        """load_torch(copy=False) tensors must survive Reader deletion."""
+        """read_torch(copy=False) tensors must survive Reader deletion."""
         path, expected = zt_file
 
         reader = Reader(path)
-        tensors = reader.load_torch(copy=False)
+        tensors = reader.read_torch(reader.keys(), copy=False)
         del reader
         gc.collect()
 
@@ -322,11 +323,11 @@ class TestTorchZeroCopy:
             np.testing.assert_array_equal(tensors[name].numpy(), exp)
 
     def test_torch_copy_true_independent(self, zt_file):
-        """load_torch(copy=True) tensors are fully independent."""
+        """read_torch(copy=True) tensors are fully independent."""
         path, expected = zt_file
 
         reader = Reader(path)
-        tensors = reader.load_torch(copy=True)
+        tensors = reader.read_torch(reader.keys(), copy=True)
         del reader
         gc.collect()
 
@@ -338,7 +339,7 @@ class TestTorchZeroCopy:
         path, expected = zt_file
 
         reader = Reader(path)
-        tensors = reader.load_torch(copy=False)
+        tensors = reader.read_torch(reader.keys(), copy=False)
         del reader
         gc.collect()
 
@@ -404,7 +405,7 @@ class TestMemoryLeaks:
         # Warm up (first mmap may page in Python/numpy internals)
         for _ in range(3):
             r = Reader(path)
-            t = r.load_numpy(copy=False)
+            t = r.read_numpy(r.keys(), copy=False)
             del t, r
             gc.collect()
 
@@ -412,7 +413,7 @@ class TestMemoryLeaks:
 
         for _ in range(20):
             reader = Reader(path)
-            tensors = reader.load_numpy(copy=False)
+            tensors = reader.read_numpy(reader.keys(), copy=False)
             del tensors
             del reader
             gc.collect()
@@ -435,7 +436,7 @@ class TestMemoryLeaks:
         # Warm up
         for _ in range(3):
             r = Reader(path)
-            t = r.load_numpy(copy=True)
+            t = r.read_numpy(r.keys(), copy=True)
             del t, r
             gc.collect()
 
@@ -443,7 +444,7 @@ class TestMemoryLeaks:
 
         for _ in range(20):
             reader = Reader(path)
-            tensors = reader.load_numpy(copy=True)
+            tensors = reader.read_numpy(reader.keys(), copy=True)
             del tensors
             del reader
             gc.collect()
@@ -539,7 +540,7 @@ class TestEdgeCases:
                     w.add(name, arr)
 
             reader = Reader(path)
-            loaded = reader.load_numpy(copy=False)
+            loaded = reader.read_numpy(reader.keys(), copy=False)
             del reader
             gc.collect()
 

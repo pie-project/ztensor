@@ -795,6 +795,155 @@ class TestPyTorchFileReading:
 
 
 # ============================================================================
+# 9. READ_INTO TESTS
+# ============================================================================
+
+
+class TestReadInto:
+    """Tests for Reader.read_into() — copying into pre-allocated buffers."""
+
+    def test_read_into_numpy_single(self, temp_file):
+        """read_into copies data into a pre-allocated numpy array."""
+        original = np.random.randn(32, 64).astype(np.float32)
+        with Writer(temp_file) as w:
+            w.add("weight", original)
+
+        reader = Reader(temp_file)
+        dst = np.empty((32, 64), dtype=np.float32)
+        reader.read_into("weight", dst)
+        np.testing.assert_array_equal(dst, original)
+
+    def test_read_into_numpy_batch(self, temp_file):
+        """read_into with dict copies multiple tensors."""
+        tensors = {
+            "a": np.random.randn(10, 20).astype(np.float32),
+            "b": np.random.randn(5, 5).astype(np.float32),
+            "c": np.arange(100, dtype=np.float32),
+        }
+        with Writer(temp_file) as w:
+            for name, t in tensors.items():
+                w.add(name, t)
+
+        reader = Reader(temp_file)
+        destinations = {
+            "a": np.empty((10, 20), dtype=np.float32),
+            "b": np.empty((5, 5), dtype=np.float32),
+            "c": np.empty(100, dtype=np.float32),
+        }
+        reader.read_into(destinations)
+        for name in tensors:
+            np.testing.assert_array_equal(destinations[name], tensors[name])
+
+    def test_read_into_numpy_dtypes(self, temp_file):
+        """read_into works with various numpy dtypes."""
+        tensors = {
+            "f64": np.array([1.0, 2.0], dtype=np.float64),
+            "i32": np.array([3, 4], dtype=np.int32),
+            "u8": np.array([5, 6], dtype=np.uint8),
+        }
+        with Writer(temp_file) as w:
+            for name, t in tensors.items():
+                w.add(name, t)
+
+        reader = Reader(temp_file)
+        for name, expected in tensors.items():
+            dst = np.empty_like(expected)
+            reader.read_into(name, dst)
+            np.testing.assert_array_equal(dst, expected)
+
+    @pytest.mark.skipif(not TORCH_AVAILABLE, reason="PyTorch not installed")
+    def test_read_into_torch_single(self, temp_file):
+        """read_into copies data into a pre-allocated torch tensor."""
+        original = np.random.randn(16, 32).astype(np.float32)
+        with Writer(temp_file) as w:
+            w.add("weight", original)
+
+        reader = Reader(temp_file)
+        dst = torch.empty(16, 32, dtype=torch.float32)
+        reader.read_into("weight", dst)
+        np.testing.assert_array_equal(dst.numpy(), original)
+
+    @pytest.mark.skipif(not TORCH_AVAILABLE, reason="PyTorch not installed")
+    def test_read_into_torch_batch(self, temp_file):
+        """read_into with dict copies into pre-allocated torch tensors."""
+        tensors = {
+            "x": np.random.randn(8, 16).astype(np.float32),
+            "y": np.random.randn(4).astype(np.float32),
+        }
+        with Writer(temp_file) as w:
+            for name, t in tensors.items():
+                w.add(name, t)
+
+        reader = Reader(temp_file)
+        destinations = {
+            "x": torch.empty(8, 16, dtype=torch.float32),
+            "y": torch.empty(4, dtype=torch.float32),
+        }
+        reader.read_into(destinations)
+        for name in tensors:
+            np.testing.assert_array_equal(destinations[name].numpy(), tensors[name])
+
+    def test_read_into_missing_dst_raises(self, temp_file):
+        """read_into raises TypeError when dst is omitted for single tensor."""
+        with Writer(temp_file) as w:
+            w.add("t", np.zeros(3, dtype=np.float32))
+
+        reader = Reader(temp_file)
+        with pytest.raises(TypeError):
+            reader.read_into("t")
+
+    def test_read_into_shape_mismatch_raises(self, temp_file):
+        """read_into raises when destination shape doesn't match."""
+        with Writer(temp_file) as w:
+            w.add("t", np.zeros((3, 4), dtype=np.float32))
+
+        reader = Reader(temp_file)
+        dst = np.empty((5, 5), dtype=np.float32)
+        with pytest.raises(ValueError):
+            reader.read_into("t", dst)
+
+    def test_read_into_overwrites_existing(self, temp_file):
+        """read_into overwrites whatever was in the destination buffer."""
+        original = np.array([1.0, 2.0, 3.0], dtype=np.float32)
+        with Writer(temp_file) as w:
+            w.add("data", original)
+
+        reader = Reader(temp_file)
+        dst = np.full(3, 999.0, dtype=np.float32)
+        reader.read_into("data", dst)
+        np.testing.assert_array_equal(dst, original)
+
+    @pytest.mark.skipif(not TORCH_AVAILABLE, reason="PyTorch not installed")
+    def test_read_into_arena_pattern(self, temp_file):
+        """Simulates the arena allocation pattern (contiguous buffer with views)."""
+        tensors = {
+            "layer.0.weight": np.random.randn(64, 128).astype(np.float32),
+            "layer.0.bias": np.random.randn(64).astype(np.float32),
+        }
+        with Writer(temp_file) as w:
+            for name, t in tensors.items():
+                w.add(name, t)
+
+        reader = Reader(temp_file)
+        # Allocate a contiguous arena
+        total_bytes = sum(t.nbytes for t in tensors.values())
+        arena = torch.empty(total_bytes, dtype=torch.uint8)
+
+        # Create views into the arena
+        offset = 0
+        views = {}
+        for name, t in tensors.items():
+            nbytes = t.nbytes
+            view = arena[offset : offset + nbytes].view(torch.float32).reshape(t.shape)
+            views[name] = view
+            offset += nbytes
+
+        reader.read_into(views)
+        for name in tensors:
+            np.testing.assert_array_equal(views[name].numpy(), tensors[name])
+
+
+# ============================================================================
 # MAIN
 # ============================================================================
 

@@ -14,14 +14,18 @@ Example:
 """
 
 from ._ztensor import (
-    Reader,
-    Writer,
-    Tensor,
-    TensorMetadata,
-    open,
     remove_tensors,
     replace_tensor,
 )
+from ._types import Tensor, TensorMetadata
+from ._reader import Reader
+from ._writer import Writer
+
+
+def open(path):
+    """Open a tensor file (auto-detects format by extension)."""
+    return Reader(path)
+
 
 import numpy as np
 
