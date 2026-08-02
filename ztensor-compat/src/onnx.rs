@@ -2,22 +2,22 @@
 //!
 //! Extracts graph initializers (the model weights) from the protobuf
 //! stream with a minimal hand-written wire-format parser — no protobuf
-//! dependency. `raw_data` tensors are zero-copy views into the mmap; the
-//! typed repeated fields (`float_data`, `int32_data`, ...) are converted
-//! to little-endian bytes per the ONNX storage rules (small types are
-//! stored one element per int32) and held as owned buffers.
+//! dependency. A `raw_data` tensor is a plain range of the file, so it gets an
+//! address and a borrow; the typed repeated fields (`float_data`,
+//! `int32_data`, ...) have to be converted to little-endian bytes per the ONNX
+//! storage rules (small types are stored one element per int32), so they exist
+//! only once this reader has built them — an opaque payload, and it says so.
 //!
 //! Graphs, nodes, and attributes are out of scope: this reads weights,
 //! not computation. External data files are refused, not resolved.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
-use std::fs::File;
-use std::path::Path;
 
-use memmap2::Mmap;
-use ztensor::{
-    BlobRef, Caps, DType, Error, Layout, Manifest, Object, Part, Result, Source,
-};
+use ztensor::catalog::{Entry, Location, PartEntry, Payload};
+use ztensor::{Catalog, DType, Error, Opaque, Result, Store, StoreId, Vocabulary};
+
+use crate::project::Projection;
 
 fn bad(detail: impl Into<String>) -> Error {
     Error::InvalidInput(format!("onnx: {}", detail.into()))
@@ -267,197 +267,152 @@ fn parse_tensor(data: &[u8], base: usize) -> Result<TensorInfo> {
     })
 }
 
-// ---- reader -----------------------------------------------------------
+// ---- projection -------------------------------------------------------
 
-enum Loc {
-    Range { offset: u64, length: u64 },
-    Owned(Vec<u8>),
+/// The typed repeated fields, converted once at open and handed out on
+/// request. They have no address: nothing in the file holds these bytes in the
+/// layout a consumer wants.
+struct Typed {
+    buffers: Vec<Vec<u8>>,
 }
 
-pub struct Onnx {
-    mmap: Mmap,
-    manifest: Manifest,
-    locations: BTreeMap<String, Loc>,
-}
-
-impl std::fmt::Debug for Onnx {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Onnx")
-            .field("len", &self.mmap.len())
-            .field("objects", &self.manifest.objects.len())
-            .finish()
+impl Opaque for Typed {
+    fn read(&self, key: u64, decoded_len: u64) -> Result<Vec<u8>> {
+        let bytes = self
+            .buffers
+            .get(key as usize)
+            .ok_or_else(|| bad(format!("no converted tensor {key}")))?;
+        if bytes.len() as u64 != decoded_len {
+            return Err(bad("converted tensor changed size"));
+        }
+        Ok(bytes.clone())
     }
 }
 
-impl Onnx {
-    pub fn open(path: impl AsRef<Path>) -> Result<Self> {
-        let file = File::open(path)?;
-        // SAFETY: read-only shared map of untrusted bytes.
-        let mmap = unsafe { Mmap::map(&file)? };
-        if mmap.is_empty() {
-            return Err(bad("empty file"));
-        }
+pub(crate) fn project(store: &Store) -> Result<Projection> {
+    // ONNX keeps its weights inline in the protobuf stream and gives no index,
+    // so there is no header to read on its own: an unmapped store has to read
+    // the file to answer anything at all.
+    let bytes: Cow<'_, [u8]> = match store.bytes() {
+        Some(mapped) => Cow::Borrowed(mapped),
+        None => Cow::Owned(store.read(0, store.len())?),
+    };
+    let buf: &[u8] = &bytes;
+    if buf.is_empty() {
+        return Err(bad("empty file"));
+    }
+    let vocab = Vocabulary::standard();
 
-        // ModelProto.graph is field 7.
-        let mut pb = Pb {
-            data: &mmap,
-            pos: 0,
-            base: 0,
-        };
-        let mut graph: Option<(usize, usize)> = None;
-        while !pb.done() {
-            let (field, wire) = pb.tag()?;
-            if field == 7 && wire == LEN {
-                let (abs, b) = pb.bytes()?;
-                graph = Some((abs, b.len()));
-                break;
-            }
-            pb.skip(wire)?;
-        }
-        let (graph_base, graph_len) =
-            graph.ok_or_else(|| bad("no graph field in ModelProto"))?;
-        let graph_bytes = &mmap[graph_base..graph_base + graph_len];
-
-        // GraphProto.initializer is field 5.
-        let mut objects = BTreeMap::new();
-        let mut locations = BTreeMap::new();
-        let mut pb = Pb {
-            data: graph_bytes,
-            pos: 0,
-            base: graph_base,
-        };
-        while !pb.done() {
-            let (field, wire) = pb.tag()?;
-            if field != 5 || wire != LEN {
-                pb.skip(wire)?;
-                continue;
-            }
+    // ModelProto.graph is field 7.
+    let mut pb = Pb {
+        data: buf,
+        pos: 0,
+        base: 0,
+    };
+    let mut graph: Option<(usize, usize)> = None;
+    while !pb.done() {
+        let (field, wire) = pb.tag()?;
+        if field == 7 && wire == LEN {
             let (abs, b) = pb.bytes()?;
-            let info = parse_tensor(b, abs)?;
-            if info.name.is_empty() {
-                continue;
-            }
-            let (dtype, ltype) = map_dtype(info.data_type)?;
-            let elems = crate::safe::product("onnx shape", &info.dims)?;
-            let expected = ztensor::logical_size(ltype, dtype, elems)
-                .ok_or_else(|| bad("size not computable"))?;
-            let actual = match &info.data {
-                TensorData::Raw { length, .. } => *length,
-                TensorData::Owned(v) => v.len() as u64,
-            };
-            if actual != expected {
-                return Err(bad(format!(
-                    "tensor {:?} holds {actual} bytes but shape implies {expected}",
-                    info.name
-                )));
-            }
-
-            let (loc, blob, encoding) = match info.data {
-                TensorData::Raw { offset, length } => (
-                    Loc::Range { offset, length },
-                    BlobRef {
-                        shard: 0,
-                        offset,
-                        length,
-                    },
-                    None,
-                ),
-                TensorData::Owned(v) => (
-                    Loc::Owned(v),
-                    BlobRef {
-                        shard: 0,
-                        offset: 0,
-                        length: 0,
-                    },
-                    Some("onnx.typed/1".to_string()),
-                ),
-            };
-            let part = Part {
-                dtype,
-                ltype: ltype.map(str::to_string),
-                blob,
-                decoded_length: encoding.as_ref().map(|_| expected),
-                encoding,
-                digest: None,
-            };
-            let mut parts = BTreeMap::new();
-            parts.insert("data".to_string(), part);
-            locations.insert(info.name.clone(), loc);
-            if objects
-                .insert(
-                    info.name.clone(),
-                    Object {
-                        shape: info.dims,
-                        layout: Layout::Dense,
-                        attributes: None,
-                        parts,
-                    },
-                )
-                .is_some()
-            {
-                return Err(bad(format!("duplicate initializer {:?}", info.name)));
-            }
+            graph = Some((abs, b.len()));
+            break;
         }
-
-        Ok(Self {
-            mmap,
-            manifest: Manifest {
-                attributes: None,
-                shards: BTreeMap::new(),
-                objects,
-            },
-            locations,
-        })
+        pb.skip(wire)?;
     }
+    let (graph_base, graph_len) = graph.ok_or_else(|| bad("no graph field in ModelProto"))?;
+    let graph_bytes = &buf[graph_base..graph_base + graph_len];
 
-    fn location(&self, name: &str, part: &str) -> Result<&Loc> {
-        if part != "data" {
-            return Err(Error::NotFound(format!("part {name:?}/{part:?}")));
+    // GraphProto.initializer is field 5.
+    let mut catalog = Catalog::new();
+    let mut converted: Vec<Vec<u8>> = Vec::new();
+    let mut occupied: Vec<(u64, u64)> = Vec::new();
+    let mut pb = Pb {
+        data: graph_bytes,
+        pos: 0,
+        base: graph_base,
+    };
+    while !pb.done() {
+        let (field, wire) = pb.tag()?;
+        if field != 5 || wire != LEN {
+            pb.skip(wire)?;
+            continue;
         }
-        self.locations
-            .get(name)
-            .ok_or_else(|| Error::NotFound(format!("object {name:?}")))
-    }
-}
-
-impl Source for Onnx {
-    fn manifest(&self) -> &Manifest {
-        &self.manifest
-    }
-
-    fn read(&self, object: &str, part: &str) -> Result<Vec<u8>> {
-        Source::view(self, object, part).map(<[u8]>::to_vec)
-    }
-
-    fn view(&self, object: &str, part: &str) -> Result<&[u8]> {
-        match self.location(object, part)? {
-            Loc::Range { offset, length } => {
-                crate::safe::slice("onnx tensor", &self.mmap, *offset, *length)
-            }
-            Loc::Owned(bytes) => Ok(bytes),
+        let (abs, b) = pb.bytes()?;
+        let info = parse_tensor(b, abs)?;
+        if info.name.is_empty() {
+            continue;
         }
-    }
-
-    fn caps(&self, object: &str, part: &str) -> Result<Caps> {
-        // Owned buffers are materialized, not mapped: their manifest blob
-        // is a placeholder, so reporting zero-copy would be a lie about
-        // what the file itself contains.
-        let (zero_copy, alignment) = match self.location(object, part)? {
-            Loc::Range { offset, .. } => (
-                true,
-                if *offset > 0 {
-                    1u64 << offset.trailing_zeros().min(63)
-                } else {
-                    1
-                },
-            ),
-            Loc::Owned(_) => (false, 1),
+        let (dtype, logical) = map_dtype(info.data_type)?;
+        let elems = crate::safe::product("onnx shape", &info.dims)?;
+        let expected = vocab
+            .size_of(logical, dtype, elems)
+            .ok_or_else(|| bad("size not computable"))?;
+        let actual = match &info.data {
+            TensorData::Raw { length, .. } => *length,
+            TensorData::Owned(v) => v.len() as u64,
         };
-        Ok(Caps {
-            zero_copy,
-            alignment,
-            verifiable: false,
-            page_exclusive: false,
-        })
+        if actual != expected {
+            return Err(bad(format!(
+                "tensor {:?} holds {actual} bytes but shape implies {expected}",
+                info.name
+            )));
+        }
+
+        let payload = match info.data {
+            TensorData::Raw { offset, length } => {
+                occupied.push((offset, length));
+                Payload::At(Location {
+                    store: StoreId(0),
+                    offset,
+                    len: length,
+                })
+            }
+            TensorData::Owned(v) => {
+                converted.push(v);
+                Payload::Opaque {
+                    store: StoreId(0),
+                    key: converted.len() as u64 - 1,
+                    decoded_len: expected,
+                }
+            }
+        };
+
+        let mut parts = BTreeMap::new();
+        parts.insert(
+            "data".to_string(),
+            PartEntry {
+                dtype,
+                logical: logical.map(str::to_string),
+                payload,
+                digest: None,
+            },
+        );
+        if catalog
+            .insert(
+                info.name.clone(),
+                Entry {
+                    shape: info.dims,
+                    layout: "dense".to_string(),
+                    attributes: None,
+                    parts,
+                },
+            )
+            .is_some()
+        {
+            return Err(bad(format!("duplicate initializer {:?}", info.name)));
+        }
     }
+
+    // Weights are embedded in a protobuf stream with fields around and between
+    // them, so what else shares a page is not knowable from here: occupancy
+    // stays unstated and exclusivity is never claimed.
+    let _ = occupied;
+    let projection = Projection::new(catalog);
+    Ok(if converted.is_empty() {
+        projection
+    } else {
+        projection.with_opaque(Box::new(Typed {
+            buffers: converted,
+        }))
+    })
 }

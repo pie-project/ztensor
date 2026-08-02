@@ -1,22 +1,22 @@
 //! NumPy `.npz` (and single `.npy`) → zTensor object model projection.
 //!
-//! An `.npz` is a ZIP of `.npy` entries. Stored (uncompressed) entries are
-//! zero-copy views into the mmap; deflated entries decompress lazily on
-//! `read()` and are reported honestly as non-zero-copy.
+//! An `.npz` is a ZIP of `.npy` entries. A stored (uncompressed) entry is a
+//! plain range of the file, so it gets an address and a borrow like any other.
+//! A deflated entry has neither — its bytes do not exist until something
+//! inflates them — so it is an opaque payload: readable, and honest that
+//! reading costs a decompression.
 //!
 //! Refusals (never reinterpret): big-endian descrs, `fortran_order: True`
 //! (reversing the shape would silently transpose the data), object dtypes.
 
 use std::cell::RefCell;
-use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::Read;
-use std::path::Path;
 
-use memmap2::Mmap;
-use ztensor::{
-    BlobRef, Caps, DType, Error, Layout, Manifest, Object, Part, Result, Source,
-};
+use ztensor::catalog::{Entry, Location, PartEntry, Payload};
+use ztensor::{Catalog, DType, Error, Opaque, Result, Store, StoreId, Vocabulary};
+
+use crate::project::Projection;
 
 fn bad(detail: impl Into<String>) -> Error {
     Error::InvalidInput(format!("npz: {}", detail.into()))
@@ -143,234 +143,173 @@ fn find_shape(header: &str) -> Result<Vec<u64>> {
     Ok(dims)
 }
 
-enum Location {
-    /// Stored entry: absolute range in the file (zero-copy).
+/// Where one entry's bytes are, before they become a payload.
+enum Where {
+    /// Stored entry: an absolute range of the file.
     Stored { offset: u64, length: u64 },
-    /// Deflated entry: zip index + offset of raw data within the entry.
-    Deflated { zip_index: usize, data_offset: usize, data_len: u64 },
+    /// Deflated entry: the zip entry to inflate, and how much of the result to
+    /// drop (the `.npy` header) before the tensor starts.
+    Deflated { zip_index: usize, data_offset: usize },
 }
 
-pub struct Npz {
-    mmap: Mmap,
+/// Inflates deflated entries on demand. Keeps the archive open because the
+/// bytes cannot be addressed — there is nowhere to point at.
+struct Deflated {
     archive: RefCell<zip::ZipArchive<File>>,
-    manifest: Manifest,
-    locations: BTreeMap<String, Location>,
+    /// Keyed by the `key` in [`Payload::Opaque`]: (zip index, header length).
+    entries: Vec<(usize, usize)>,
 }
 
-impl std::fmt::Debug for Npz {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Npz")
-            .field("len", &self.mmap.len())
-            .field("objects", &self.manifest.objects.len())
-            .finish()
+impl Opaque for Deflated {
+    fn read(&self, key: u64, decoded_len: u64) -> Result<Vec<u8>> {
+        let (zip_index, data_offset) = *self
+            .entries
+            .get(key as usize)
+            .ok_or_else(|| bad(format!("no deflated entry {key}")))?;
+        // The expected size is the *validated* one (shape x width plus the
+        // header), never the ZIP's declared size: reading with a hard limit
+        // keeps a lying entry from driving the allocation.
+        let expected = crate::safe::add("npz entry", data_offset as u64, decoded_len)?;
+        let cap = crate::safe::alloc_size("npz entry", expected)?;
+        let mut archive = self.archive.borrow_mut();
+        let mut entry = archive
+            .by_index(zip_index)
+            .map_err(|e| bad(format!("ZIP entry: {e}")))?;
+        let mut bytes = Vec::with_capacity(cap);
+        std::io::Read::take(&mut entry, expected + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|e| bad(format!("decompress: {e}")))?;
+        if bytes.len() as u64 != expected {
+            return Err(bad("decompressed size mismatch"));
+        }
+        Ok(bytes.split_off(data_offset))
     }
 }
 
-impl Npz {
-    pub fn open(path: impl AsRef<Path>) -> Result<Self> {
-        let path = path.as_ref();
-        let file = File::open(path)?;
-        // SAFETY: read-only shared map of untrusted bytes.
-        let mmap = unsafe { Mmap::map(&file)? };
-        let mut archive = zip::ZipArchive::new(File::open(path)?)
-            .map_err(|e| bad(format!("not a ZIP archive: {e}")))?;
+pub(crate) fn project(store: &Store) -> Result<Projection> {
+    let vocab = Vocabulary::standard();
+    let mut archive = zip::ZipArchive::new(File::open(store.path())?)
+        .map_err(|e| bad(format!("not a ZIP archive: {e}")))?;
 
-        let mut objects = BTreeMap::new();
-        let mut locations = BTreeMap::new();
-        for i in 0..archive.len() {
-            let mut entry = archive
-                .by_index(i)
-                .map_err(|e| bad(format!("ZIP entry {i}: {e}")))?;
-            let Some(name) = entry.name().strip_suffix(".npy").map(str::to_string) else {
-                continue;
-            };
+    let mut catalog = Catalog::new();
+    let mut deflated: Vec<(usize, usize)> = Vec::new();
+    for i in 0..archive.len() {
+        let mut entry = archive
+            .by_index(i)
+            .map_err(|e| bad(format!("ZIP entry {i}: {e}")))?;
+        let Some(name) = entry.name().strip_suffix(".npy").map(str::to_string) else {
+            continue;
+        };
 
-            let stored = entry.compression() == zip::CompressionMethod::Stored;
-            let (header, location, blob, encoding) = if stored {
-                let start = entry.data_start();
-                let size = entry.size();
-                let end = start
-                    .checked_add(size)
-                    .filter(|&e| e <= mmap.len() as u64)
-                    .ok_or_else(|| bad(format!("entry {name:?} extends past file")))?;
-                let header = parse_npy_header(&mmap[start as usize..end as usize])?;
-                let data_off = start + header.data_offset as u64;
-                let data_len = size - header.data_offset as u64;
-                (
-                    header,
-                    Location::Stored {
-                        offset: data_off,
-                        length: data_len,
-                    },
-                    BlobRef {
-                        shard: 0,
-                        offset: data_off,
-                        length: data_len,
-                    },
-                    None,
-                )
-            } else {
-                // Parse only the header now; payload decompresses on read().
-                let mut head = vec![0u8; 4096.min(entry.size() as usize)];
-                entry
-                    .read_exact(&mut head)
-                    .map_err(|e| bad(format!("entry {name:?}: {e}")))?;
-                let header = parse_npy_header(&head)?;
-                let data_len = entry.size() - header.data_offset as u64;
-                (
-                    NpyHeader { ..header },
-                    Location::Deflated {
-                        zip_index: i,
-                        data_offset: 0, // filled below from the header
-                        data_len,
-                    },
-                    BlobRef {
-                        shard: 0,
-                        offset: entry.data_start(),
-                        length: entry.compressed_size(),
-                    },
-                    Some("npz.deflate/1".to_string()),
-                )
-            };
-
-            // Size equation: never trust the header blindly.
-            let elems = crate::safe::product("npz shape", &header.shape)?;
-            let expected = ztensor::logical_size(header.ltype, header.dtype, elems)
-                .ok_or_else(|| bad("size not computable"))?;
-            let actual = match &location {
-                Location::Stored { length, .. } => *length,
-                Location::Deflated { data_len, .. } => *data_len,
-            };
-            if actual != expected {
-                return Err(bad(format!(
-                    "entry {name:?} holds {actual} bytes but shape implies {expected}"
-                )));
+        let stored = entry.compression() == zip::CompressionMethod::Stored;
+        let (header, placed) = if stored {
+            let start = entry.data_start();
+            let size = entry.size();
+            if crate::safe::add("npz entry", start, size)? > store.len() {
+                return Err(bad(format!("entry {name:?} extends past file")));
             }
+            // The header is at most a few hundred bytes; read what a v2 header
+            // can reach rather than the whole entry.
+            let probe = store.read(start, size.min(4096))?;
+            let header = parse_npy_header(&probe)?;
+            let data_off = crate::safe::add("npz entry", start, header.data_offset as u64)?;
+            let length = size - header.data_offset as u64;
+            (
+                header,
+                Where::Stored {
+                    offset: data_off,
+                    length,
+                },
+            )
+        } else {
+            // Parse only the header now; the payload inflates on demand.
+            let mut head = vec![0u8; 4096.min(entry.size() as usize)];
+            entry
+                .read_exact(&mut head)
+                .map_err(|e| bad(format!("entry {name:?}: {e}")))?;
+            let header = parse_npy_header(&head)?;
+            let data_offset = header.data_offset;
+            (
+                header,
+                Where::Deflated {
+                    zip_index: i,
+                    data_offset,
+                },
+            )
+        };
+        let entry_size = entry.size();
+        drop(entry);
 
-            let mut location = location;
-            if let Location::Deflated { data_offset, .. } = &mut location {
-                *data_offset = header.data_offset;
-            }
-            let part = Part {
-                dtype: header.dtype,
-                ltype: header.ltype.map(str::to_string),
-                blob,
-                decoded_length: encoding.as_ref().map(|_| expected),
-                encoding,
-                digest: None,
-            };
-            let mut parts = BTreeMap::new();
-            parts.insert("data".to_string(), part);
-            locations.insert(name.clone(), location);
-            if objects
-                .insert(
-                    name.clone(),
-                    Object {
-                        shape: header.shape,
-                        layout: Layout::Dense,
-                        attributes: None,
-                        parts,
-                    },
-                )
-                .is_some()
-            {
-                return Err(bad(format!("duplicate entry name {name:?}")));
-            }
+        // Size equation: never trust the header blindly.
+        let elems = crate::safe::product("npz shape", &header.shape)?;
+        let expected = vocab
+            .size_of(header.ltype, header.dtype, elems)
+            .ok_or_else(|| bad("size not computable"))?;
+        let actual = match &placed {
+            Where::Stored { length, .. } => *length,
+            Where::Deflated { data_offset, .. } => entry_size - *data_offset as u64,
+        };
+        if actual != expected {
+            return Err(bad(format!(
+                "entry {name:?} holds {actual} bytes but shape implies {expected}"
+            )));
         }
 
-        Ok(Self {
-            mmap,
-            archive: RefCell::new(archive),
-            manifest: Manifest {
-                attributes: None,
-                shards: BTreeMap::new(),
-                objects,
-            },
-            locations,
-        })
-    }
-
-    fn location(&self, name: &str, part: &str) -> Result<&Location> {
-        if part != "data" {
-            return Err(Error::NotFound(format!("part {name:?}/{part:?}")));
-        }
-        self.locations
-            .get(name)
-            .ok_or_else(|| Error::NotFound(format!("object {name:?}")))
-    }
-}
-
-impl Source for Npz {
-    fn manifest(&self) -> &Manifest {
-        &self.manifest
-    }
-
-    fn read(&self, object: &str, part: &str) -> Result<Vec<u8>> {
-        match self.location(object, part)? {
-            Location::Stored { offset, length } => {
-                crate::safe::slice("npz entry", &self.mmap, *offset, *length)
-                    .map(<[u8]>::to_vec)
-            }
-            Location::Deflated {
+        let payload = match placed {
+            Where::Stored { offset, length } => Payload::At(Location {
+                store: StoreId(0),
+                offset,
+                len: length,
+            }),
+            Where::Deflated {
                 zip_index,
                 data_offset,
-                data_len,
             } => {
-                // The expected size is the *validated* one (shape × width
-                // plus the header), never the ZIP's declared size: reading
-                // with a hard limit keeps a lying entry from driving the
-                // allocation.
-                let expected = crate::safe::add(
-                    "npz entry",
-                    *data_offset as u64,
-                    *data_len,
-                )?;
-                let cap = crate::safe::alloc_size("npz entry", expected)?;
-                let mut archive = self.archive.borrow_mut();
-                let mut entry = archive
-                    .by_index(*zip_index)
-                    .map_err(|e| bad(format!("ZIP entry: {e}")))?;
-                let mut bytes = Vec::with_capacity(cap);
-                std::io::Read::take(&mut entry, expected + 1)
-                    .read_to_end(&mut bytes)
-                    .map_err(|e| bad(format!("decompress: {e}")))?;
-                if bytes.len() as u64 != expected {
-                    return Err(bad("decompressed size mismatch"));
+                deflated.push((zip_index, data_offset));
+                Payload::Opaque {
+                    store: StoreId(0),
+                    key: deflated.len() as u64 - 1,
+                    decoded_len: expected,
                 }
-                Ok(bytes.split_off(*data_offset))
             }
-        }
-    }
-
-    fn view(&self, object: &str, part: &str) -> Result<&[u8]> {
-        match self.location(object, part)? {
-            Location::Stored { offset, length } => {
-                crate::safe::slice("npz entry", &self.mmap, *offset, *length)
-            }
-            Location::Deflated { .. } => Err(Error::Unsupported(
-                "deflated npz entry has no zero-copy view".into(),
-            )),
-        }
-    }
-
-    fn caps(&self, object: &str, part: &str) -> Result<Caps> {
-        let loc = self.location(object, part)?;
-        let (zero_copy, alignment) = match loc {
-            Location::Stored { offset, .. } => (
-                true,
-                if *offset == 0 {
-                    1
-                } else {
-                    1u64 << offset.trailing_zeros().min(63)
-                },
-            ),
-            Location::Deflated { .. } => (false, 1),
         };
-        Ok(Caps {
-            zero_copy,
-            alignment,
-            verifiable: false,
-            page_exclusive: false, // zip packs entries back to back
-        })
+
+        let mut parts = std::collections::BTreeMap::new();
+        parts.insert(
+            "data".to_string(),
+            PartEntry {
+                dtype: header.dtype,
+                logical: header.ltype.map(str::to_string),
+                payload,
+                digest: None,
+            },
+        );
+        if catalog
+            .insert(
+                name.clone(),
+                Entry {
+                    shape: header.shape,
+                    layout: "dense".to_string(),
+                    attributes: None,
+                    parts,
+                },
+            )
+            .is_some()
+        {
+            return Err(bad(format!("duplicate entry name {name:?}")));
+        }
     }
+
+    // A ZIP packs entries back to back behind local headers, so this file
+    // cannot say which bytes are free — occupancy stays unknown and page
+    // exclusivity is never claimed.
+    let projection = Projection::new(catalog);
+    Ok(if deflated.is_empty() {
+        projection
+    } else {
+        projection.with_opaque(Box::new(Deflated {
+            archive: RefCell::new(archive),
+            entries: deflated,
+        }))
+    })
 }

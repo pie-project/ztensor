@@ -4,7 +4,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use ztensor::{DType, Error, Source};
+use ztensor::{DType, Error};
 
 fn tmp(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name)
@@ -21,7 +21,6 @@ fn f32s(vals: &[f32]) -> Vec<u8> {
 #[cfg(feature = "gguf")]
 mod gguf {
     use super::*;
-    use ztensor_compat::Gguf;
 
     fn gstr(out: &mut Vec<u8>, s: &str) {
         out.extend((s.len() as u64).to_le_bytes());
@@ -70,21 +69,21 @@ mod gguf {
     fn open_and_read() {
         let path = tmp("basic.gguf");
         fs::write(&path, gguf_bytes()).unwrap();
-        let g = Gguf::open(&path).unwrap();
+        let g = ztensor_compat::open(&path).unwrap();
 
-        let dense = &g.manifest().objects["dense"];
-        assert_eq!(dense.shape, vec![2, 4]); // reversed from ne
-        assert_eq!(dense.parts["data"].dtype, DType::F32);
-        assert_eq!(g.read("dense", "data").unwrap(), f32s(&[0.5; 8]));
+        let dense = g.tensor("dense").unwrap();
+        assert_eq!(dense.shape().to_vec(), vec![2, 4]); // reversed from ne
+        assert_eq!(dense.part("data").unwrap().dtype(), DType::F32);
+        assert_eq!(g.tensor("dense").unwrap().bytes().unwrap().into_owned(), f32s(&[0.5; 8]));
 
-        let quant = &g.manifest().objects["quant"];
-        assert_eq!(quant.layout.as_str(), "gguf.q8_0/1");
-        assert_eq!(quant.shape, vec![2, 64]); // logical shape preserved
-        assert_eq!(quant.parts["data"].blob.length, 136);
-        assert_eq!(g.read("quant", "data").unwrap(), vec![7u8; 136]);
+        let quant = g.tensor("quant").unwrap();
+        assert_eq!(quant.layout(), "gguf.q8_0/1");
+        assert_eq!(quant.shape().to_vec(), vec![2, 64]); // logical shape preserved
+        assert_eq!(quant.part("data").unwrap().nbytes(), 136);
+        assert_eq!(g.tensor("quant").unwrap().bytes().unwrap().into_owned(), vec![7u8; 136]);
 
-        assert!(g.manifest().attributes.is_some()); // KVs preserved
-        assert!(g.caps("dense", "data").unwrap().zero_copy);
+        assert!(g.attributes().is_some()); // KVs preserved
+        assert!(g.tensor("dense").unwrap().caps().unwrap().map);
     }
 
     #[test]
@@ -100,25 +99,25 @@ mod gguf {
         let _ = needle;
         let path = tmp("badtype.gguf");
         fs::write(&path, &b).unwrap();
-        assert!(matches!(Gguf::open(&path), Err(Error::Unsupported(_))));
+        assert!(matches!(ztensor_compat::open(&path), Err(Error::Unsupported(_))));
     }
 
     #[test]
     fn ingest_quant_preserves_layout() {
         let path = tmp("ingest.gguf");
         fs::write(&path, gguf_bytes()).unwrap();
-        let g = Gguf::open(&path).unwrap();
+        let g = ztensor_compat::open(&path).unwrap();
 
         let zt = tmp("from-gguf.zt");
         let mut w = ztensor::Writer::create(&zt).unwrap();
         w.ingest(&g).unwrap();
         w.finish().unwrap();
 
-        let r = ztensor::Reader::open(&zt).unwrap();
+        let r = ztensor::Source::open(&zt).unwrap();
         let quant = r.get("quant").unwrap();
-        assert_eq!(quant.layout.as_str(), "gguf.q8_0/1");
-        assert_eq!(r.read("quant", "data").unwrap(), vec![7u8; 136]);
-        assert!(r.verify("quant", "data").unwrap());
+        assert_eq!(quant.layout(), "gguf.q8_0/1");
+        assert_eq!(r.tensor("quant").unwrap().bytes().unwrap().into_owned(), vec![7u8; 136]);
+        assert!(r.tensor("quant").unwrap().verify().unwrap().checked());
     }
 }
 
@@ -130,7 +129,6 @@ mod gguf {
 mod npz {
     use super::*;
     use std::io::Write;
-    use ztensor_compat::Npz;
 
     fn npy_bytes(descr: &str, shape: &str, fortran: bool, data: &[u8]) -> Vec<u8> {
         let dict = format!(
@@ -172,16 +170,16 @@ mod npz {
                 ("b", npy_bytes("|u1", "(4,)", false, &b), true),
             ],
         );
-        let n = Npz::open(&path).unwrap();
+        let n = ztensor_compat::open(&path).unwrap();
 
-        assert_eq!(n.manifest().objects["a"].shape, vec![2, 3]);
-        assert_eq!(n.read("a", "data").unwrap(), a);
-        assert!(n.view("a", "data").is_ok()); // stored: zero-copy
-        assert!(n.caps("a", "data").unwrap().zero_copy);
+        assert_eq!(n.tensor("a").unwrap().shape().to_vec(), vec![2, 3]);
+        assert_eq!(n.tensor("a").unwrap().bytes().unwrap().into_owned(), a);
+        assert!(n.tensor("a").unwrap().map().is_ok()); // stored: zero-copy
+        assert!(n.tensor("a").unwrap().caps().unwrap().map);
 
-        assert_eq!(n.read("b", "data").unwrap(), b); // deflated: lazy read
-        assert!(matches!(n.view("b", "data"), Err(Error::Unsupported(_))));
-        assert!(!n.caps("b", "data").unwrap().zero_copy);
+        assert_eq!(n.tensor("b").unwrap().bytes().unwrap().into_owned(), b); // deflated: lazy read
+        assert!(matches!(n.tensor("b").unwrap().map(), Err(Error::Unsupported(_))));
+        assert!(!n.tensor("b").unwrap().caps().unwrap().map);
     }
 
     #[test]
@@ -191,21 +189,21 @@ mod npz {
             "fortran.npz",
             &[("t", npy_bytes("<f4", "(2, 3)", true, &f32s(&[0.0; 6])), false)],
         );
-        assert!(matches!(Npz::open(&path), Err(Error::Unsupported(_))));
+        assert!(matches!(ztensor_compat::open(&path), Err(Error::Unsupported(_))));
 
         // big-endian descr
         let path = write_npz(
             "be.npz",
             &[("t", npy_bytes(">f4", "(2,)", false, &f32s(&[0.0; 2])), false)],
         );
-        assert!(matches!(Npz::open(&path), Err(Error::Unsupported(_))));
+        assert!(matches!(ztensor_compat::open(&path), Err(Error::Unsupported(_))));
 
         // size mismatch
         let path = write_npz(
             "short.npz",
             &[("t", npy_bytes("<f4", "(4,)", false, &f32s(&[0.0; 2])), false)],
         );
-        assert!(Npz::open(&path).is_err());
+        assert!(ztensor_compat::open(&path).is_err());
     }
 
     #[test]
@@ -214,9 +212,9 @@ mod npz {
             "bool.npz",
             &[("m", npy_bytes("|b1", "(3,)", false, &[0, 1, 1]), false)],
         );
-        let n = Npz::open(&path).unwrap();
-        let part = &n.manifest().objects["m"].parts["data"];
-        assert_eq!((part.dtype, part.ltype.as_deref()), (DType::U8, Some("bool")));
+        let n = ztensor_compat::open(&path).unwrap();
+        let part = n.tensor("m").unwrap().part("data").unwrap();
+        assert_eq!((part.dtype(), part.logical()), (DType::U8, Some("bool")));
     }
 }
 
@@ -227,7 +225,6 @@ mod npz {
 #[cfg(feature = "hdf5")]
 mod hdf5 {
     use super::*;
-    use ztensor_compat::Hdf5;
 
     /// A minimal HDF5 file: superblock v0, one contiguous f32 dataset "w"
     /// of shape [4] in the root group. Offsets laid out by hand.
@@ -298,13 +295,13 @@ mod hdf5 {
         let vals = [1.5f32, 2.5, 3.5, 4.5];
         let path = tmp("basic.h5");
         fs::write(&path, h5_bytes(&vals)).unwrap();
-        let h = Hdf5::open(&path).unwrap();
-        assert!(h.skipped().is_empty());
-        let obj = &h.manifest().objects["w"];
-        assert_eq!(obj.shape, vec![4]);
-        assert_eq!(obj.parts["data"].dtype, DType::F32);
-        assert_eq!(h.read("w", "data").unwrap(), f32s(&vals));
-        assert!(h.caps("w", "data").unwrap().zero_copy);
+        let h = ztensor_compat::open(&path).unwrap();
+        assert!(h.attributes().is_none(), "nothing should have been skipped");
+        let obj = h.tensor("w").unwrap();
+        assert_eq!(obj.shape().to_vec(), vec![4]);
+        assert_eq!(obj.part("data").unwrap().dtype(), DType::F32);
+        assert_eq!(h.tensor("w").unwrap().bytes().unwrap().into_owned(), f32s(&vals));
+        assert!(h.tensor("w").unwrap().caps().unwrap().map);
     }
 
     #[test]
@@ -314,7 +311,7 @@ mod hdf5 {
         b[338..346].copy_from_slice(&24u64.to_le_bytes());
         let path = tmp("badsize.h5");
         fs::write(&path, &b).unwrap();
-        assert!(Hdf5::open(&path).is_err());
+        assert!(ztensor_compat::open(&path).is_err());
     }
 }
 
@@ -325,7 +322,6 @@ mod hdf5 {
 #[cfg(feature = "onnx")]
 mod onnx {
     use super::*;
-    use ztensor_compat::Onnx;
 
     fn len_field(field: u32, body: &[u8]) -> Vec<u8> {
         let mut out = vec![(field << 3 | 2) as u8];
@@ -347,12 +343,12 @@ mod onnx {
         let path = tmp("basic.onnx");
         fs::write(&path, &model).unwrap();
 
-        let o = Onnx::open(&path).unwrap();
-        let obj = &o.manifest().objects["w"];
-        assert_eq!(obj.shape, vec![2, 2]);
-        assert_eq!(obj.parts["data"].dtype, DType::F32);
-        assert_eq!(o.read("w", "data").unwrap(), data);
-        assert!(o.caps("w", "data").unwrap().zero_copy);
+        let o = ztensor_compat::open(&path).unwrap();
+        let obj = o.tensor("w").unwrap();
+        assert_eq!(obj.shape().to_vec(), vec![2, 2]);
+        assert_eq!(obj.part("data").unwrap().dtype(), DType::F32);
+        assert_eq!(o.tensor("w").unwrap().bytes().unwrap().into_owned(), data);
+        assert!(o.tensor("w").unwrap().caps().unwrap().map);
     }
 
     /// f16 stored in int32_data: one element per int32 (v1 assembled these
@@ -368,8 +364,8 @@ mod onnx {
         let path = tmp("f16.onnx");
         fs::write(&path, &model).unwrap();
 
-        let o = Onnx::open(&path).unwrap();
-        assert_eq!(o.read("h", "data").unwrap(), vec![0x00, 0x3c, 0x00, 0x3c]);
+        let o = ztensor_compat::open(&path).unwrap();
+        assert_eq!(o.tensor("h").unwrap().bytes().unwrap().into_owned(), vec![0x00, 0x3c, 0x00, 0x3c]);
     }
 
     #[test]
@@ -380,7 +376,7 @@ mod onnx {
         let model = len_field(7, &graph);
         let path = tmp("external.onnx");
         fs::write(&path, &model).unwrap();
-        assert!(matches!(Onnx::open(&path), Err(Error::Unsupported(_))));
+        assert!(matches!(ztensor_compat::open(&path), Err(Error::Unsupported(_))));
     }
 }
 
@@ -391,17 +387,16 @@ mod onnx {
 #[cfg(all(feature = "safetensors", feature = "gguf"))]
 mod detect {
     use super::*;
-    use ztensor_compat::open_any;
 
     #[test]
     fn detects_zt_and_foreign() {
         // .zt
         let zt = tmp("detect.zt");
         let mut w = ztensor::Writer::create(&zt).unwrap();
-        w.add_dense("t", &[2], DType::U8, &[1, 2]).unwrap();
+        w.add("t", [2].to_vec(), DType::U8, &[1, 2]).unwrap();
         w.finish().unwrap();
-        let src = open_any(&zt).unwrap();
-        assert_eq!(src.read("t", "data").unwrap(), vec![1, 2]);
+        let src = ztensor_compat::open(&zt).unwrap();
+        assert_eq!(src.tensor("t").unwrap().bytes().unwrap().into_owned(), vec![1, 2]);
 
         // safetensors
         let st = tmp("detect.safetensors");
@@ -410,13 +405,13 @@ mod detect {
         bytes.extend_from_slice(header);
         bytes.extend_from_slice(&[3, 4]);
         fs::write(&st, &bytes).unwrap();
-        let src = open_any(&st).unwrap();
-        assert_eq!(src.read("t", "data").unwrap(), vec![3, 4]);
+        let src = ztensor_compat::open(&st).unwrap();
+        assert_eq!(src.tensor("t").unwrap().bytes().unwrap().into_owned(), vec![3, 4]);
 
         // garbage
         let junk = tmp("detect.junk");
         fs::write(&junk, b"not a tensor file at all").unwrap();
-        assert!(matches!(open_any(&junk), Err(Error::Unsupported(_))));
+        assert!(matches!(ztensor_compat::open(&junk), Err(Error::Unsupported(_))));
     }
 }
 
@@ -428,7 +423,6 @@ mod detect {
 mod pt {
     use super::*;
     use std::io::Write;
-    use ztensor_compat::Pt;
 
     /// Emits the pickle stream torch writes for `{'w': tensor}` with the
     /// given shape/stride over storage key "0" (FloatStorage).
@@ -496,13 +490,13 @@ mod pt {
             &state_dict_pickle(&[2, 2], &[2, 1]), // contiguous
             &data,
         );
-        let pt = Pt::open(&path).unwrap();
-        let obj = &pt.manifest().objects["w"];
-        assert_eq!(obj.shape, vec![2, 2]);
-        assert_eq!(obj.parts["data"].dtype, DType::F32);
-        assert_eq!(pt.read("w", "data").unwrap(), data);
-        assert!(pt.view("w", "data").is_ok()); // stored zip entry
-        assert!(pt.caps("w", "data").unwrap().zero_copy);
+        let pt = ztensor_compat::open(&path).unwrap();
+        let obj = pt.tensor("w").unwrap();
+        assert_eq!(obj.shape().to_vec(), vec![2, 2]);
+        assert_eq!(obj.part("data").unwrap().dtype(), DType::F32);
+        assert_eq!(pt.tensor("w").unwrap().bytes().unwrap().into_owned(), data);
+        assert!(pt.tensor("w").unwrap().map().is_ok()); // stored zip entry
+        assert!(pt.tensor("w").unwrap().caps().unwrap().map);
     }
 
     #[test]
@@ -512,7 +506,7 @@ mod pt {
             &state_dict_pickle(&[2, 2], &[1, 2]), // transposed stride
             &f32s(&[0.0; 4]),
         );
-        let err = Pt::open(&path).unwrap_err();
+        let err = ztensor_compat::open(&path).unwrap_err();
         assert!(
             matches!(err, Error::Unsupported(ref m) if m.contains("contiguous")),
             "{err:?}"
@@ -523,15 +517,15 @@ mod pt {
     fn ingest_to_canonical() {
         let data = f32s(&[5.0, 6.0, 7.0, 8.0]);
         let path = write_pt("ingest.pt", &state_dict_pickle(&[4, 1], &[1, 1]), &data);
-        let pt = Pt::open(&path).unwrap();
+        let pt = ztensor_compat::open(&path).unwrap();
 
         let zt = tmp("from-pt.zt");
         let mut w = ztensor::Writer::create(&zt).unwrap();
         w.ingest(&pt).unwrap();
         w.finish().unwrap();
 
-        let r = ztensor::Reader::open(&zt).unwrap();
-        assert_eq!(r.read("w", "data").unwrap(), data);
-        assert!(r.verify("w", "data").unwrap());
+        let r = ztensor::Source::open(&zt).unwrap();
+        assert_eq!(r.tensor("w").unwrap().bytes().unwrap().into_owned(), data);
+        assert!(r.tensor("w").unwrap().verify().unwrap().checked());
     }
 }

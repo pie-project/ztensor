@@ -3,9 +3,7 @@
 
 use std::fs;
 use std::path::PathBuf;
-
-use ztensor_compat::Safetensors;
-use ztensor::{DType, Error, Reader, Source, Writer};
+use ztensor::{DType, Error, Writer};
 
 fn tmp(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name)
@@ -65,20 +63,20 @@ fn open_and_read() {
         &[("format", "pt")],
     );
 
-    let st = Safetensors::open(&path).unwrap();
-    assert_eq!(st.manifest().objects.len(), 2);
-    let obj = &st.manifest().objects["a.weight"];
-    assert_eq!(obj.shape, vec![2, 2]);
-    assert_eq!(obj.parts["data"].dtype, DType::F32);
-    assert!(st.manifest().attributes.is_some());
+    let st = ztensor_compat::open(&path).unwrap();
+    assert_eq!(st.len(), 2);
+    let obj = st.tensor("a.weight").unwrap();
+    assert_eq!(obj.shape().to_vec(), vec![2, 2]);
+    assert_eq!(obj.part("data").unwrap().dtype(), DType::F32);
+    assert!(st.attributes().is_some());
 
-    assert_eq!(st.read("a.weight", "data").unwrap(), a);
-    assert_eq!(Source::view(&st, "b.weight", "data").unwrap(), &b[..]);
+    assert_eq!(st.tensor("a.weight").unwrap().bytes().unwrap().into_owned(), a);
+    assert_eq!(st.tensor("b.weight").unwrap().map().unwrap(), &b[..]);
 
-    let caps = st.caps("a.weight", "data").unwrap();
-    assert!(caps.zero_copy);
-    assert!(!caps.verifiable);
-    assert!(caps.tier() >= 2);
+    let caps = st.tensor("a.weight").unwrap().caps().unwrap();
+    assert!(caps.map);
+    assert!(!caps.verify);
+    assert!(caps.map);
 }
 
 #[test]
@@ -91,12 +89,12 @@ fn dtype_projections() {
         ],
         &[],
     );
-    let st = Safetensors::open(&path).unwrap();
-    let mask = &st.manifest().objects["mask"].parts["data"];
-    assert_eq!((mask.dtype, mask.ltype.as_deref()), (DType::U8, Some("bool")));
-    let fp8 = &st.manifest().objects["fp8"].parts["data"];
+    let st = ztensor_compat::open(&path).unwrap();
+    let mask = st.tensor("mask").unwrap().part("data").unwrap();
+    assert_eq!((mask.dtype(), mask.logical()), (DType::U8, Some("bool")));
+    let fp8 = st.tensor("fp8").unwrap().part("data").unwrap();
     assert_eq!(
-        (fp8.dtype, fp8.ltype.as_deref()),
+        (fp8.dtype(), fp8.logical()),
         (DType::U8, Some("f8_e4m3fn"))
     );
 }
@@ -105,7 +103,7 @@ fn dtype_projections() {
 fn unknown_dtype_refused() {
     let path = st_file("f4.safetensors", &[("t", "F4", &[2], &[0x21])], &[]);
     assert!(matches!(
-        Safetensors::open(&path),
+        ztensor_compat::open(&path),
         Err(Error::Unsupported(_))
     ));
 }
@@ -114,7 +112,7 @@ fn unknown_dtype_refused() {
 fn rejects_bad_geometry() {
     // size mismatch: F32 [2,2] needs 16 bytes
     let path = st_file("short.safetensors", &[("t", "F32", &[2, 2], &[0u8; 12])], &[]);
-    assert!(Safetensors::open(&path).is_err());
+    assert!(ztensor_compat::open(&path).is_err());
 
     // overlap / hole: hand-build offsets that don't tile
     let mut bytes = st_bytes(&[("a", "U8", &[8], &[1u8; 8])], &[]);
@@ -125,13 +123,13 @@ fn rejects_bad_geometry() {
     bytes[pos..pos + 5].copy_from_slice(b"[0,4]");
     let path = tmp("hole.safetensors");
     fs::write(&path, &bytes).unwrap();
-    assert!(Safetensors::open(&path).is_err());
+    assert!(ztensor_compat::open(&path).is_err());
 
     // truncated header
     let path = st_file("trunc.safetensors", &[("t", "U8", &[4], &[9u8; 4])], &[]);
     let bytes = fs::read(&path).unwrap();
     fs::write(&path, &bytes[..9]).unwrap();
-    assert!(Safetensors::open(&path).is_err());
+    assert!(ztensor_compat::open(&path).is_err());
 }
 
 /// The conversion path: HF checkpoint in, canonical tier-3 `.zt` out —
@@ -145,7 +143,7 @@ fn convert_to_canonical_zt() {
         &[("b.weight", "BF16", &[4], &b), ("a.weight", "F32", &[2, 2], &a)],
         &[("format", "pt")],
     );
-    let st = Safetensors::open(&st_path).unwrap();
+    let st = ztensor_compat::open(&st_path).unwrap();
 
     let convert = |out: &PathBuf| {
         let mut w = Writer::create(out).unwrap();
@@ -160,16 +158,17 @@ fn convert_to_canonical_zt() {
     // Bit-reproducible: same source, identical canonical output.
     assert_eq!(fs::read(&zt1).unwrap(), fs::read(&zt2).unwrap());
 
-    let r = Reader::open(&zt1).unwrap();
-    assert_eq!(r.read("a.weight", "data").unwrap(), a);
-    assert_eq!(r.read("b.weight", "data").unwrap(), b);
-    assert!(r.verify("a.weight", "data").unwrap()); // digests added
-    assert!(r.manifest().attributes.is_some()); // metadata carried over
+    let r = ztensor::Source::open(&zt1).unwrap();
+    assert_eq!(r.tensor("a.weight").unwrap().bytes().unwrap().into_owned(), a);
+    assert_eq!(r.tensor("b.weight").unwrap().bytes().unwrap().into_owned(), b);
+    assert!(r.tensor("a.weight").unwrap().verify().unwrap().checked()); // digests added
+    assert!(r.attributes().is_some()); // metadata carried over
 
-    // Upgrade to tier 3 (on ≤64K page hosts).
-    let caps = r.caps("a.weight", "data").unwrap();
-    assert!(caps.verifiable && caps.zero_copy);
+    // Everything the projection could not offer, the conversion added: a
+    // digest to verify against, and (on <=64K page hosts) pages of its own.
+    let caps = r.tensor("a.weight").unwrap().caps().unwrap();
+    assert!(caps.verify && caps.map && caps.locate);
     if ztensor::page_size() <= ztensor::ALIGN_CANONICAL {
-        assert_eq!(caps.tier(), 3);
+        assert!(caps.evict);
     }
 }

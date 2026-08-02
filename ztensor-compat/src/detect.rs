@@ -1,22 +1,25 @@
-//! Format detection: open any supported tensor file as a [`Source`].
+//! Opening a tensor file of any supported format.
 //!
-//! Detection is by magic bytes wherever the format has them; ONNX
-//! (protobuf, magic-less) falls back to the file extension. Formats whose
-//! feature is disabled are reported as such — never misdetected as
-//! something else.
+//! Detection is by magic bytes wherever the format has them; ONNX (protobuf,
+//! magic-less) falls back to the file extension. Formats whose feature is
+//! disabled are reported as such — never misdetected as something else.
+//!
+//! What comes back is an ordinary [`Source`]. There is no per-format type to
+//! learn: a projected safetensors file and a canonical `.zt` file answer the
+//! same questions, and differ only in what they can honestly say yes to.
 
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
 
-use ztensor::{Composite, CompositeSource, Error, Result, Source};
+use ztensor::{Error, Result, Source, Store, Vocabulary};
 
 /// Sniffs the format of a tensor file. Returns a stable label:
 /// `"zt"`, `"safetensors"`, `"gguf"`, `"npz"`, `"pt"`, `"hdf5"`, `"onnx"`.
 pub fn detect(path: impl AsRef<Path>) -> Result<&'static str> {
     let path = path.as_ref();
-    // A single read() may return fewer bytes than asked for; fill the
-    // buffer so a short read cannot cause a mis-detection.
+    // A single read() may return fewer bytes than asked for; fill the buffer
+    // so a short read cannot cause a mis-detection.
     let mut file = File::open(path)?;
     let mut head = [0u8; 9];
     let mut n = 0;
@@ -66,79 +69,115 @@ pub fn detect(path: impl AsRef<Path>) -> Result<&'static str> {
     )))
 }
 
-/// Opens a tensor file of any supported format. `.zt` files (including
-/// sharded models) open through [`ztensor::Model`].
-pub fn open_any(path: impl AsRef<Path>) -> Result<Box<dyn Source>> {
-    let path = path.as_ref();
+/// How to open. Mirrors [`ztensor::source::Options`], minus shard resolution:
+/// no foreign format has a shard table.
+#[derive(Clone, Default)]
+pub struct Open {
+    vocab: Option<Vocabulary>,
+    map: Option<bool>,
+}
 
-    #[allow(dead_code)]
-    fn unsupported(what: &str) -> Result<Box<dyn Source>> {
-        Err(Error::Unsupported(format!(
-            "{what} support is not compiled in (enable the ztensor-compat feature)"
-        )))
+/// Opening options: a vocabulary to read with, and whether to map.
+pub fn options() -> Open {
+    Open::default()
+}
+
+impl Open {
+    pub fn vocabulary(mut self, vocab: &Vocabulary) -> Self {
+        self.vocab = Some(vocab.clone());
+        self
     }
 
-    match detect(path)? {
-        "zt" => Ok(Box::new(ztensor::Model::open(path)?)),
-        "gguf" => {
-            #[cfg(feature = "gguf")]
-            return Ok(Box::new(crate::Gguf::open(path)?));
-            #[cfg(not(feature = "gguf"))]
-            unsupported("gguf")
+    /// Map the files (the default). With `false`, files are opened but not
+    /// mapped: metadata and addresses are available, borrowed reads are not.
+    pub fn map(mut self, map: bool) -> Self {
+        self.map = Some(map);
+        self
+    }
+
+    fn mapping(&self) -> bool {
+        self.map.unwrap_or(true)
+    }
+
+    /// Opens one file of any supported format.
+    pub fn open(self, path: impl AsRef<Path>) -> Result<Source> {
+        let path = path.as_ref();
+        let format = detect(path)?;
+
+        if format == "zt" {
+            let mut opts = ztensor::Source::options().map(self.mapping());
+            if let Some(vocab) = &self.vocab {
+                opts = opts.vocabulary(vocab);
+            }
+            return opts.open(path);
         }
-        "hdf5" => {
-            #[cfg(feature = "hdf5")]
-            return Ok(Box::new(crate::Hdf5::open(path)?));
-            #[cfg(not(feature = "hdf5"))]
-            unsupported("hdf5")
-        }
-        "pt" => {
-            #[cfg(feature = "pickle")]
-            return Ok(Box::new(crate::Pt::open(path)?));
-            #[cfg(not(feature = "pickle"))]
-            unsupported("pickle (.pt)")
-        }
-        "npz" => {
-            #[cfg(feature = "npz")]
-            return Ok(Box::new(crate::Npz::open(path)?));
-            #[cfg(not(feature = "npz"))]
-            unsupported("npz")
-        }
-        "safetensors" => {
+
+        let store = if self.mapping() {
+            Store::map(path, format)?
+        } else {
+            Store::index(path, format)?
+        };
+
+        #[allow(unused_variables)]
+        let projection = match format {
             #[cfg(feature = "safetensors")]
-            return Ok(Box::new(crate::Safetensors::open(path)?));
-            #[cfg(not(feature = "safetensors"))]
-            unsupported("safetensors")
-        }
-        "onnx" => {
+            "safetensors" => crate::safetensors::project(&store)?,
+            #[cfg(feature = "gguf")]
+            "gguf" => crate::gguf::project(&store)?,
+            #[cfg(feature = "npz")]
+            "npz" => crate::npz::project(&store)?,
+            #[cfg(feature = "pickle")]
+            "pt" => crate::pt::project(&store)?,
+            #[cfg(feature = "hdf5")]
+            "hdf5" => crate::hdf5::project(&store)?,
             #[cfg(feature = "onnx")]
-            return Ok(Box::new(crate::Onnx::open(path)?));
-            #[cfg(not(feature = "onnx"))]
-            unsupported("onnx")
+            "onnx" => crate::onnx::project(&store)?,
+            other => {
+                return Err(Error::Unsupported(format!(
+                    "{other} support is not compiled in (enable the matching \
+                     ztensor-compat feature)"
+                )))
+            }
+        };
+        projection.into_source(store, self.vocab.as_ref())
+    }
+
+    /// Opens several files as one name space.
+    ///
+    /// What a sharded snapshot is: `model-00001-of-00003.safetensors` and its
+    /// siblings are each a whole file that describes itself, and the index
+    /// beside them is a naming convention outside the format. So this is a
+    /// list of paths and nothing more — the caller decides which files belong
+    /// together, because the files themselves never said.
+    ///
+    /// The set may mix formats. Nothing here requires them to match: what
+    /// makes it a model is that the names do not collide, which the merge
+    /// checks.
+    pub fn open_all(self, paths: &[impl AsRef<Path>]) -> Result<Source> {
+        let mut sources = Vec::with_capacity(paths.len());
+        for path in paths {
+            sources.push(self.clone().open(path.as_ref())?);
         }
-        other => Err(Error::Unsupported(format!("unhandled format {other:?}"))),
+        Source::merge(sources)
     }
 }
 
-/// Opens several files as one [`Composite`].
-///
-/// What a sharded snapshot is: `model-00001-of-00003.safetensors` and its
-/// siblings are each a whole file that describes itself, and the index beside
-/// them is a naming convention outside the format. So this is a list of paths
-/// and nothing more — the caller decides which files belong together, because
-/// the files themselves never said.
-///
-/// Every path is opened with [`open_any`], so a set may mix formats. Nothing
-/// here requires them to match: what makes the set a model is that the names
-/// do not collide, which [`Composite::new`] checks.
-pub fn open_all<P: AsRef<Path>>(paths: &[P]) -> Result<Composite> {
-    let mut parts = Vec::with_capacity(paths.len());
-    for path in paths {
-        let path = path.as_ref();
-        parts.push(CompositeSource {
-            label: path.display().to_string(),
-            source: open_any(path)?,
-        });
-    }
-    Composite::new(parts)
+/// Opens a tensor file of any supported format.
+pub fn open(path: impl AsRef<Path>) -> Result<Source> {
+    options().open(path)
+}
+
+/// Opens without mapping: metadata and addresses only.
+pub fn index(path: impl AsRef<Path>) -> Result<Source> {
+    options().map(false).open(path)
+}
+
+/// Opens several files as one name space. See [`Open::open_all`].
+pub fn open_all(paths: &[impl AsRef<Path>]) -> Result<Source> {
+    options().open_all(paths)
+}
+
+/// Indexes several files as one name space, mapping none of them.
+pub fn index_all(paths: &[impl AsRef<Path>]) -> Result<Source> {
+    options().map(false).open_all(paths)
 }

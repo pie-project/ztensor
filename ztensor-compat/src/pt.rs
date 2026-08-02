@@ -18,12 +18,11 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::Read;
-use std::path::Path;
 
-use memmap2::Mmap;
-use ztensor::{
-    BlobRef, Caps, DType, Error, Layout, Manifest, Object, Part, Result, Source,
-};
+use ztensor::catalog::{Entry, Location, PartEntry, Payload};
+use ztensor::{Catalog, DType, Error, Opaque, Result, Store, StoreId, Vocabulary};
+
+use crate::project::Projection;
 
 fn bad(detail: impl Into<String>) -> Error {
     Error::InvalidInput(format!("pt: {}", detail.into()))
@@ -666,277 +665,203 @@ fn collect_tensors(
 enum StorageLoc {
     /// Stored entry: absolute range in the file.
     Stored { offset: u64, length: u64 },
-    /// Compressed entry: decompressed lazily, cached.
+    /// Compressed entry: inflated on demand, cached whole.
     Compressed { zip_index: usize, length: u64 },
 }
 
-pub struct Pt {
-    mmap: Mmap,
+/// Tensors that live inside a compressed storage.
+///
+/// A `.pt` tensor is a window into a storage, and a compressed storage has no
+/// window until it is inflated — so these have no address, and the whole
+/// storage is cached once rather than inflated per tensor.
+struct Compressed {
     archive: RefCell<zip::ZipArchive<File>>,
-    cache: RefCell<BTreeMap<String, Vec<u8>>>,
-    storages: BTreeMap<String, StorageLoc>,
-    manifest: Manifest,
-    /// tensor name → (storage key, byte offset within storage, byte len).
-    tensors: BTreeMap<String, (String, u64, u64)>,
+    cache: RefCell<BTreeMap<usize, Vec<u8>>>,
+    /// Keyed by the `key` in [`Payload::Opaque`]:
+    /// (zip index, storage length, byte offset within the storage).
+    slices: Vec<(usize, u64, u64)>,
 }
 
-impl std::fmt::Debug for Pt {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Pt")
-            .field("len", &self.mmap.len())
-            .field("objects", &self.manifest.objects.len())
-            .finish()
-    }
-}
-
-impl Pt {
-    pub fn open(path: impl AsRef<Path>) -> Result<Self> {
-        let path = path.as_ref();
-        let file = File::open(path)?;
-        // SAFETY: read-only shared map of untrusted bytes.
-        let mmap = unsafe { Mmap::map(&file)? };
-        let mut archive = zip::ZipArchive::new(File::open(path)?)
-            .map_err(|e| bad(format!("not a ZIP archive: {e}")))?;
-
-        // Locate the pickle.
-        let pickle_name = (0..archive.len())
-            .filter_map(|i| archive.by_index_raw(i).ok().map(|e| e.name().to_string()))
-            .find(|n| n.ends_with("data.pkl"))
-            .ok_or_else(|| bad("no data.pkl entry"))?;
-        let prefix = format!(
-            "{}data/",
-            pickle_name.strip_suffix("data.pkl").unwrap_or_default()
-        );
-
-        // The pickle is decompressed here, so its *decompressed* size must
-        // be capped independently of what the ZIP declares.
-        let mut pickle = Vec::new();
-        let mut entry = archive
-            .by_name(&pickle_name)
-            .map_err(|e| bad(format!("{pickle_name}: {e}")))?;
-        std::io::Read::take(&mut entry, MAX_PICKLE_BYTES as u64 + 1)
-            .read_to_end(&mut pickle)?;
-        if pickle.len() > MAX_PICKLE_BYTES {
-            return Err(bad("data.pkl exceeds the 256 MiB limit"));
-        }
-        drop(entry);
-
-        // Run the VM and collect tensors.
-        let mut vm = Vm {
-            data: &pickle,
-            pos: 0,
-            stack: Vec::new(),
-            marks: Vec::new(),
-            memo: BTreeMap::new(),
-            refusal: None,
-        };
-        vm.execute()?;
-        let mut tensors = BTreeMap::new();
-        for v in &vm.stack {
-            collect_tensors("", v, &mut tensors, 0)?;
-        }
-        if tensors.is_empty() {
-            return Err(bad("no tensors found"));
-        }
-
-        // Locate each referenced storage entry.
-        let mut storages = BTreeMap::new();
-        for t in tensors.values() {
-            let key = &t.storage_key;
-            if storages.contains_key(key) {
-                continue;
-            }
-            let entry_name = format!("{prefix}{key}");
-            let zip_index = archive
-                .index_for_name(&entry_name)
-                .ok_or_else(|| bad(format!("storage entry {entry_name:?} missing")))?;
-            let entry = archive
-                .by_index_raw(zip_index)
-                .map_err(|e| bad(format!("storage entry {entry_name:?}: {e}")))?;
-            let loc = if entry.compression() == zip::CompressionMethod::Stored {
-                let start = entry.data_start();
-                let size = entry.size();
-                crate::safe::range("pt storage", start, size, mmap.len())?;
-                StorageLoc::Stored {
-                    offset: start,
-                    length: size,
-                }
-            } else {
-                StorageLoc::Compressed {
-                    zip_index,
-                    length: entry.size(),
-                }
-            };
-            drop(entry);
-            storages.insert(key.clone(), loc);
-        }
-
-        // Build the projection, bounds-checking every tensor against its
-        // storage.
-        let mut objects = BTreeMap::new();
-        let mut locations = BTreeMap::new();
-        for (name, t) in &tensors {
-            let elems = t
-                .shape
-                .iter()
-                .try_fold(1u64, |acc, &d| acc.checked_mul(d))
-                .ok_or_else(|| bad(format!("tensor {name:?} shape overflows")))?;
-            let byte_len = ztensor::logical_size(t.ltype, t.dtype, elems)
-                .ok_or_else(|| bad("size not computable"))?;
-            let storage = &storages[&t.storage_key];
-            let storage_len = match storage {
-                StorageLoc::Stored { length, .. } | StorageLoc::Compressed { length, .. } => {
-                    *length
-                }
-            };
-            let end = t
-                .byte_offset
-                .checked_add(byte_len)
-                .filter(|&e| e <= storage_len)
-                .ok_or_else(|| {
-                    bad(format!("tensor {name:?} extends past its storage"))
-                })?;
-            let _ = end;
-
-            let (blob, encoding) = match storage {
-                StorageLoc::Stored { offset, .. } => (
-                    BlobRef {
-                        shard: 0,
-                        offset: offset + t.byte_offset,
-                        length: byte_len,
-                    },
-                    None,
-                ),
-                StorageLoc::Compressed { .. } => (
-                    BlobRef {
-                        shard: 0,
-                        offset: 0,
-                        length: 0, // no stable stored range for a slice of a compressed storage
-                    },
-                    Some("pt.deflate/1".to_string()),
-                ),
-            };
-            let part = Part {
-                dtype: t.dtype,
-                ltype: t.ltype.map(str::to_string),
-                blob,
-                decoded_length: encoding.as_ref().map(|_| byte_len),
-                encoding,
-                digest: None,
-            };
-            let mut parts = BTreeMap::new();
-            parts.insert("data".to_string(), part);
-            objects.insert(
-                name.clone(),
-                Object {
-                    shape: t.shape.clone(),
-                    layout: Layout::Dense,
-                    attributes: None,
-                    parts,
-                },
-            );
-            locations.insert(name.clone(), (t.storage_key.clone(), t.byte_offset, byte_len));
-        }
-
-        Ok(Self {
-            mmap,
-            archive: RefCell::new(archive),
-            cache: RefCell::new(BTreeMap::new()),
-            storages,
-            manifest: Manifest {
-                attributes: None,
-                shards: BTreeMap::new(),
-                objects,
-            },
-            tensors: locations,
-        })
-    }
-
-    fn location(&self, name: &str, part: &str) -> Result<&(String, u64, u64)> {
-        if part != "data" {
-            return Err(Error::NotFound(format!("part {name:?}/{part:?}")));
-        }
-        self.tensors
-            .get(name)
-            .ok_or_else(|| Error::NotFound(format!("object {name:?}")))
-    }
-
-    fn ensure_cached(&self, key: &str, zip_index: usize, length: u64) -> Result<()> {
-        if self.cache.borrow().contains_key(key) {
+impl Compressed {
+    fn ensure_cached(&self, zip_index: usize, length: u64) -> Result<()> {
+        if self.cache.borrow().contains_key(&zip_index) {
             return Ok(());
         }
         let mut archive = self.archive.borrow_mut();
         let mut entry = archive
             .by_index(zip_index)
-            .map_err(|e| bad(format!("storage {key:?}: {e}")))?;
+            .map_err(|e| bad(format!("storage {zip_index}: {e}")))?;
         let cap = crate::safe::alloc_size("pt storage", length)?;
         let mut bytes = Vec::with_capacity(cap);
         std::io::Read::take(&mut entry, length + 1)
             .read_to_end(&mut bytes)
-            .map_err(|e| bad(format!("storage {key:?}: {e}")))?;
+            .map_err(|e| bad(format!("storage {zip_index}: {e}")))?;
         if bytes.len() as u64 != length {
-            return Err(bad(format!("storage {key:?} decompressed size mismatch")));
+            return Err(bad(format!("storage {zip_index} decompressed size mismatch")));
         }
-        self.cache.borrow_mut().insert(key.to_string(), bytes);
+        self.cache.borrow_mut().insert(zip_index, bytes);
         Ok(())
     }
 }
 
-impl Source for Pt {
-    fn manifest(&self) -> &Manifest {
-        &self.manifest
+impl Opaque for Compressed {
+    fn read(&self, key: u64, decoded_len: u64) -> Result<Vec<u8>> {
+        let (zip_index, length, offset) = *self
+            .slices
+            .get(key as usize)
+            .ok_or_else(|| bad(format!("no compressed tensor {key}")))?;
+        self.ensure_cached(zip_index, length)?;
+        let cache = self.cache.borrow();
+        let storage = &cache[&zip_index];
+        let (start, end) = crate::safe::range("pt tensor", offset, decoded_len, storage.len())?;
+        Ok(storage[start..end].to_vec())
+    }
+}
+
+pub(crate) fn project(store: &Store) -> Result<Projection> {
+    let vocab = Vocabulary::standard();
+    let mut archive = zip::ZipArchive::new(File::open(store.path())?)
+        .map_err(|e| bad(format!("not a ZIP archive: {e}")))?;
+
+    // Locate the pickle.
+    let pickle_name = (0..archive.len())
+        .filter_map(|i| archive.by_index_raw(i).ok().map(|e| e.name().to_string()))
+        .find(|n| n.ends_with("data.pkl"))
+        .ok_or_else(|| bad("no data.pkl entry"))?;
+    let prefix = format!(
+        "{}data/",
+        pickle_name.strip_suffix("data.pkl").unwrap_or_default()
+    );
+
+    // The pickle is decompressed here, so its *decompressed* size must be
+    // capped independently of what the ZIP declares.
+    let mut pickle = Vec::new();
+    let mut entry = archive
+        .by_name(&pickle_name)
+        .map_err(|e| bad(format!("{pickle_name}: {e}")))?;
+    std::io::Read::take(&mut entry, MAX_PICKLE_BYTES as u64 + 1).read_to_end(&mut pickle)?;
+    if pickle.len() > MAX_PICKLE_BYTES {
+        return Err(bad("data.pkl exceeds the 256 MiB limit"));
+    }
+    drop(entry);
+
+    // Run the VM and collect tensors.
+    let mut vm = Vm {
+        data: &pickle,
+        pos: 0,
+        stack: Vec::new(),
+        marks: Vec::new(),
+        memo: BTreeMap::new(),
+        refusal: None,
+    };
+    vm.execute()?;
+    let mut tensors = BTreeMap::new();
+    for v in &vm.stack {
+        collect_tensors("", v, &mut tensors, 0)?;
+    }
+    if tensors.is_empty() {
+        return Err(bad("no tensors found"));
     }
 
-    fn read(&self, object: &str, part: &str) -> Result<Vec<u8>> {
-        let (key, off, len) = self.location(object, part)?;
-        match &self.storages[key] {
-            StorageLoc::Stored { offset, .. } => {
-                let start = (offset + off) as usize;
-                Ok(self.mmap[start..start + *len as usize].to_vec())
-            }
-            StorageLoc::Compressed { zip_index, length } => {
-                self.ensure_cached(key, *zip_index, *length)?;
-                let cache = self.cache.borrow();
-                let storage = &cache[key];
-                Ok(storage[*off as usize..(*off + *len) as usize].to_vec())
-            }
+    // Locate each referenced storage entry.
+    let mut storages: BTreeMap<String, StorageLoc> = BTreeMap::new();
+    for t in tensors.values() {
+        let key = &t.storage_key;
+        if storages.contains_key(key) {
+            continue;
         }
-    }
-
-    fn view(&self, object: &str, part: &str) -> Result<&[u8]> {
-        let (key, off, len) = self.location(object, part)?;
-        match &self.storages[key] {
-            StorageLoc::Stored { offset, .. } => {
-                let start = (offset + off) as usize;
-                Ok(&self.mmap[start..start + *len as usize])
+        let entry_name = format!("{prefix}{key}");
+        let zip_index = archive
+            .index_for_name(&entry_name)
+            .ok_or_else(|| bad(format!("storage entry {entry_name:?} missing")))?;
+        let entry = archive
+            .by_index_raw(zip_index)
+            .map_err(|e| bad(format!("storage entry {entry_name:?}: {e}")))?;
+        let loc = if entry.compression() == zip::CompressionMethod::Stored {
+            let start = entry.data_start();
+            let size = entry.size();
+            if crate::safe::add("pt storage", start, size)? > store.len() {
+                return Err(bad(format!("storage {entry_name:?} extends past file")));
             }
-            StorageLoc::Compressed { .. } => Err(Error::Unsupported(
-                "tensor in a compressed storage has no zero-copy view".into(),
-            )),
-        }
-    }
-
-    fn caps(&self, object: &str, part: &str) -> Result<Caps> {
-        let (key, off, _) = self.location(object, part)?;
-        let (zero_copy, alignment) = match &self.storages[key] {
-            StorageLoc::Stored { offset, .. } => {
-                let abs = offset + off;
-                (
-                    true,
-                    if abs == 0 {
-                        1
-                    } else {
-                        1u64 << abs.trailing_zeros().min(63)
-                    },
-                )
+            StorageLoc::Stored {
+                offset: start,
+                length: size,
             }
-            StorageLoc::Compressed { .. } => (false, 1),
+        } else {
+            StorageLoc::Compressed {
+                zip_index,
+                length: entry.size(),
+            }
         };
-        Ok(Caps {
-            zero_copy,
-            alignment,
-            verifiable: false,
-            page_exclusive: false,
-        })
+        drop(entry);
+        storages.insert(key.clone(), loc);
     }
+
+    // Build the catalog, bounds-checking every tensor against its storage.
+    let mut catalog = Catalog::new();
+    let mut slices: Vec<(usize, u64, u64)> = Vec::new();
+    for (name, t) in &tensors {
+        let elems = crate::safe::product("pt shape", &t.shape)?;
+        let byte_len = vocab
+            .size_of(t.ltype, t.dtype, elems)
+            .ok_or_else(|| bad("size not computable"))?;
+        let storage = &storages[&t.storage_key];
+        let storage_len = match storage {
+            StorageLoc::Stored { length, .. } | StorageLoc::Compressed { length, .. } => *length,
+        };
+        t.byte_offset
+            .checked_add(byte_len)
+            .filter(|&e| e <= storage_len)
+            .ok_or_else(|| bad(format!("tensor {name:?} extends past its storage")))?;
+
+        let payload = match storage {
+            StorageLoc::Stored { offset, .. } => Payload::At(Location {
+                store: StoreId(0),
+                offset: offset + t.byte_offset,
+                len: byte_len,
+            }),
+            StorageLoc::Compressed { zip_index, length } => {
+                slices.push((*zip_index, *length, t.byte_offset));
+                Payload::Opaque {
+                    store: StoreId(0),
+                    key: slices.len() as u64 - 1,
+                    decoded_len: byte_len,
+                }
+            }
+        };
+
+        let mut parts = BTreeMap::new();
+        parts.insert(
+            "data".to_string(),
+            PartEntry {
+                dtype: t.dtype,
+                logical: t.ltype.map(str::to_string),
+                payload,
+                digest: None,
+            },
+        );
+        catalog.insert(
+            name.clone(),
+            Entry {
+                shape: t.shape.clone(),
+                layout: "dense".to_string(),
+                attributes: None,
+                parts,
+            },
+        );
+    }
+
+    // Storages sit behind ZIP local headers and torch packs several tensors
+    // into one storage, so nothing here can prove a tensor has its pages to
+    // itself: occupancy stays unstated.
+    let projection = Projection::new(catalog);
+    Ok(if slices.is_empty() {
+        projection
+    } else {
+        projection.with_opaque(Box::new(Compressed {
+            archive: RefCell::new(archive),
+            cache: RefCell::new(BTreeMap::new()),
+            slices,
+        }))
+    })
 }

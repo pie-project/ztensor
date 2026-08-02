@@ -20,7 +20,6 @@ fn tmp(name: &str) -> PathBuf {
 #[cfg(feature = "hdf5")]
 mod hdf5 {
     use super::*;
-    use ztensor_compat::Hdf5;
 
     /// Superblock v0 with caller-chosen root B-tree and heap addresses.
     fn superblock(btree: u64, heap: u64, len: usize) -> Vec<u8> {
@@ -43,7 +42,7 @@ mod hdf5 {
     fn heap_address_wraparound() {
         let path = tmp("c1.h5");
         fs::write(&path, superblock(96, u64::MAX, 96)).unwrap();
-        assert!(Hdf5::open(&path).is_err());
+        assert!(ztensor_compat::open(&path).is_err());
     }
 
     /// C2: near-`u64::MAX` addresses in every signature check.
@@ -52,7 +51,7 @@ mod hdf5 {
         for addr in [u64::MAX - 8, u64::MAX - 1, 1 << 62] {
             let path = tmp("c2.h5");
             fs::write(&path, superblock(addr, 96, 256)).unwrap();
-            assert!(Hdf5::open(&path).is_err(), "addr {addr}");
+            assert!(ztensor_compat::open(&path).is_err(), "addr {addr}");
         }
     }
 
@@ -78,7 +77,7 @@ mod hdf5 {
         b[208..216].copy_from_slice(&248u64.to_le_bytes());
         let path = tmp("c3.h5");
         fs::write(&path, &b).unwrap();
-        assert!(Hdf5::open(&path).is_err());
+        assert!(ztensor_compat::open(&path).is_err());
     }
 }
 
@@ -89,7 +88,6 @@ mod hdf5 {
 #[cfg(feature = "gguf")]
 mod gguf {
     use super::*;
-    use ztensor_compat::Gguf;
 
     fn gstr(out: &mut Vec<u8>, s: &str) {
         out.extend((s.len() as u64).to_le_bytes());
@@ -113,12 +111,11 @@ mod gguf {
         // file ends here: 32-byte alignment rounds data_start past EOF
         let path = tmp("c8.gguf");
         fs::write(&path, &b).unwrap();
-        match Gguf::open(&path) {
+        match ztensor_compat::open(&path) {
             Err(_) => {}
             Ok(g) => {
                 // If it opens, the blob must at least be in bounds.
-                use ztensor::Source;
-                let _ = g.read("t", "data").expect("in-bounds read");
+                let _ = g.tensor("t").unwrap().bytes().expect("in-bounds read");
             }
         }
     }
@@ -133,7 +130,7 @@ mod gguf {
         b.extend(100_000u64.to_le_bytes()); // kv count
         let path = tmp("counts.gguf");
         fs::write(&path, &b).unwrap();
-        assert!(Gguf::open(&path).is_err());
+        assert!(ztensor_compat::open(&path).is_err());
     }
 }
 
@@ -145,7 +142,6 @@ mod gguf {
 mod npz {
     use super::*;
     use std::io::Write;
-    use ztensor_compat::Npz;
 
     fn npy(descr: &str, shape: &str, data: &[u8]) -> Vec<u8> {
         let dict =
@@ -178,7 +174,7 @@ mod npz {
     #[test]
     fn reversed_shape_parens() {
         let path = write_npz("c9.npz", &[("t", npy("<f4", ")junk(", &[]), false)]);
-        assert!(Npz::open(&path).is_err());
+        assert!(ztensor_compat::open(&path).is_err());
     }
 
     /// H1: a shape declaring gigabytes must not reserve them.
@@ -190,9 +186,8 @@ mod npz {
         );
         // Either the size equation rejects it at open, or the read is
         // bounded — never an unbounded reservation.
-        if let Ok(n) = Npz::open(&path) {
-            use ztensor::Source;
-            assert!(n.read("t", "data").is_err());
+        if let Ok(n) = ztensor_compat::open(&path) {
+            assert!(n.tensor("t").unwrap().bytes().is_err());
         }
     }
 
@@ -220,15 +215,14 @@ mod npz {
         let dup = tmp("dup2.npz");
         fs::write(&dup, &bytes).unwrap();
 
-        match Npz::open(&dup) {
+        match ztensor_compat::open(&dup) {
             Err(_) => {}
             Ok(n) => {
-                use ztensor::Source;
-                assert_eq!(n.manifest().objects.len(), 1);
+                assert_eq!(n.len(), 1);
                 // Whatever it resolved to, reading it must agree with the
                 // manifest's declared size.
-                let declared = n.manifest().objects["ta"].parts["data"].decoded_size();
-                assert_eq!(n.read("ta", "data").unwrap().len() as u64, declared);
+                let declared = n.tensor("ta").unwrap().part("data").unwrap().nbytes();
+                assert_eq!(n.tensor("ta").unwrap().bytes().unwrap().into_owned().len() as u64, declared);
             }
         }
     }
@@ -242,7 +236,6 @@ mod npz {
 mod pt {
     use super::*;
     use std::io::Write;
-    use ztensor_compat::Pt;
 
     fn write_pt(name: &str, pickle: &[u8]) -> PathBuf {
         let path = tmp(name);
@@ -275,7 +268,7 @@ mod pt {
 
         let path = write_pt("h3.pt", &p);
         let start = std::time::Instant::now();
-        let _ = Pt::open(&path); // errs: no tensors — the point is it returns
+        let _ = ztensor_compat::open(&path); // errs: no tensors — the point is it returns
         assert!(
             start.elapsed().as_secs() < 5,
             "pickle memo blow-up: {:?}",
@@ -292,7 +285,7 @@ mod pt {
         p.push(0x2e);
         let path = write_pt("h7.pt", &p);
         let start = std::time::Instant::now();
-        let _ = Pt::open(&path);
+        let _ = ztensor_compat::open(&path);
         assert!(
             start.elapsed().as_secs() < 5,
             "quadratic pop_to_mark: {:?}",

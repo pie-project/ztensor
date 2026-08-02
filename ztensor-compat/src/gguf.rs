@@ -13,14 +13,16 @@
 //! - All metadata KVs (including tokenizer tables) become file attributes.
 
 use std::collections::BTreeMap;
-use std::fs::File;
-use std::path::Path;
 
-use memmap2::Mmap;
+use ztensor::catalog::{Entry, Location, PartEntry, Payload};
 use ztensor::cbor::Value;
-use ztensor::{
-    BlobRef, Caps, DType, Error, Layout, Manifest, Object, Part, Result, Source,
-};
+use ztensor::{Catalog, DType, Error, Result, Store, StoreId};
+
+use crate::project::Projection;
+
+/// The cursor ran past the window we had read, not past the file. Only
+/// meaningful while the window is smaller than the file.
+const NEED_MORE: &str = "header extends past the bytes read so far";
 
 fn bad(detail: impl Into<String>) -> Error {
     Error::InvalidInput(format!("gguf: {}", detail.into()))
@@ -84,22 +86,6 @@ fn element_dtype(id: u32) -> Option<DType> {
     })
 }
 
-pub struct Gguf {
-    mmap: Mmap,
-    manifest: Manifest,
-    /// Sorted occupied ranges for the page-exclusivity check.
-    ranges: Vec<(u64, u64)>,
-}
-
-impl std::fmt::Debug for Gguf {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Gguf")
-            .field("len", &self.mmap.len())
-            .field("objects", &self.manifest.objects.len())
-            .finish()
-    }
-}
-
 // ---- cursor -----------------------------------------------------------
 
 struct Cursor<'a> {
@@ -113,7 +99,7 @@ impl<'a> Cursor<'a> {
             .pos
             .checked_add(n)
             .filter(|&e| e <= self.data.len())
-            .ok_or_else(|| bad("unexpected end of file"))?;
+            .ok_or_else(|| bad(NEED_MORE))?;
         let s = &self.data[self.pos..end];
         self.pos = end;
         Ok(s)
@@ -187,69 +173,34 @@ fn int_value(v: i64) -> Value {
 
 // ---- projection -------------------------------------------------------
 
-impl Gguf {
-    pub fn open(path: impl AsRef<Path>) -> Result<Self> {
-        let file = File::open(path)?;
-        // SAFETY: read-only shared map of untrusted bytes.
-        let mmap = unsafe { Mmap::map(&file)? };
-        let (manifest, ranges) = project(&mmap)?;
-        Ok(Self {
-            mmap,
-            manifest,
-            ranges,
-        })
+/// Reads the header, growing the window until it fits.
+///
+/// A GGUF header is metadata KVs plus tensor infos, and its size is only known
+/// once it has been parsed — a tokenizer table can be megabytes. So the window
+/// doubles until the parse stops running off the end, which for a mapped file
+/// costs nothing and for an indexed one reads the header and not the 100 GB
+/// behind it.
+pub(crate) fn project(store: &Store) -> Result<Projection> {
+    let file_len = store.len();
+    if let Some(mapped) = store.bytes() {
+        return project_bytes(mapped, file_len);
     }
-
-    fn part(&self, name: &str, part: &str) -> Result<&Part> {
-        let obj = self
-            .manifest
-            .objects
-            .get(name)
-            .ok_or_else(|| Error::NotFound(format!("object {name:?}")))?;
-        obj.parts
-            .get(part)
-            .ok_or_else(|| Error::NotFound(format!("part {name:?}/{part:?}")))
-    }
-}
-
-impl Source for Gguf {
-    fn manifest(&self) -> &Manifest {
-        &self.manifest
-    }
-
-    fn read(&self, object: &str, part: &str) -> Result<Vec<u8>> {
-        Source::view(self, object, part).map(<[u8]>::to_vec)
-    }
-
-    fn view(&self, object: &str, part: &str) -> Result<&[u8]> {
-        let p = self.part(object, part)?;
-        crate::safe::slice("gguf tensor", &self.mmap, p.blob.offset, p.blob.length)
-    }
-
-    fn caps(&self, object: &str, part: &str) -> Result<Caps> {
-        let p = self.part(object, part)?;
-        let page = ztensor::page_size();
-        let (start, len) = (p.blob.offset, p.blob.length);
-        let env_start = start & !(page - 1);
-        let env_end = (start + len).div_ceil(page).saturating_mul(page);
-        let page_exclusive = len > 0
-            && self.ranges.iter().all(|&(o, l)| {
-                (o, l) == (start, len) || o + l <= env_start || o >= env_end
-            });
-        Ok(Caps {
-            zero_copy: true,
-            alignment: if start == 0 {
-                1
-            } else {
-                1u64 << start.trailing_zeros().min(63)
-            },
-            verifiable: false,
-            page_exclusive,
-        })
+    let mut window = (1u64 << 20).min(file_len);
+    loop {
+        let buf = store.read(0, window)?;
+        match project_bytes(&buf, file_len) {
+            Err(e) if window < file_len && format!("{e}").contains(NEED_MORE) => {
+                window = (window * 4).min(file_len);
+            }
+            other => return other,
+        }
     }
 }
 
-fn project(buf: &[u8]) -> Result<(Manifest, Vec<(u64, u64)>)> {
+/// `buf` is the file, or a prefix of it long enough to hold the header;
+/// `file_len` is always the whole file, since tensor bounds are checked
+/// against the file and not against what we happened to read.
+fn project_bytes(buf: &[u8], file_len: u64) -> Result<Projection> {
     let mut c = Cursor { data: buf, pos: 0 };
     if c.take(4)? != b"GGUF" {
         return Err(bad("bad magic"));
@@ -262,7 +213,7 @@ fn project(buf: &[u8]) -> Result<(Manifest, Vec<(u64, u64)>)> {
     }
     let tensor_count = c.u64()?;
     let kv_count = c.u64()?;
-    if tensor_count > buf.len() as u64 || kv_count > buf.len() as u64 {
+    if tensor_count > file_len || kv_count > file_len {
         return Err(bad("header counts exceed file size"));
     }
 
@@ -320,13 +271,12 @@ fn project(buf: &[u8]) -> Result<(Manifest, Vec<(u64, u64)>)> {
         (c.pos as u64).div_ceil(alignment),
         alignment,
     )?;
-    if data_start > buf.len() as u64 {
+    if data_start > file_len {
         return Err(bad("aligned data section starts past end of file"));
     }
-    let data_len = buf.len() as u64 - data_start;
 
-    let mut objects = BTreeMap::new();
-    let mut ranges = vec![(0u64, data_start.min(buf.len() as u64))]; // header region
+    let mut catalog = Catalog::new();
+    let mut ranges = vec![(0u64, data_start)]; // header region
     for info in infos {
         let (epb, block_bytes, type_name) = type_info(info.type_id)?;
         // Blocks are per-row in ggml: the fastest dim must divide evenly.
@@ -340,13 +290,14 @@ fn project(buf: &[u8]) -> Result<(Manifest, Vec<(u64, u64)>)> {
         let elems = crate::safe::product("gguf shape", &info.shape)?;
         let byte_size = crate::safe::mul("gguf tensor size", elems / epb, block_bytes)?;
         let abs = crate::safe::add("gguf tensor offset", data_start, info.offset)?;
-        crate::safe::range("gguf tensor", abs, byte_size, buf.len())?;
-        let _ = data_len;
+        if crate::safe::add("gguf tensor", abs, byte_size)? > file_len {
+            return Err(bad(format!("tensor {:?} extends past end of file", info.name)));
+        }
 
         let (layout, attrs, dtype) = match element_dtype(info.type_id) {
-            Some(dt) => (Layout::Dense, None, dt),
+            Some(dt) => ("dense".to_string(), None, dt),
             None => (
-                Layout::Other(format!("gguf.{type_name}/1")),
+                format!("gguf.{type_name}/1"),
                 Some(Value::Map(vec![
                     (
                         Value::Text("elems_per_block".into()),
@@ -357,25 +308,25 @@ fn project(buf: &[u8]) -> Result<(Manifest, Vec<(u64, u64)>)> {
                 DType::U8,
             ),
         };
-        let part = Part {
-            dtype,
-            ltype: None,
-            blob: BlobRef {
-                shard: 0,
-                offset: abs,
-                length: byte_size,
-            },
-            encoding: None,
-            decoded_length: None,
-            digest: None,
-        };
         let mut parts = BTreeMap::new();
-        parts.insert("data".to_string(), part);
+        parts.insert(
+            "data".to_string(),
+            PartEntry {
+                dtype,
+                logical: None,
+                payload: Payload::At(Location {
+                    store: StoreId(0),
+                    offset: abs,
+                    len: byte_size,
+                }),
+                digest: None, // gguf carries none
+            },
+        );
         ranges.push((abs, byte_size));
-        if objects
+        if catalog
             .insert(
                 info.name.clone(),
-                Object {
+                Entry {
                     shape: info.shape,
                     layout,
                     attributes: attrs,
@@ -400,16 +351,8 @@ fn project(buf: &[u8]) -> Result<(Manifest, Vec<(u64, u64)>)> {
         }
     }
 
-    Ok((
-        Manifest {
-            attributes: if attributes.is_empty() {
-                None
-            } else {
-                Some(Value::Map(attributes))
-            },
-            shards: BTreeMap::new(),
-            objects,
-        },
-        ranges,
-    ))
+    if !attributes.is_empty() {
+        catalog.set_attributes(Some(Value::Map(attributes)));
+    }
+    Ok(Projection::new(catalog).occupying(ranges))
 }

@@ -5,26 +5,25 @@
 //! chunked layouts, deflate + shuffle filters, IEEE little-endian
 //! float/integer datatypes.
 //!
-//! Contiguous datasets are zero-copy views into the mmap. Chunked datasets
-//! are reassembled (and defiltered) once at open into owned buffers; their
-//! parts carry the `hdf5.chunked/1` encoding marker because the stored
-//! blob range is not the decoded bytes — `view()` still works, serving the
-//! reassembled buffer.
+//! A contiguous dataset is a plain range of the file, so it gets an address
+//! and a borrow. A chunked one is scattered across the file behind filters, so
+//! it is reassembled once at open and served as an opaque payload — there is
+//! no range of this file that holds those bytes in order, and pretending
+//! otherwise would be the one lie this crate does not tell.
 //!
-//! Datasets with unsupported datatype classes (strings, compounds) are
-//! skipped and listed in [`Hdf5::skipped`]; big-endian numeric data is
+//! Datasets with unsupported datatype classes (strings, compounds) are skipped
+//! and listed in the `hdf5.skipped` file attribute; big-endian numeric data is
 //! refused rather than reinterpreted.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
-use std::fs::File;
 use std::io::Read;
-use std::path::Path;
 
-use memmap2::Mmap;
+use ztensor::catalog::{Entry, Location, PartEntry, Payload};
 use ztensor::cbor::Value;
-use ztensor::{
-    BlobRef, Caps, DType, Error, Layout, Manifest, Object, Part, Result, Source,
-};
+use ztensor::{Catalog, DType, Error, Opaque, Result, Store, StoreId};
+
+use crate::project::Projection;
 
 const MAGIC: &[u8; 8] = b"\x89HDF\r\n\x1a\n";
 const MAX_DEPTH: usize = 64;
@@ -149,126 +148,73 @@ struct DatasetInfo {
     filters: Vec<Filter>,
 }
 
-enum Loc {
-    Range { offset: u64, length: u64 },
-    Owned(Vec<u8>),
+/// Chunked datasets, reassembled at open and handed out on request. They have
+/// no address: their bytes are scattered across the file behind filters.
+struct Reassembled {
+    buffers: Vec<Vec<u8>>,
 }
 
-pub struct Hdf5 {
-    mmap: Mmap,
-    manifest: Manifest,
-    locations: BTreeMap<String, Loc>,
-    skipped: Vec<String>,
-}
-
-impl std::fmt::Debug for Hdf5 {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Hdf5")
-            .field("len", &self.mmap.len())
-            .field("objects", &self.manifest.objects.len())
-            .field("skipped", &self.skipped.len())
-            .finish()
-    }
-}
-
-impl Hdf5 {
-    pub fn open(path: impl AsRef<Path>) -> Result<Self> {
-        let file = File::open(path)?;
-        // SAFETY: read-only shared map of untrusted bytes.
-        let mmap = unsafe { Mmap::map(&file)? };
-        let mut walker = Walker {
-            data: &mmap,
-            budget: MAX_NODES,
-            objects: BTreeMap::new(),
-            locations: BTreeMap::new(),
-            skipped: Vec::new(),
-        };
-        let sb = find_superblock(&mmap)?;
-        let (ctx, btree, heap) = parse_superblock(&mmap, sb)?;
-        walker.group(&ctx, btree, heap, "", 0)?;
-        let Walker {
-            objects,
-            locations,
-            skipped,
-            ..
-        } = walker;
-        // Skipped datasets are recorded in the projected manifest, not just
-        // behind an accessor: a consumer that only sees `objects` would
-        // otherwise have no way to notice they exist.
-        let attributes = (!skipped.is_empty()).then(|| {
-            Value::Map(vec![(
-                Value::Text("hdf5.skipped".into()),
-                Value::Array(skipped.iter().map(|s| Value::Text(s.clone())).collect()),
-            )])
-        });
-        Ok(Self {
-            mmap,
-            manifest: Manifest {
-                attributes,
-                shards: BTreeMap::new(),
-                objects,
-            },
-            locations,
-            skipped,
-        })
-    }
-
-    /// Datasets present in the file but not projectable (string/compound
-    /// datatypes, unsupported layouts). Listed, never silently absent.
-    pub fn skipped(&self) -> &[String] {
-        &self.skipped
-    }
-
-    fn location(&self, name: &str, part: &str) -> Result<&Loc> {
-        if part != "data" {
-            return Err(Error::NotFound(format!("part {name:?}/{part:?}")));
+impl Opaque for Reassembled {
+    fn read(&self, key: u64, decoded_len: u64) -> Result<Vec<u8>> {
+        let bytes = self
+            .buffers
+            .get(key as usize)
+            .ok_or_else(|| bad(format!("no reassembled dataset {key}")))?;
+        if bytes.len() as u64 != decoded_len {
+            return Err(bad("reassembled dataset changed size"));
         }
-        self.locations
-            .get(name)
-            .ok_or_else(|| Error::NotFound(format!("object {name:?}")))
+        Ok(bytes.clone())
     }
 }
 
-impl Source for Hdf5 {
-    fn manifest(&self) -> &Manifest {
-        &self.manifest
+pub(crate) fn project(store: &Store) -> Result<Projection> {
+    // HDF5 addresses run all over the file and there is no header section to
+    // read on its own, so an unmapped store has to read the file.
+    let bytes: Cow<'_, [u8]> = match store.bytes() {
+        Some(mapped) => Cow::Borrowed(mapped),
+        None => Cow::Owned(store.read(0, store.len())?),
+    };
+    let data: &[u8] = &bytes;
+
+    let mut walker = Walker {
+        data,
+        budget: MAX_NODES,
+        catalog: Catalog::new(),
+        chunked: Vec::new(),
+        occupied: Vec::new(),
+        skipped: Vec::new(),
+    };
+    let sb = find_superblock(data)?;
+    let (ctx, btree, heap) = parse_superblock(data, sb)?;
+    walker.group(&ctx, btree, heap, "", 0)?;
+    let Walker {
+        mut catalog,
+        chunked,
+        occupied,
+        skipped,
+        ..
+    } = walker;
+
+    // Skipped datasets are recorded in the projection, not just behind an
+    // accessor: a consumer that only sees the tensors would otherwise have no
+    // way to notice they exist.
+    if !skipped.is_empty() {
+        catalog.set_attributes(Some(Value::Map(vec![(
+            Value::Text("hdf5.skipped".into()),
+            Value::Array(skipped.iter().map(|s| Value::Text(s.clone())).collect()),
+        )])));
     }
 
-    fn read(&self, object: &str, part: &str) -> Result<Vec<u8>> {
-        Source::view(self, object, part).map(<[u8]>::to_vec)
-    }
-
-    fn view(&self, object: &str, part: &str) -> Result<&[u8]> {
-        match self.location(object, part)? {
-            Loc::Range { offset, length } => {
-                crate::safe::slice("hdf5 dataset", &self.mmap, *offset, *length)
-            }
-            Loc::Owned(bytes) => Ok(bytes),
-        }
-    }
-
-    fn caps(&self, object: &str, part: &str) -> Result<Caps> {
-        // Owned buffers are materialized, not mapped: their manifest blob
-        // is a placeholder, so reporting zero-copy would be a lie about
-        // what the file itself contains.
-        let (zero_copy, alignment) = match self.location(object, part)? {
-            Loc::Range { offset, .. } => (
-                true,
-                if *offset > 0 {
-                    1u64 << offset.trailing_zeros().min(63)
-                } else {
-                    1
-                },
-            ),
-            Loc::Owned(_) => (false, 1),
-        };
-        Ok(Caps {
-            zero_copy,
-            alignment,
-            verifiable: false,
-            page_exclusive: false,
-        })
-    }
+    // Contiguous datasets are the only ranges we can account for, and an HDF5
+    // file has object headers and B-trees between them that we have not
+    // mapped — so occupancy is not claimed and neither is exclusivity.
+    let _ = occupied;
+    let projection = Projection::new(catalog);
+    Ok(if chunked.is_empty() {
+        projection
+    } else {
+        projection.with_opaque(Box::new(Reassembled { buffers: chunked }))
+    })
 }
 
 // ---- superblock -------------------------------------------------------
@@ -331,8 +277,10 @@ struct Walker<'a> {
     data: &'a [u8],
     /// Remaining node/message budget (see MAX_NODES).
     budget: u32,
-    objects: BTreeMap<String, Object>,
-    locations: BTreeMap<String, Loc>,
+    catalog: Catalog,
+    /// Reassembled chunked datasets, indexed by their opaque key.
+    chunked: Vec<Vec<u8>>,
+    occupied: Vec<(u64, u64)>,
     skipped: Vec<String>,
 }
 
@@ -445,13 +393,13 @@ impl Walker<'_> {
     }
 
     fn dataset(&mut self, ctx: &Ctx, name: &str, info: DatasetInfo) -> Result<()> {
-        if self.objects.contains_key(name) {
+        if self.catalog.contains(name) {
             return Err(bad(format!("duplicate dataset name {name:?}")));
         }
         let elems = crate::safe::product("hdf5 shape", &info.shape)?;
         let expected = crate::safe::mul("hdf5 dataset size", elems, info.dtype.width())?;
 
-        let (loc, blob, encoding) = match info.layout {
+        let payload = match info.layout {
             DataLayout::Contiguous { addr, size } => {
                 if ctx.is_undef(addr) {
                     self.skipped.push(name.to_string());
@@ -463,18 +411,12 @@ impl Walker<'_> {
                     )));
                 }
                 crate::safe::range("hdf5 dataset", addr, size, self.data.len())?;
-                (
-                    Loc::Range {
-                        offset: addr,
-                        length: size,
-                    },
-                    BlobRef {
-                        shard: 0,
-                        offset: addr,
-                        length: size,
-                    },
-                    None,
-                )
+                self.occupied.push((addr, size));
+                Payload::At(Location {
+                    store: StoreId(0),
+                    offset: addr,
+                    len: size,
+                })
             }
             DataLayout::Chunked {
                 btree_addr,
@@ -508,15 +450,12 @@ impl Walker<'_> {
                 if bytes.len() as u64 != expected {
                     return Err(bad(format!("dataset {name:?} reassembly size mismatch")));
                 }
-                (
-                    Loc::Owned(bytes),
-                    BlobRef {
-                        shard: 0,
-                        offset: 0,
-                        length: 0,
-                    },
-                    Some("hdf5.chunked/1".to_string()),
-                )
+                self.chunked.push(bytes);
+                Payload::Opaque {
+                    store: StoreId(0),
+                    key: self.chunked.len() as u64 - 1,
+                    decoded_len: expected,
+                }
             }
             DataLayout::Unsupported => {
                 self.skipped.push(name.to_string());
@@ -524,22 +463,21 @@ impl Walker<'_> {
             }
         };
 
-        let part = Part {
-            dtype: info.dtype,
-            ltype: None,
-            blob,
-            decoded_length: encoding.as_ref().map(|_| expected),
-            encoding,
-            digest: None,
-        };
         let mut parts = BTreeMap::new();
-        parts.insert("data".to_string(), part);
-        self.locations.insert(name.to_string(), loc);
-        self.objects.insert(
+        parts.insert(
+            "data".to_string(),
+            PartEntry {
+                dtype: info.dtype,
+                logical: None,
+                payload,
+                digest: None,
+            },
+        );
+        self.catalog.insert(
             name.to_string(),
-            Object {
+            Entry {
                 shape: info.shape,
-                layout: Layout::Dense,
+                layout: "dense".to_string(),
                 attributes: None,
                 parts,
             },
