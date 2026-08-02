@@ -1,0 +1,74 @@
+name: Pages
+
+# Automatic on the default branch; `workflow_dispatch` so the site can also be
+# built from a branch while one is in flight.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "website/**"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deploy at a time, and let a run in progress finish rather than cancelling
+# it: a half-replaced site is worse than a stale one.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build
+        run: |
+          pip install markdown
+          python website/build.py
+      # A dead link is the one defect a static site can ship silently, so it
+      # is checked here rather than found by a reader.
+      - name: Every local link resolves
+        run: |
+          python - <<'EOF'
+          import pathlib, re, sys
+          root = pathlib.Path("website/_site")
+          files = {p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_file()}
+          bad = []
+          for page in root.rglob("*.html"):
+              text = page.read_text()
+              refs = re.findall(r'(?:href|src)="([^"]+)"', text)
+              for ref in refs:
+                  if ref.startswith(("http", "mailto:", "#", "data:")):
+                      continue
+                  target = (page.parent / ref.split("#")[0]).resolve()
+                  rel = target.relative_to(root.resolve()).as_posix()
+                  if rel not in files:
+                      bad.append(f"{page.relative_to(root)} -> {ref}")
+              bad += [f"{page.relative_to(root)} -> {m}" for m in re.findall(r'href="[^"]*\.md"', text)]
+          if bad:
+              print("\n".join(f"::error::dead link: {b}" for b in bad))
+              sys.exit(1)
+          print(f"{len(list(root.rglob('*.html')))} pages, every local link resolves")
+          EOF
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: website/_site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
