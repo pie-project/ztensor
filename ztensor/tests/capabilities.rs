@@ -210,3 +210,23 @@ fn no_digest_file() -> PathBuf {
     fs::write(&path, &bytes).unwrap();
     path
 }
+
+/// A source is shareable across threads, because a loader that reads a
+/// checkpoint from several of them is the ordinary case.
+#[test]
+fn a_source_can_be_shared_between_threads() {
+    let path = canonical_file("threaded.zt");
+    let src = std::sync::Arc::new(Source::open(&path).unwrap());
+    let mut handles = Vec::new();
+    for _ in 0..4 {
+        let src = src.clone();
+        handles.push(std::thread::spawn(move || {
+            let tensor = src.tensor("a.weight").unwrap();
+            assert_eq!(tensor.map().unwrap().len(), 16384);
+            assert!(tensor.verify().unwrap().checked());
+        }));
+    }
+    for handle in handles {
+        handle.join().unwrap();
+    }
+}

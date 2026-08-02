@@ -9,7 +9,6 @@
 //! Refusals (never reinterpret): big-endian descrs, `fortran_order: True`
 //! (reversing the shape would silently transpose the data), object dtypes.
 
-use std::cell::RefCell;
 use std::fs::File;
 use std::io::Read;
 
@@ -155,7 +154,7 @@ enum Where {
 /// Inflates deflated entries on demand. Keeps the archive open because the
 /// bytes cannot be addressed — there is nowhere to point at.
 struct Deflated {
-    archive: RefCell<zip::ZipArchive<File>>,
+    archive: std::sync::Mutex<zip::ZipArchive<File>>,
     /// Keyed by the `key` in [`Payload::Opaque`]: (zip index, header length).
     entries: Vec<(usize, usize)>,
 }
@@ -171,7 +170,7 @@ impl Opaque for Deflated {
         // keeps a lying entry from driving the allocation.
         let expected = crate::safe::add("npz entry", data_offset as u64, decoded_len)?;
         let cap = crate::safe::alloc_size("npz entry", expected)?;
-        let mut archive = self.archive.borrow_mut();
+        let mut archive = self.archive.lock().expect("npz archive lock");
         let mut entry = archive
             .by_index(zip_index)
             .map_err(|e| bad(format!("ZIP entry: {e}")))?;
@@ -308,7 +307,7 @@ pub(crate) fn project(store: &Store) -> Result<Projection> {
         projection
     } else {
         projection.with_opaque(Box::new(Deflated {
-            archive: RefCell::new(archive),
+            archive: std::sync::Mutex::new(archive),
             entries: deflated,
         }))
     })

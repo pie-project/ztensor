@@ -14,7 +14,6 @@
 //! larger attack surface than any other format here, and enabling it is an
 //! explicit choice.
 
-use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::Read;
@@ -675,8 +674,8 @@ enum StorageLoc {
 /// window until it is inflated — so these have no address, and the whole
 /// storage is cached once rather than inflated per tensor.
 struct Compressed {
-    archive: RefCell<zip::ZipArchive<File>>,
-    cache: RefCell<BTreeMap<usize, Vec<u8>>>,
+    archive: std::sync::Mutex<zip::ZipArchive<File>>,
+    cache: std::sync::Mutex<BTreeMap<usize, Vec<u8>>>,
     /// Keyed by the `key` in [`Payload::Opaque`]:
     /// (zip index, storage length, byte offset within the storage).
     slices: Vec<(usize, u64, u64)>,
@@ -684,10 +683,10 @@ struct Compressed {
 
 impl Compressed {
     fn ensure_cached(&self, zip_index: usize, length: u64) -> Result<()> {
-        if self.cache.borrow().contains_key(&zip_index) {
+        if self.cache.lock().expect("pt cache lock").contains_key(&zip_index) {
             return Ok(());
         }
-        let mut archive = self.archive.borrow_mut();
+        let mut archive = self.archive.lock().expect("pt archive lock");
         let mut entry = archive
             .by_index(zip_index)
             .map_err(|e| bad(format!("storage {zip_index}: {e}")))?;
@@ -699,7 +698,7 @@ impl Compressed {
         if bytes.len() as u64 != length {
             return Err(bad(format!("storage {zip_index} decompressed size mismatch")));
         }
-        self.cache.borrow_mut().insert(zip_index, bytes);
+        self.cache.lock().expect("pt cache lock").insert(zip_index, bytes);
         Ok(())
     }
 }
@@ -711,7 +710,7 @@ impl Opaque for Compressed {
             .get(key as usize)
             .ok_or_else(|| bad(format!("no compressed tensor {key}")))?;
         self.ensure_cached(zip_index, length)?;
-        let cache = self.cache.borrow();
+        let cache = self.cache.lock().expect("pt cache lock");
         let storage = &cache[&zip_index];
         let (start, end) = crate::safe::range("pt tensor", offset, decoded_len, storage.len())?;
         Ok(storage[start..end].to_vec())
@@ -859,8 +858,8 @@ pub(crate) fn project(store: &Store) -> Result<Projection> {
         projection
     } else {
         projection.with_opaque(Box::new(Compressed {
-            archive: RefCell::new(archive),
-            cache: RefCell::new(BTreeMap::new()),
+            archive: std::sync::Mutex::new(archive),
+            cache: std::sync::Mutex::new(BTreeMap::new()),
             slices,
         }))
     })

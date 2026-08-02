@@ -32,7 +32,12 @@ impl std::fmt::Display for StoreId {
 /// Bytes only the projection that opened the file can produce — a deflated zip
 /// entry, a chunked HDF5 dataset. There is no address for these, so they are
 /// readable and nothing else, and they say so.
-pub trait Opaque {
+///
+/// `Send + Sync` because a [`Source`](crate::Source) is: a loader that reads a
+/// checkpoint from several threads is the ordinary case, not the exotic one,
+/// and a reader that needs interior mutability should reach for a lock rather
+/// than make the whole source single-threaded.
+pub trait Opaque: Send + Sync {
     fn read(&self, key: u64, decoded_len: u64) -> Result<Vec<u8>>;
 }
 
