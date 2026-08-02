@@ -13,6 +13,20 @@ in one commit — its checkpoint reader lost 331 lines and gained 272.
 
 ---
 
+## Coming from 1.2.x (the crates.io lineage)
+
+If you are on `ztensor` 1.2.3 from crates.io, note first that 2.0 is a rewrite
+on a **separate lineage** — the 1.x tree lives on the `v1` branch. Beyond the
+renames below, some of what you were using is simply not here yet:
+`Writer::append`, `remove_tensors`, the `merge` / `compress` / `decompress` /
+`migrate` / `download-hf` CLI commands, and Python's `read_into`. The
+[changelog](CHANGELOG.md#not-carried-over-from-12x) lists what each of them
+maps to where a mapping exists.
+
+The nearest thing to `read_into` is better than it was: `t.location` hands over
+`(path, offset, nbytes)` so you can read straight into whatever buffer you
+already have, with this library out of the transfer entirely.
+
 ## The one big idea
 
 There used to be three reader types — `Reader` (one file), `Model` (a root
