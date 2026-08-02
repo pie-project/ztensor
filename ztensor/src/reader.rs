@@ -196,11 +196,30 @@ fn parse_and_validate(buf: &[u8]) -> Result<(Manifest, bool)> {
     Ok((manifest, false))
 }
 
+/// Validates a complete in-memory `.zt` file image and returns its manifest
+/// (`None` for a data shard).
+///
+/// This is [`Reader::open`] minus the file handle: the same §8 reading
+/// algorithm and §3.6 validation, driven directly by the conformance corpus
+/// and the fuzz targets.
+pub fn validate_bytes(buf: &[u8]) -> Result<Option<Manifest>> {
+    parse_and_validate(buf).map(|(m, data_shard)| if data_shard { None } else { Some(m) })
+}
+
 fn validate_manifest(
     manifest: &Manifest,
     data_end: u64,
     manifest_blob: (u64, u64),
 ) -> Result<()> {
+    for (&idx, shard) in &manifest.shards {
+        if shard.size < 48 {
+            return Err(Error::reject(
+                Rule::Schema,
+                format!("shard {idx}: size {} below minimum file size", shard.size),
+            ));
+        }
+    }
+
     // Local blob references, for the identical-or-disjoint check (§2.4).
     let mut local_refs: Vec<(u64, u64)> = vec![manifest_blob];
 
@@ -249,6 +268,18 @@ fn validate_manifest(
             if b.shard == 0 && b.length > 0 {
                 local_refs.push((b.offset, b.length));
             }
+            // Registered logical types pin their storage type (§4.2),
+            // regardless of layout.
+            if let Some(lt) = &part.ltype {
+                if let Some(required) = registered_dtype(lt) {
+                    if part.dtype != required {
+                        return Err(Error::reject(
+                            Rule::Schema,
+                            format!("{name:?}/{pname:?}: type {lt:?} requires dtype {required:?}"),
+                        ));
+                    }
+                }
+            }
         }
 
         match &obj.layout {
@@ -260,16 +291,6 @@ fn validate_manifest(
                     ));
                 }
                 let part = &obj.parts["data"];
-                if let Some(lt) = &part.ltype {
-                    if let Some(required) = registered_dtype(lt) {
-                        if part.dtype != required {
-                            return Err(Error::reject(
-                                Rule::Schema,
-                                format!("{name:?}: type {lt:?} requires dtype {required:?}"),
-                            ));
-                        }
-                    }
-                }
                 // Size equation is checkable only when the size function is
                 // known; unknown logical types stay structural (§4.2).
                 if let Some(expected) = logical_size(part.ltype.as_deref(), part.dtype, elems) {

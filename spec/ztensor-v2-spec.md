@@ -145,8 +145,12 @@ The manifest blob is a single CBOR map encoded in the **Core Deterministic
 Encoding** profile of RFC 8949 §4.2.1 (definite lengths, shortest-form
 integers, bytewise-lexicographic key order).
 
-Readers MUST reject a manifest containing duplicate map keys anywhere.
-Readers SHOULD reject non-deterministic encodings. Readers MUST reject a
+Readers MUST reject a manifest that is not in deterministic encoding:
+non-shortest heads, indefinite lengths, unsorted or duplicate map keys, and
+non-canonical floats (NaN other than `0xf9 0x7e00`, or a float wider than
+the value requires). Anything weaker is unsound, not merely lenient: a
+reader that accepts non-canonical floats will accept two NaN-payload map
+keys as distinct — duplicate keys in disguise. Readers MUST reject a
 manifest whose `manifest_length` exceeds **1 GiB**, before parsing.
 
 Readers MUST ignore map keys they do not recognize, at every level. This is

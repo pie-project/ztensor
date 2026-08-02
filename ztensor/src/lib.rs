@@ -36,5 +36,5 @@ pub use models::{
     ALIGN_CANONICAL, ALIGN_FLOOR, FOOTER_LEN, MAGIC, MAX_MANIFEST_LEN, MAX_NAME_LEN, MAX_RANK,
     VERSION,
 };
-pub use reader::Reader;
+pub use reader::{validate_bytes, Reader};
 pub use writer::Writer;

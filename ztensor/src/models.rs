@@ -213,6 +213,23 @@ pub(crate) fn check_name(s: &str) -> Result<()> {
     Ok(())
 }
 
+/// Digest format (spec §3.4): `"<algorithm>:<lowercase hex>"`.
+pub(crate) fn check_digest(d: &str) -> Result<()> {
+    let ok = d.split_once(':').is_some_and(|(algo, hex)| {
+        !algo.is_empty()
+            && !hex.is_empty()
+            && algo.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+            && hex.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    });
+    if !ok {
+        return Err(Error::reject(
+            Rule::Schema,
+            format!("digest must be 'algo:lowercase-hex', got {d:?}"),
+        ));
+    }
+    Ok(())
+}
+
 // =======================================================================
 // Manifest <-> CBOR
 // =======================================================================
@@ -310,8 +327,8 @@ fn parse_shards(v: Value) -> Result<BTreeMap<u64, Shard>> {
         let size =
             size.ok_or_else(|| Error::reject(Rule::Schema, "shard entry missing 'size'"))?;
         let digest = digest
-            .filter(|d| d.contains(':'))
             .ok_or_else(|| Error::reject(Rule::Schema, "shard entry missing 'digest'"))?;
+        check_digest(&digest)?;
         shards.insert(idx, Shard { size, digest });
     }
     Ok(shards)
@@ -499,9 +516,7 @@ impl Part {
                     let d = val
                         .as_text()
                         .ok_or_else(|| Error::reject(Rule::Schema, "'digest' must be text"))?;
-                    if !d.contains(':') {
-                        return Err(Error::reject(Rule::Schema, "digest must be 'algo:hex'"));
-                    }
+                    check_digest(d)?;
                     digest = Some(d.to_string());
                 }
                 _ => {}

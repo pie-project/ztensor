@@ -303,17 +303,39 @@ impl<'a> Decoder<'a> {
                 20 => Ok(Value::Bool(false)),
                 21 => Ok(Value::Bool(true)),
                 22 => Ok(Value::Null),
+                // Floats must be canonical: the single NaN 0xf9 0x7e00, and
+                // the shortest width that preserves the value. Without this,
+                // decode-accepted values are not closed under re-encoding
+                // (e.g., two NaN payloads collapse into duplicate map keys).
                 25 => {
                     let h = u16::from_be_bytes(self.take(2)?.try_into().unwrap());
-                    Ok(Value::Float(f16_bits_to_f32(h) as f64))
+                    let x = f16_bits_to_f32(h);
+                    if x.is_nan() && h != 0x7e00 {
+                        return Err(Error::reject(Rule::CborDeterminism, "non-canonical NaN"));
+                    }
+                    Ok(Value::Float(x as f64))
                 }
                 26 => {
                     let b = u32::from_be_bytes(self.take(4)?.try_into().unwrap());
-                    Ok(Value::Float(f32::from_bits(b) as f64))
+                    let x = f32::from_bits(b);
+                    if x.is_nan() {
+                        return Err(Error::reject(Rule::CborDeterminism, "non-canonical NaN"));
+                    }
+                    if f16_bits_to_f32(f32_to_f16_bits(x)) == x {
+                        return Err(Error::reject(Rule::CborDeterminism, "float not shortest"));
+                    }
+                    Ok(Value::Float(x as f64))
                 }
                 27 => {
                     let b = u64::from_be_bytes(self.take(8)?.try_into().unwrap());
-                    Ok(Value::Float(f64::from_bits(b)))
+                    let x = f64::from_bits(b);
+                    if x.is_nan() {
+                        return Err(Error::reject(Rule::CborDeterminism, "non-canonical NaN"));
+                    }
+                    if (x as f32) as f64 == x {
+                        return Err(Error::reject(Rule::CborDeterminism, "float not shortest"));
+                    }
+                    Ok(Value::Float(x))
                 }
                 _ => Err(Error::reject(Rule::CborSyntax, "unsupported simple value")),
             };
@@ -459,5 +481,31 @@ mod tests {
         assert!(decode(&[0xc0, 0x00]).is_err()); // tag 0
         assert!(decode(&[0x9f, 0xff]).is_err()); // indefinite array
         assert!(decode(&[0x18, 0x05]).is_err()); // non-shortest uint 5
+    }
+
+    #[test]
+    fn rejects_non_canonical_floats() {
+        assert!(decode(&[0xf9, 0x7e, 0x01]).is_err()); // NaN with payload
+        assert!(decode(&[0xf9, 0xfe, 0x00]).is_err()); // -NaN
+        assert!(decode(&[0xfa, 0x7f, 0xc0, 0x00, 0x00]).is_err()); // f32 NaN
+        assert!(decode(&[0xfa, 0x3f, 0xc0, 0x00, 0x00]).is_err()); // 1.5 fits f16
+        assert!(decode(&[0xfb, 0x3f, 0xf8, 0, 0, 0, 0, 0, 0]).is_err()); // 1.5 fits f16
+        assert!(decode(&[0xf9, 0x3e, 0x00]).is_ok()); // canonical 1.5
+        assert!(decode(&[0xf9, 0x7e, 0x00]).is_ok()); // canonical NaN
+    }
+
+    /// Regression: fuzz_cbor crash — a map with two distinct NaN-payload
+    /// float keys decoded fine but re-encoded into duplicate keys.
+    #[test]
+    fn fuzz_regression_nan_map_keys() {
+        let input = [
+            0xa2, 0xfb, 0xff, 0xff, 0xff, 0x05, 0x3b, 0x8f, 0xfb, 0xfb, 0xfb, 0xfb, 0xfb, 0xfb,
+            0xfb, 0xfb, 0xfb, 0x39, 0x38, 0xfb, 0xff, 0xff, 0xff, 0x0e, 0x39, 0x39, 0xa2, 0xa2,
+            0x07,
+        ];
+        assert!(matches!(
+            decode(&input),
+            Err(Error::Reject { rule: Rule::CborDeterminism, .. })
+        ));
     }
 }

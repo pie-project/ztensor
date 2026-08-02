@@ -1,0 +1,14 @@
+[package]
+name = "conformance"
+version = "0.0.0"
+publish = false
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ztensor = { path = "../ztensor" }
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+
+[[bin]]
+name = "gen"
+path = "src/bin/gen.rs"

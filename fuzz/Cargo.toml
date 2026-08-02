@@ -1,0 +1,30 @@
+# cargo-fuzz targets (nightly): `cargo +nightly fuzz run fuzz_validate`
+# Seed with the conformance corpus:
+#   cargo +nightly fuzz run fuzz_validate conformance/corpus/valid
+[package]
+name = "ztensor-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+ztensor = { path = "../ztensor" }
+
+[[bin]]
+name = "fuzz_validate"
+path = "fuzz_targets/fuzz_validate.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_cbor"
+path = "fuzz_targets/fuzz_cbor.rs"
+test = false
+doc = false
+
+# Standalone workspace: libfuzzer must not infect normal builds.
+[workspace]
