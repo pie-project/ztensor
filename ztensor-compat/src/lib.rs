@@ -44,4 +44,4 @@ mod onnx;
 pub use onnx::Onnx;
 
 mod detect;
-pub use detect::open_any;
+pub use detect::{detect, open_any};

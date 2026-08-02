@@ -1,0 +1,24 @@
+[package]
+name = "ztensor-cli"
+version = "2.0.0-alpha.0"
+description = "zt: inspect, verify, convert, and diff tensor files"
+authors = ["In Gim <in.gim@icloud.com>"]
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "zt"
+path = "src/main.rs"
+
+[dependencies]
+ztensor = { path = "../ztensor", features = ["zstd"] }
+ztensor-compat = { path = "../ztensor-compat", features = [
+    "safetensors",
+    "gguf",
+    "npz",
+    "pickle",
+    "hdf5",
+    "onnx",
+] }
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
