@@ -49,7 +49,11 @@ jobs:
                   if ref.startswith(("http", "mailto:", "#", "data:")):
                       continue
                   target = (page.parent / ref.split("#")[0]).resolve()
-                  rel = target.relative_to(root.resolve()).as_posix()
+                  try:
+                      rel = target.relative_to(root.resolve()).as_posix()
+                  except ValueError:
+                      bad.append(f"{page.relative_to(root)} -> {ref} (escapes the site)")
+                      continue
                   if rel not in files:
                       bad.append(f"{page.relative_to(root)} -> {ref}")
               bad += [f"{page.relative_to(root)} -> {m}" for m in re.findall(r'href="[^"]*\.md"', text)]
