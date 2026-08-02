@@ -26,17 +26,17 @@
   <rect x="96" y="46" width="42" height="40" rx="2" class="fill-alt edge" stroke-width="1" />
   <text class="mono fg" x="117.0" y="71" font-size="11" text-anchor="middle">magic</text>
   <rect class="accent" x="138" y="46" width="118" height="40" rx="2" />
-  <text class="mono on-accent" x="197.0" y="71" font-size="11" text-anchor="middle">tensor</text>
+  <text class="mono on-accent" x="197.0" y="71" font-size="11" text-anchor="middle">blob</text>
   <clipPath id="p256"><rect x="256" y="46" width="34" height="40" /></clipPath>
   <g class="pad" stroke-width="1" opacity="0.5" clip-path="url(#p256)"><line x1="216" y1="86" x2="256" y2="46" /><line x1="222" y1="86" x2="262" y2="46" /><line x1="228" y1="86" x2="268" y2="46" /><line x1="234" y1="86" x2="274" y2="46" /><line x1="240" y1="86" x2="280" y2="46" /><line x1="246" y1="86" x2="286" y2="46" /><line x1="252" y1="86" x2="292" y2="46" /><line x1="258" y1="86" x2="298" y2="46" /><line x1="264" y1="86" x2="304" y2="46" /><line x1="270" y1="86" x2="310" y2="46" /><line x1="276" y1="86" x2="316" y2="46" /><line x1="282" y1="86" x2="322" y2="46" /><line x1="288" y1="86" x2="328" y2="46" /><line x1="294" y1="86" x2="334" y2="46" /><line x1="300" y1="86" x2="340" y2="46" /><line x1="306" y1="86" x2="346" y2="46" /><line x1="312" y1="86" x2="352" y2="46" /><line x1="318" y1="86" x2="358" y2="46" /><line x1="324" y1="86" x2="364" y2="46" /></g>
   <rect x="256" y="46" width="34" height="40" fill="none" class="edge" stroke-width="1" />
   <rect class="accent" x="290" y="46" width="150" height="40" rx="2" />
-  <text class="mono on-accent" x="365.0" y="71" font-size="11" text-anchor="middle">tensor</text>
+  <text class="mono on-accent" x="365.0" y="71" font-size="11" text-anchor="middle">blob</text>
   <clipPath id="p440"><rect x="440" y="46" width="26" height="40" /></clipPath>
   <g class="pad" stroke-width="1" opacity="0.5" clip-path="url(#p440)"><line x1="400" y1="86" x2="440" y2="46" /><line x1="406" y1="86" x2="446" y2="46" /><line x1="412" y1="86" x2="452" y2="46" /><line x1="418" y1="86" x2="458" y2="46" /><line x1="424" y1="86" x2="464" y2="46" /><line x1="430" y1="86" x2="470" y2="46" /><line x1="436" y1="86" x2="476" y2="46" /><line x1="442" y1="86" x2="482" y2="46" /><line x1="448" y1="86" x2="488" y2="46" /><line x1="454" y1="86" x2="494" y2="46" /><line x1="460" y1="86" x2="500" y2="46" /><line x1="466" y1="86" x2="506" y2="46" /><line x1="472" y1="86" x2="512" y2="46" /><line x1="478" y1="86" x2="518" y2="46" /><line x1="484" y1="86" x2="524" y2="46" /><line x1="490" y1="86" x2="530" y2="46" /><line x1="496" y1="86" x2="536" y2="46" /><line x1="502" y1="86" x2="542" y2="46" /></g>
   <rect x="440" y="46" width="26" height="40" fill="none" class="edge" stroke-width="1" />
   <rect class="accent" x="466" y="46" width="96" height="40" rx="2" />
-  <text class="mono on-accent" x="514.0" y="71" font-size="11" text-anchor="middle">tensor</text>
+  <text class="mono on-accent" x="514.0" y="71" font-size="11" text-anchor="middle">blob</text>
   <rect x="562" y="46" width="92" height="40" rx="2" class="fill-alt edge" stroke-width="1" />
   <text class="mono fg" x="608.0" y="71" font-size="11" text-anchor="middle">manifest</text>
   <rect x="654" y="46" width="46" height="40" rx="2" class="fill-alt edge" stroke-width="1" />
@@ -47,5 +47,5 @@
   <text class="mono dim" x="138" y="32" font-size="10">page boundaries</text>
   <path d="M 677.0 100 C 677.0 126, 608.0 126, 608.0 102" fill="none" class="accent-s" stroke-width="1.2" />
   <path d="M 604.0 108 L 608.0 100 L 612.0 108 Z" class="accent" />
-  <text class="dim" x="96" y="148" font-size="11.5">Read the last 40 bytes and you know where the manifest is; read the manifest and you know where every tensor is.</text>
+  <text class="dim" x="96" y="148" font-size="11.5">Every blob is alike here; the manifest is what says which tensor a blob holds.</text>
 </svg>
