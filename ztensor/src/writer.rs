@@ -31,6 +31,17 @@ pub struct PartDef<'a> {
     pub data: &'a [u8],
 }
 
+/// One part of an object written incrementally by
+/// [`Writer::stream_object`]. The length is declared up front because the
+/// manifest records it and the writer places the next blob after it.
+#[derive(Debug, Clone, Copy)]
+pub struct StreamPart<'a> {
+    pub name: &'a str,
+    pub dtype: DType,
+    pub ltype: Option<&'a str>,
+    pub length: u64,
+}
+
 pub struct Writer {
     out: BufWriter<File>,
     path: std::path::PathBuf,
@@ -271,6 +282,93 @@ impl Writer {
         Ok(())
     }
 
+    /// Begins an object whose parts are written incrementally.
+    ///
+    /// The slice-taking [`add_object`](Self::add_object) needs every part's
+    /// bytes in memory at once, which a producer streaming a tensor off a
+    /// device cannot do — a weight store is tens of gigabytes and the host
+    /// should never hold more than a chunk of it. This is the same object,
+    /// written a chunk at a time.
+    ///
+    /// Parts are declared up front, in name order, and written in that order;
+    /// the returned [`ObjectWriter`] enforces both. Streamed parts are raw
+    /// (an encoding profile needs the whole payload) and are not deduplicated
+    /// against earlier blobs, since dedup requires knowing the bytes before
+    /// placing them.
+    pub fn stream_object<'a>(
+        &'a mut self,
+        name: &str,
+        shape: &[u64],
+        layout: &str,
+        parts: &[StreamPart<'_>],
+        attributes: Option<cbor::Value>,
+    ) -> Result<ObjectWriter<'a>> {
+        self.check_new_object(name, shape)?;
+        if parts.is_empty() {
+            return Err(Error::InvalidInput(format!("object {name:?} has no parts")));
+        }
+        if let Some(attrs) = &attributes {
+            check_attributes(attrs).map_err(invalid)?;
+        }
+
+        let mut ordered: Vec<&StreamPart<'_>> = parts.iter().collect();
+        ordered.sort_by_key(|p| p.name);
+        let mut built: BTreeMap<String, Part> = BTreeMap::new();
+        for part in &ordered {
+            check_name(part.name).map_err(invalid)?;
+            self.check_canonical_name(part.name)?;
+            if let Some(lt) = part.ltype {
+                if let Some(required) = registered_dtype(lt) {
+                    if part.dtype != required {
+                        return Err(Error::InvalidInput(format!(
+                            "part {:?}: type {lt:?} requires dtype {required:?}",
+                            part.name
+                        )));
+                    }
+                }
+            }
+            let entry = Part {
+                dtype: part.dtype,
+                ltype: part.ltype.map(str::to_string),
+                blob: BlobRef {
+                    shard: 0,
+                    offset: 0, // patched as each part is written
+                    length: part.length,
+                },
+                encoding: None,
+                decoded_length: None,
+                digest: None, // computed from the streamed bytes
+            };
+            if built.insert(part.name.to_string(), entry).is_some() {
+                return Err(Error::InvalidInput(format!(
+                    "duplicate part {:?}",
+                    part.name
+                )));
+            }
+        }
+
+        let object = Object {
+            shape: shape.to_vec(),
+            layout: Layout::from_name(layout),
+            attributes,
+            parts: built,
+        };
+        if let Some(profile) = layout_profile(layout) {
+            profile.validate(name, &object).map_err(invalid)?;
+        }
+
+        Ok(ObjectWriter {
+            writer: self,
+            name: name.to_string(),
+            object: Some(object),
+            order: ordered.iter().map(|p| p.name.to_string()).collect(),
+            at: 0,
+            written: 0,
+            hasher: xxhash_rust::xxh3::Xxh3::new(),
+            started: false,
+        })
+    }
+
     /// Sets file-level attributes (an arbitrary CBOR map value).
     pub fn set_attributes(&mut self, attributes: cbor::Value) {
         self.manifest.attributes = Some(attributes);
@@ -479,6 +577,21 @@ impl Writer {
         Ok(buf == data)
     }
 
+    /// Advances to the next aligned offset and returns it, without writing
+    /// anything — where a streamed blob will begin.
+    fn reserve_blob(&mut self) -> Result<u64> {
+        let target = align_up(self.offset, self.align)?;
+        self.pad_to(target)?;
+        Ok(target)
+    }
+
+    /// Appends bytes at the current position.
+    fn write_bytes(&mut self, data: &[u8]) -> Result<()> {
+        self.out.write_all(data)?;
+        self.offset += data.len() as u64;
+        Ok(())
+    }
+
     fn write_blob(&mut self, data: &[u8]) -> Result<u64> {
         let target = align_up(self.offset, self.align)?;
         self.pad_to(target)?;
@@ -527,6 +640,124 @@ impl Writer {
         // rename. Syncing unconditionally would tax every caller for a
         // guarantee only publishers need.
         Ok(self.offset)
+    }
+}
+
+/// Writes one object's parts a chunk at a time.
+///
+/// Returned by [`Writer::stream_object`]. Parts are written in name order;
+/// each must receive exactly the byte count it declared before the next
+/// begins, and [`finish`](Self::finish) refuses an object with a part left
+/// short. The digest of each part is computed from the bytes as they pass
+/// through, so streaming costs no extra read.
+///
+/// Dropping without calling `finish` leaves the object out of the manifest.
+/// The bytes already written stay in the file as unreferenced blobs, which
+/// the format allows (§2.5) but canonical form does not — so a canonical
+/// writer that abandons a stream will not produce a canonical file.
+pub struct ObjectWriter<'a> {
+    writer: &'a mut Writer,
+    name: String,
+    object: Option<Object>,
+    /// Part names, in the order they must be written.
+    order: Vec<String>,
+    /// Index into `order` of the part being written.
+    at: usize,
+    /// Bytes written into the current part.
+    written: u64,
+    hasher: xxhash_rust::xxh3::Xxh3,
+    started: bool,
+}
+
+impl ObjectWriter<'_> {
+    /// The part currently being written, or `None` when every part is done.
+    pub fn current(&self) -> Option<&str> {
+        self.order.get(self.at).map(String::as_str)
+    }
+
+    /// Appends bytes to the current part.
+    ///
+    /// The first call places the part at the next aligned offset. Writing
+    /// past a part's declared length is an error rather than a rollover into
+    /// the next one: a producer that has miscounted should hear about it
+    /// where it happened.
+    pub fn write(&mut self, chunk: &[u8]) -> Result<()> {
+        let Some(part_name) = self.order.get(self.at).cloned() else {
+            return Err(Error::InvalidInput(format!(
+                "object {:?}: every part is already written",
+                self.name
+            )));
+        };
+        let declared = self.object.as_ref().expect("object present").parts[&part_name]
+            .blob
+            .length;
+
+        if !self.started {
+            let offset = self.writer.reserve_blob()?;
+            self.object
+                .as_mut()
+                .expect("object present")
+                .parts
+                .get_mut(&part_name)
+                .expect("part present")
+                .blob
+                .offset = offset;
+            self.started = true;
+            self.hasher = xxhash_rust::xxh3::Xxh3::new();
+            self.written = 0;
+        }
+
+        let end = self
+            .written
+            .checked_add(chunk.len() as u64)
+            .filter(|&e| e <= declared)
+            .ok_or_else(|| {
+                Error::InvalidInput(format!(
+                    "object {:?} part {part_name:?}: {} bytes written into a part \
+                     declared as {declared}",
+                    self.name,
+                    self.written + chunk.len() as u64
+                ))
+            })?;
+
+        self.writer.write_bytes(chunk)?;
+        self.hasher.update(chunk);
+        self.written = end;
+
+        if self.written == declared {
+            let digest = format!("xxh3:{:016x}", self.hasher.digest());
+            self.object
+                .as_mut()
+                .expect("object present")
+                .parts
+                .get_mut(&part_name)
+                .expect("part present")
+                .digest = Some(digest);
+            self.at += 1;
+            self.started = false;
+        }
+        Ok(())
+    }
+
+    /// Completes the object and adds it to the manifest.
+    pub fn finish(mut self) -> Result<()> {
+        if self.at < self.order.len() {
+            let part = &self.order[self.at];
+            let declared = self.object.as_ref().expect("object present").parts[part]
+                .blob
+                .length;
+            return Err(Error::InvalidInput(format!(
+                "object {:?} part {part:?}: {} of {declared} bytes written",
+                self.name, self.written
+            )));
+        }
+        let object = self.object.take().expect("object present");
+        self.writer
+            .manifest
+            .objects
+            .insert(self.name.clone(), object);
+        self.writer.last_name = Some(self.name.clone());
+        Ok(())
     }
 }
 
