@@ -19,6 +19,7 @@ MXFP8, and MXINT8 with one profile — they differ only in the element type.
 | --- | --- | --- | --- |
 | `block_size` | uint | Yes | Elements per block. MUST be 32 for OCP MX formats; other values are permitted but are not OCP-conformant. |
 | `axis` | uint | No | Dimension the blocks run along. Defaults to the last dimension (`rank − 1`). |
+| `scale_form` | text | Yes | MUST be `"e8m0_exponent"`. Stated rather than implied because a reader must not learn a scale's meaning from its dtype or from the block size — the same mistake that made a 32-element group mean "MXFP4" elsewhere. |
 
 ## Derived quantities
 
