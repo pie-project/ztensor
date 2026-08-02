@@ -63,18 +63,18 @@ with a driver, and dropped from the cache without touching anything else.
 The format is organized so that the mortal parts can die without taking
 the rest with them:
 
-![What each layer stores: vocabulary identifiers, manifest records, and the bytes of the container](../static/diagrams/layers.svg)
+![The three layers: bytes in L0, a manifest record in L1, vocabulary identifiers in L2, and above them a framework that decides what the values mean](../static/diagrams/layers.svg)
 
-They meet in one place. A manifest entry says what a tensor *means* by
-naming a profile from L2, and says where it *is* by naming a byte range in
-L0 — so the layer that is allowed to change never touches the layer that
-is not.
+A manifest entry says where a tensor *is* by naming a byte range in L0, and
+what it *is* by naming a profile in L2 — so the layer that is allowed to
+change never touches the layer that is not.
 
-![A manifest entry whose layout field points up at a profile and whose blob field points down at bytes](../static/diagrams/references.svg)
-
-Refusing unknown L2 vocabulary is not a limitation, it is the point:
-silently reinterpreting it is how a format produces wrong tensors instead
-of errors.
+What zTensor does with an L2 name is check it and hand it over. Deciding
+that `zt.quant_group/1` with an `f4_e2m1` payload and `f8_e8m0` scales
+dequantizes to bf16 is the framework's business, not the format's. A name
+it does not know is refused rather than guessed at, because silently
+reinterpreting one is how a format returns a wrong tensor instead of an
+error.
 
 See the [format specification](./spec.md) for the normative rules and
 [profiles](https://github.com/pie-project/ztensor/tree/main/spec/profiles)
