@@ -19,8 +19,8 @@ use ztensor::{Source, Writer};
 
 // Read anything.
 let src = ztensor_compat::open("model.safetensors")?;
-for (name, obj) in src.manifest().objects.iter() {
-    println!("{name}: {:?} {}", obj.shape, obj.layout.as_str());
+for t in src.tensors() {
+    println!("{}: {:?} {}", t.name(), t.shape(), t.layout());
 }
 
 // Write one thing: a canonical, digest-carrying .zt file.
@@ -72,9 +72,8 @@ for the registry.
 Different files support different things, and the API says so rather than
 pretending otherwise:
 
-| Tier | Guarantee | Where you get it |
+| Operation | What it gives you | Where it works |
 | --- | --- | --- |
-| 0 | Enumerate objects and metadata | every format |
 | `bytes()` | decoded bytes, saying whether they were borrowed or copied | every format |
 | `map()` | a borrow, or an error | mapped raw parts |
 | `locate()` | the exact range of one file, for your own I/O | raw parts |

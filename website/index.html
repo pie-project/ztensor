@@ -1,0 +1,853 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>zTensor — an aligned, verifiable container for tensor data</title>
+<meta name="description" content="A tensor container format where every tensor starts on a page, carries a digest, and never executes code — and one loader that reads safetensors, GGUF, .pt, npz, HDF5 and ONNX into the same object model.">
+<style>
+/* ============================================================
+   Tokens. The neutrals lean cyan so the one warm signal — amber,
+   meaning "these bytes are yours" — has something to sit against.
+   ============================================================ */
+:root {
+  --ink:      #0d1317;
+  --paper:    #f1f3f4;
+  --slate:    #64757c;
+  --signal:   #b56a12;
+  --signal-lit: #e08a2e;
+
+  --bg:        var(--paper);
+  --bg-sunk:   #e6eaeb;
+  --bg-panel:  #fbfcfc;
+  --fg:        var(--ink);
+  --fg-dim:    #46565d;
+  --fg-faint:  var(--slate);
+  --rule:      #d2d9db;
+  --rule-firm: #b3bfc3;
+  --accent:    var(--signal);
+  --accent-ink:#ffffff;
+  --void:      #9fadb2;
+
+  --mono: ui-monospace, "SF Mono", SFMono-Regular, "JetBrains Mono", "Cascadia Mono", Menlo, Consolas, monospace;
+  --serif: Charter, "Bitstream Charter", "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+
+  --measure: 34rem;
+  --gutter: clamp(1.25rem, 5vw, 4rem);
+  --step--1: clamp(0.78rem, 0.76rem + 0.1vw, 0.84rem);
+  --step-0:  clamp(1rem, 0.97rem + 0.15vw, 1.09rem);
+  --step-1:  clamp(1.2rem, 1.1rem + 0.5vw, 1.45rem);
+  --step-2:  clamp(1.5rem, 1.3rem + 1vw, 2.1rem);
+  --step-3:  clamp(2rem, 1.5rem + 2.6vw, 3.6rem);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg:        #0d1317;
+    --bg-sunk:   #080d10;
+    --bg-panel:  #141e23;
+    --fg:        #e7edee;
+    --fg-dim:    #aebbc0;
+    --fg-faint:  #7d8f96;
+    --rule:      #22323a;
+    --rule-firm: #35494f;
+    --accent:    var(--signal-lit);
+    --accent-ink:#0d1317;
+    --void:      #3c5058;
+  }
+}
+:root[data-theme="dark"] {
+  --bg:        #0d1317;
+  --bg-sunk:   #080d10;
+  --bg-panel:  #141e23;
+  --fg:        #e7edee;
+  --fg-dim:    #aebbc0;
+  --fg-faint:  #7d8f96;
+  --rule:      #22323a;
+  --rule-firm: #35494f;
+  --accent:    var(--signal-lit);
+  --accent-ink:#0d1317;
+  --void:      #3c5058;
+}
+:root[data-theme="light"] {
+  --bg:        #f1f3f4;
+  --bg-sunk:   #e6eaeb;
+  --bg-panel:  #fbfcfc;
+  --fg:        #0d1317;
+  --fg-dim:    #46565d;
+  --fg-faint:  #64757c;
+  --rule:      #d2d9db;
+  --rule-firm: #b3bfc3;
+  --accent:    var(--signal);
+  --accent-ink:#ffffff;
+  --void:      #9fadb2;
+}
+
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--serif);
+  font-size: var(--step-0);
+  line-height: 1.6;
+  text-rendering: optimizeLegibility;
+}
+
+/* ---- shared rhythm ---------------------------------------- */
+.band { padding-inline: var(--gutter); }
+.band > .inner { max-width: 68rem; margin-inline: auto; }
+.rule-top { border-top: 1px solid var(--rule); }
+
+.eyebrow {
+  font-family: var(--mono);
+  font-size: var(--step--1);
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--fg-faint);
+  margin: 0;
+}
+.eyebrow b { color: var(--accent); font-weight: 600; }
+
+h1, h2, h3 {
+  font-family: var(--mono);
+  font-weight: 500;
+  letter-spacing: -0.02em;
+  text-wrap: balance;
+  margin: 0;
+}
+h2 { font-size: var(--step-2); }
+h3 { font-size: var(--step-1); letter-spacing: -0.01em; }
+p { margin: 0; max-width: var(--measure); }
+a { color: inherit; text-underline-offset: 0.18em; text-decoration-color: var(--rule-firm); }
+a:hover { text-decoration-color: var(--accent); }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 2px; }
+
+code, kbd, samp { font-family: var(--mono); font-size: 0.9em; }
+
+/* ============================================================
+   Masthead
+   ============================================================ */
+.masthead {
+  display: flex;
+  align-items: baseline;
+  gap: 1.25rem;
+  padding-block: 1.1rem;
+  font-family: var(--mono);
+  font-size: var(--step--1);
+  border-bottom: 1px solid var(--rule);
+}
+.masthead .mark {
+  font-size: var(--step-0);
+  letter-spacing: -0.04em;
+  font-weight: 600;
+}
+.masthead .mark span { color: var(--accent); }
+.masthead nav { margin-left: auto; display: flex; gap: 1.25rem; flex-wrap: wrap; }
+.masthead nav a { text-decoration: none; color: var(--fg-faint); }
+.masthead nav a:hover { color: var(--fg); }
+
+/* ============================================================
+   Hero — the thesis is the file layout, so the figure is the hero
+   ============================================================ */
+.hero { padding-block: clamp(3rem, 7vw, 6rem) clamp(2rem, 5vw, 4rem); }
+.hero .inner { display: grid; gap: clamp(2.5rem, 5vw, 4rem); }
+.hero h1 {
+  font-size: var(--step-3);
+  line-height: 1.02;
+  letter-spacing: -0.045em;
+  max-width: 20ch;
+}
+.hero h1 em {
+  font-style: normal;
+  color: var(--accent);
+}
+.lede {
+  font-size: var(--step-1);
+  line-height: 1.45;
+  color: var(--fg-dim);
+  max-width: 44ch;
+  margin-top: 1.5rem;
+}
+.hero-actions { display: flex; flex-wrap: wrap; gap: 0.75rem; margin-top: 2rem; align-items: center; }
+.cmd {
+  font-family: var(--mono);
+  font-size: var(--step--1);
+  background: var(--bg-panel);
+  border: 1px solid var(--rule);
+  padding: 0.6rem 0.9rem;
+  display: inline-flex;
+  gap: 0.6rem;
+  align-items: center;
+}
+.cmd .prompt { color: var(--accent); }
+.btn {
+  font-family: var(--mono);
+  font-size: var(--step--1);
+  text-decoration: none;
+  background: var(--fg);
+  color: var(--bg);
+  padding: 0.65rem 1.1rem;
+  border: 1px solid var(--fg);
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.btn:hover { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+
+/* ---- the layout figure ------------------------------------ */
+figure.layout { margin: 0; display: grid; gap: 0.9rem; }
+.layout .frame {
+  background: var(--bg-panel);
+  border: 1px solid var(--rule);
+  padding: clamp(0.75rem, 2vw, 1.4rem);
+  overflow-x: auto;
+}
+.layout canvas { display: block; width: 100%; height: auto; }
+figcaption {
+  font-family: var(--mono);
+  font-size: var(--step--1);
+  color: var(--fg-faint);
+  line-height: 1.5;
+  max-width: 62ch;
+}
+figcaption b { color: var(--fg-dim); font-weight: 500; }
+.legend { display: flex; flex-wrap: wrap; gap: 1.1rem; font-family: var(--mono); font-size: var(--step--1); color: var(--fg-faint); }
+.legend span { display: inline-flex; align-items: center; gap: 0.45rem; }
+.swatch { width: 0.8rem; height: 0.8rem; border: 1px solid var(--rule-firm); }
+.swatch.blob { background: var(--accent); border-color: var(--accent); }
+.swatch.pad  { background: repeating-linear-gradient(45deg, var(--void) 0 1px, transparent 1px 4px); }
+.swatch.straddle { background: transparent; border: 1px dashed currentColor; color: var(--fg-dim); }
+
+/* ============================================================
+   Records — every major section is one
+   ============================================================ */
+.record { padding-block: clamp(3rem, 6vw, 5rem); }
+.record .inner { display: grid; gap: clamp(1.5rem, 3vw, 2.25rem); }
+.record-head { display: grid; gap: 0.75rem; }
+
+.two-col {
+  display: grid;
+  gap: clamp(1.5rem, 4vw, 3rem);
+  grid-template-columns: 1fr;
+}
+@media (min-width: 60rem) {
+  .two-col { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); align-items: start; }
+  .record.split .inner { grid-template-columns: minmax(0, 15rem) minmax(0, 1fr); gap: clamp(1.5rem, 4vw, 3.5rem); }
+  .record.split .record-head { position: sticky; top: 2rem; }
+}
+
+/* ---- data tables ------------------------------------------ */
+.table-wrap { overflow-x: auto; border: 1px solid var(--rule); background: var(--bg-panel); }
+table { border-collapse: collapse; width: 100%; font-size: var(--step--1); }
+th, td { text-align: left; padding: 0.7rem 0.9rem; border-bottom: 1px solid var(--rule); vertical-align: top; }
+thead th {
+  font-family: var(--mono);
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--fg-faint);
+  background: var(--bg-sunk);
+  white-space: nowrap;
+}
+tbody tr:last-child th, tbody tr:last-child td { border-bottom: 0; }
+tbody th { font-family: var(--mono); font-weight: 500; white-space: nowrap; color: var(--fg); }
+td.num { font-family: var(--mono); font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+td.num.best { color: var(--accent); }
+.yes { color: var(--accent); font-family: var(--mono); }
+.no  { color: var(--fg-faint); font-family: var(--mono); }
+caption {
+  caption-side: bottom;
+  text-align: left;
+  padding: 0.7rem 0.9rem;
+  font-family: var(--mono);
+  font-size: var(--step--1);
+  color: var(--fg-faint);
+  border-top: 1px solid var(--rule);
+  line-height: 1.5;
+}
+
+/* ---- code ------------------------------------------------- */
+.code {
+  background: var(--bg-panel);
+  border: 1px solid var(--rule);
+  overflow-x: auto;
+}
+.code .label {
+  font-family: var(--mono);
+  font-size: var(--step--1);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--fg-faint);
+  padding: 0.55rem 0.9rem;
+  border-bottom: 1px solid var(--rule);
+  background: var(--bg-sunk);
+}
+pre { margin: 0; padding: 0.9rem; font-family: var(--mono); font-size: var(--step--1); line-height: 1.65; }
+pre .c  { color: var(--fg-faint); font-style: italic; }
+pre .k  { color: var(--accent); }
+pre .s  { color: var(--fg-dim); }
+
+/* ---- layer stack ------------------------------------------ */
+.layers { display: grid; gap: 0; border: 1px solid var(--rule); background: var(--bg-panel); }
+.layer { display: grid; gap: 0.4rem; padding: 1.1rem clamp(0.9rem, 2vw, 1.4rem); border-bottom: 1px solid var(--rule); }
+.layer:last-child { border-bottom: 0; }
+.layer-head { display: flex; align-items: baseline; gap: 0.75rem; flex-wrap: wrap; }
+.layer-id { font-family: var(--mono); font-size: var(--step--1); color: var(--accent); letter-spacing: 0.1em; }
+.layer h3 { font-size: var(--step-0); }
+.layer .contract {
+  margin-left: auto;
+  font-family: var(--mono);
+  font-size: var(--step--1);
+  color: var(--fg-faint);
+  border: 1px solid var(--rule-firm);
+  padding: 0.1rem 0.5rem;
+  white-space: nowrap;
+}
+.layer.frozen .contract { color: var(--fg); border-color: var(--fg-dim); }
+.layer p { color: var(--fg-dim); font-size: var(--step--1); max-width: 60ch; }
+
+/* ---- notes ------------------------------------------------ */
+.note {
+  border-left: 2px solid var(--accent);
+  padding: 0.15rem 0 0.15rem 1rem;
+  color: var(--fg-dim);
+  font-size: var(--step--1);
+  max-width: 58ch;
+}
+
+footer.colophon {
+  padding-block: 2.5rem 4rem;
+  font-family: var(--mono);
+  font-size: var(--step--1);
+  color: var(--fg-faint);
+}
+footer.colophon .inner { display: flex; gap: 1.5rem; flex-wrap: wrap; align-items: baseline; }
+footer.colophon a { text-decoration: none; }
+footer.colophon a:hover { color: var(--fg); }
+footer.colophon .spacer { margin-left: auto; }
+
+@media (prefers-reduced-motion: reduce) {
+  * { animation-duration: 0.001ms !important; transition-duration: 0.001ms !important; }
+}
+</style>
+</head>
+<body>
+
+<header class="band masthead">
+  <span class="mark">zTensor<span>.</span></span>
+  <span style="color: var(--fg-faint)">format v2 &middot; spec draft 2</span>
+  <nav>
+    <a href="docs/intro.md">Docs</a>
+    <a href="docs/spec.md">Spec</a>
+    <a href="docs/benchmarks.md">Benchmarks</a>
+    <a href="https://github.com/pie-project/ztensor">GitHub</a>
+  </nav>
+</header>
+
+<section class="band hero">
+  <div class="inner">
+    <div>
+      <p class="eyebrow">A container for tensor data</p>
+      <h1>Every tensor starts on <em>a page of its own.</em></h1>
+      <p class="lede">
+        That one property is what lets a weight be mapped, registered and
+        evicted without dragging its neighbours along. zTensor adds a digest to
+        each one, refuses to execute code, and reads every other format into the
+        same object model.
+      </p>
+      <div class="hero-actions">
+        <a class="btn" href="docs/intro.md">Read the docs</a>
+        <span class="cmd"><span class="prompt">$</span> cargo add ztensor</span>
+        <span class="cmd"><span class="prompt">$</span> pip install ztensor</span>
+      </div>
+    </div>
+
+    <figure class="layout">
+      <div class="frame">
+        <canvas id="layout-figure" width="1120" height="272" role="img"
+                aria-label="Byte layout comparison. In a canonical .zt file each tensor blob begins exactly on a 64 KiB page boundary, with padding between them. In safetensors the same tensors are packed back to back, so most of them straddle page boundaries."></canvas>
+      </div>
+      <div class="legend">
+        <span><i class="swatch blob"></i> tensor payload</span>
+        <span><i class="swatch pad"></i> alignment padding</span>
+        <span><i class="swatch straddle"></i> crosses a page boundary</span>
+      </div>
+      <figcaption>
+        The same four tensors, written twice. Above: canonical <b>.zt</b>, every
+        payload beginning on a 64&nbsp;KiB boundary. Below: <b>safetensors</b>,
+        packed back to back — three of the four straddle a page, so nothing can
+        be paged in or released on its own.
+      </figcaption>
+    </figure>
+  </div>
+</section>
+
+<section class="band record rule-top split" id="operations">
+  <div class="inner">
+    <div class="record-head">
+      <p class="eyebrow">The API</p>
+      <h2>It tells you what it can do</h2>
+      <p class="note">
+        Different files support different things. Rather than degrade quietly,
+        every part reports which of these will work — and each field is computed
+        by the very precondition the method checks, so the report cannot drift
+        from the behaviour.
+      </p>
+    </div>
+    <div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th scope="col">Ask for</th><th scope="col">You get</th><th scope="col">Where it works</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <th scope="row">bytes()</th>
+              <td>The best the file can do, saying whether it borrowed or copied</td>
+              <td>every format</td>
+            </tr>
+            <tr>
+              <th scope="row">map()</th>
+              <td>A borrow, or an error — never a hidden copy</td>
+              <td>mapped raw parts</td>
+            </tr>
+            <tr>
+              <th scope="row">locate()</th>
+              <td>The exact byte range, so you can do the I/O yourself</td>
+              <td>raw parts</td>
+            </tr>
+            <tr>
+              <th scope="row">verify()</th>
+              <td>A digest check over the decoded bytes</td>
+              <td><code>.zt</code></td>
+            </tr>
+            <tr>
+              <th scope="row">evict()</th>
+              <td>Drops these pages, and cannot touch a neighbour's</td>
+              <td>page-exclusive parts</td>
+            </tr>
+          </tbody>
+          <caption>
+            locate() is the rung a GPU loader actually wants: it hands over the
+            address for io_uring, cuFile or a staged host-to-device copy, and
+            keeps the library out of the transfer.
+          </caption>
+        </table>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="band record rule-top" id="usage">
+  <div class="inner">
+    <div class="record-head">
+      <p class="eyebrow">Read anything &middot; write one thing</p>
+      <h2>One loader, one output format</h2>
+    </div>
+    <div class="two-col">
+      <div class="code">
+        <div class="label">Rust</div>
+<pre><span class="c">// Read anything: .zt, .safetensors, .gguf,</span>
+<span class="c">// .npz, .pt, .h5, .onnx — detected by magic.</span>
+<span class="k">let</span> src = ztensor_compat::open(<span class="s">"model.safetensors"</span>)?;
+
+<span class="k">for</span> t <span class="k">in</span> src.tensors() {
+    println!(<span class="s">"{} {:?} {}"</span>,
+             t.name(), t.shape(), t.dtype()?);
+}
+
+<span class="k">let</span> t = src.tensor(<span class="s">"layer.0.mlp.w"</span>)?;
+<span class="k">let</span> bytes = t.map()?;      <span class="c">// zero-copy</span>
+<span class="k">let</span> at = t.locate()?;      <span class="c">// or just the address</span>
+
+<span class="c">// Write one thing: canonical .zt.</span>
+<span class="k">let mut</span> w = Writer::publish(<span class="s">"model.zt"</span>)?;
+w.ingest(&amp;src)?;
+w.finish()?;</pre>
+      </div>
+      <div class="code">
+        <div class="label">Python</div>
+<pre><span class="k">with</span> ztensor.open(<span class="s">"model.safetensors"</span>) <span class="k">as</span> src:
+    <span class="k">for</span> t <span class="k">in</span> src:
+        print(t.name, t.shape, t.dtype)
+
+    t = src[<span class="s">"layer.0.mlp.w"</span>]
+    arr = torch.from_dlpack(t)   <span class="c"># zero-copy</span>
+    t.location                   <span class="c"># for your own I/O</span>
+    t[<span class="s">"scales"</span>]                 <span class="c"># parts are tensors too</span>
+
+<span class="c"># DLPack carries bfloat16, which the numpy</span>
+<span class="c"># dtype table cannot — so there is no</span>
+<span class="c"># per-framework module here at all.</span>
+ztensor.convert(<span class="s">"model.safetensors"</span>, <span class="s">"model.zt"</span>)
+ztensor.verify(<span class="s">"model.zt"</span>, deep=<span class="k">True</span>)</pre>
+      </div>
+    </div>
+    <div class="code">
+      <div class="label">Command line</div>
+<pre><span class="k">zt</span> ls model.gguf                    <span class="c"># inspect anything</span>
+<span class="k">zt</span> convert model.gguf model.zt      <span class="c"># canonical, verifiable output</span>
+<span class="k">zt</span> verify model.zt --deep           <span class="c"># structure + digests + shards</span>
+<span class="k">zt</span> diff a.safetensors b.zt          <span class="c"># compare across formats</span></pre>
+    </div>
+  </div>
+</section>
+
+<section class="band record rule-top split" id="layers">
+  <div class="inner">
+    <div class="record-head">
+      <p class="eyebrow">The format</p>
+      <h2>Three layers, so the mortal parts can die alone</h2>
+      <p class="note">
+        A reader needs L0 and L1 to be useful at all. It may refuse anything in
+        L2 it does not recognize — and it must, because silently reinterpreting
+        unknown vocabulary is how a format produces wrong tensors instead of
+        errors.
+      </p>
+    </div>
+    <div class="layers">
+      <div class="layer frozen">
+        <div class="layer-head">
+          <span class="layer-id">L0</span>
+          <h3>Container</h3>
+          <span class="contract">Frozen</span>
+        </div>
+        <p>Magic, a 40-byte footer, an aligned blob heap, byte order. It never changes.</p>
+      </div>
+      <div class="layer">
+        <div class="layer-head">
+          <span class="layer-id">L1</span>
+          <h3>Manifest</h3>
+          <span class="contract">Version-gated</span>
+        </div>
+        <p>A deterministic-CBOR schema: objects, parts, blob references, shards. Evolves rarely, behind the footer's version integer.</p>
+      </div>
+      <div class="layer">
+        <div class="layer-head">
+          <span class="layer-id">L2</span>
+          <h3>Vocabulary</h3>
+          <span class="contract">Deliberately mortal</span>
+        </div>
+        <p>Layout profiles, logical types, encodings, digest algorithms — namespaced, versioned, registry-managed, and extensible from outside the crate.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="band record rule-top" id="comparison">
+  <div class="inner">
+    <div class="record-head">
+      <p class="eyebrow">What the others gave up</p>
+      <h2>The gaps this fills</h2>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th scope="col">Property</th>
+            <th scope="col">.zt</th>
+            <th scope="col">safetensors</th>
+            <th scope="col">gguf</th>
+            <th scope="col">.pt</th>
+            <th scope="col">npz</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><th scope="row">Page-aligned tensors</th><td class="yes">yes</td><td class="no">—</td><td class="no">—</td><td class="no">—</td><td class="no">—</td></tr>
+          <tr><th scope="row">Per-tensor digest</th><td class="yes">yes</td><td class="no">—</td><td class="no">—</td><td class="no">—</td><td class="no">—</td></tr>
+          <tr><th scope="row">No code execution</th><td class="yes">yes</td><td class="yes">yes</td><td class="yes">yes</td><td class="no">—</td><td class="yes">yes</td></tr>
+          <tr><th scope="row">Extensible quantization</th><td class="yes">yes</td><td class="no">—</td><td class="no">baked in</td><td class="no">—</td><td class="no">—</td></tr>
+          <tr><th scope="row">Byte-reproducible</th><td class="yes">yes</td><td class="no">—</td><td class="no">—</td><td class="no">—</td><td class="no">—</td></tr>
+          <tr><th scope="row">Zero-copy read</th><td class="yes">yes</td><td class="yes">yes</td><td class="yes">yes</td><td class="no">partial</td><td class="no">partial</td></tr>
+        </tbody>
+        <caption>
+          Every one of these is read by the same loader — the comparison is
+          about what a file can promise, not about which one you are allowed to
+          open.
+        </caption>
+      </table>
+    </div>
+  </div>
+</section>
+
+<section class="band record rule-top split" id="speed">
+  <div class="inner">
+    <div class="record-head">
+      <p class="eyebrow">Throughput</p>
+      <h2>Fast because it is all the same thing</h2>
+      <p class="note">
+        Every format ends up as one mapped byte range described by one object
+        model, so the read path does not care which door it came in through.
+      </p>
+    </div>
+    <div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th scope="col">Format</th>
+              <th scope="col">zTensor</th>
+              <th scope="col">Zero-copy off</th>
+              <th scope="col">Reference impl.</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><th scope="row">.zt</th><td class="num best">2.27 GB/s</td><td class="num">0.96</td><td class="num">n/a</td></tr>
+            <tr><th scope="row">.safetensors</th><td class="num best">2.47 GB/s</td><td class="num">1.00</td><td class="num">1.59</td></tr>
+            <tr><th scope="row">.pt</th><td class="num best">2.29 GB/s</td><td class="num">0.83</td><td class="num">1.60</td></tr>
+            <tr><th scope="row">.npz</th><td class="num best">2.33 GB/s</td><td class="num">0.94</td><td class="num">0.80</td></tr>
+            <tr><th scope="row">.gguf</th><td class="num">2.37 GB/s</td><td class="num">0.92</td><td class="num best">2.52</td></tr>
+            <tr><th scope="row">.onnx</th><td class="num best">2.30 GB/s</td><td class="num">0.82</td><td class="num">0.81</td></tr>
+            <tr><th scope="row">.h5</th><td class="num best">2.36 GB/s</td><td class="num">0.95</td><td class="num">1.47</td></tr>
+          </tbody>
+          <caption>
+            Llama 3.2 1B shapes (~2.8 GB), Linux, i9-13900K, NVMe, median of 5
+            cold reads. Reference figures use each library's own fastest path.
+            See the benchmarks page for method and for where alignment costs
+            rather than pays.
+          </caption>
+        </table>
+      </div>
+    </div>
+  </div>
+</section>
+
+<footer class="band colophon rule-top">
+  <div class="inner">
+    <span>MIT licensed</span>
+    <a href="https://github.com/pie-project/ztensor">github.com/pie-project/ztensor</a>
+    <span class="spacer">Built for <a href="https://github.com/pie-project">pie</a></span>
+  </div>
+</footer>
+
+<script>
+(() => {
+  "use strict";
+  const canvas = document.getElementById("layout-figure");
+  if (!canvas) return;
+  const ctx = canvas.getContext("2d");
+  const reduced = window.matchMedia("(prefers-reduced-motion: reduce)");
+
+  // The figure is to scale: four tensors of these sizes, in pages.
+  const PAGE = 64;                       // KiB, the canonical placement
+  const TENSORS = [
+    { name: "attn.q", kib: 148 },
+    { name: "attn.k", kib: 52 },
+    { name: "mlp.w",  kib: 205 },
+    { name: "norm",   kib: 24 },
+  ];
+
+  // Aligned: every payload starts on a page. Packed: back to back.
+  const aligned = [];
+  let cursor = 0;
+  for (const t of TENSORS) {
+    const start = Math.ceil(cursor / PAGE) * PAGE;
+    aligned.push({ ...t, start });
+    cursor = start + t.kib;
+  }
+  const alignedEnd = Math.ceil(cursor / PAGE) * PAGE;
+
+  const packed = [];
+  cursor = 0;
+  for (const t of TENSORS) {
+    packed.push({ ...t, start: cursor });
+    cursor += t.kib;
+  }
+  const span = Math.max(alignedEnd, Math.ceil(cursor / PAGE) * PAGE);
+
+  const token = (name) =>
+    getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+
+  function draw(progress) {
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const cssW = canvas.clientWidth || 1120;
+    const cssH = 272;
+    canvas.width = Math.round(cssW * dpr);
+    canvas.height = Math.round(cssH * dpr);
+    canvas.style.height = cssH + "px";
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, cssW, cssH);
+
+    const fg = token("--fg"), dim = token("--fg-dim"), faint = token("--fg-faint");
+    const rule = token("--rule"), firm = token("--rule-firm");
+    const accent = token("--accent"), voidC = token("--void");
+    const mono = getComputedStyle(document.body).getPropertyValue("--mono");
+
+    const padL = 92, padR = 12;
+    const plotW = Math.max(160, cssW - padL - padR);
+    const x = (kib) => padL + (kib / span) * plotW;
+    const rowH = 46;
+    const rows = [
+      { y: 58,  label: ".zt", sub: "canonical", items: aligned, aligned: true },
+      { y: 168, label: "safetensors", sub: "packed", items: packed, aligned: false },
+    ];
+
+    // Page grid, drawn first and behind everything.
+    ctx.save();
+    ctx.strokeStyle = rule;
+    ctx.lineWidth = 1;
+    ctx.font = `10px ${mono}`;
+    ctx.fillStyle = faint;
+    ctx.textAlign = "center";
+    for (let kib = 0; kib <= span; kib += PAGE) {
+      const px = Math.round(x(kib)) + 0.5;
+      ctx.beginPath();
+      ctx.moveTo(px, 34);
+      ctx.lineTo(px, 232);
+      ctx.stroke();
+      if (kib % (PAGE * 2) === 0) {
+        ctx.fillText(kib === 0 ? "0" : `${kib / 1024 >= 1 ? (kib / 1024) + " MiB" : kib + " KiB"}`, px, 26);
+      }
+    }
+    ctx.restore();
+
+    ctx.save();
+    ctx.font = `10px ${mono}`;
+    ctx.fillStyle = faint;
+    ctx.textAlign = "left";
+    ctx.fillText("64 KiB pages", padL, 246);
+    ctx.restore();
+
+    for (const row of rows) {
+      // Row label.
+      ctx.save();
+      ctx.textAlign = "right";
+      ctx.font = `500 13px ${mono}`;
+      ctx.fillStyle = fg;
+      ctx.fillText(row.label, padL - 14, row.y + 18);
+      ctx.font = `10px ${mono}`;
+      ctx.fillStyle = faint;
+      ctx.fillText(row.sub, padL - 14, row.y + 33);
+      ctx.restore();
+
+      // Baseline for the whole extent.
+      ctx.save();
+      ctx.strokeStyle = rule;
+      ctx.beginPath();
+      ctx.moveTo(padL, Math.round(row.y + rowH) + 0.5);
+      ctx.lineTo(padL + plotW, Math.round(row.y + rowH) + 0.5);
+      ctx.stroke();
+      ctx.restore();
+
+      for (const item of row.items) {
+        const x0 = x(item.start);
+        const full = x(item.start + item.kib) - x0;
+        const w = full * progress;
+        if (w <= 0.5) continue;
+
+        // Padding ahead of an aligned blob, hatched.
+        if (row.aligned && progress > 0.6) {
+          const prevEnd = row.items
+            .filter((o) => o.start < item.start)
+            .reduce((acc, o) => Math.max(acc, o.start + o.kib), 0);
+          if (prevEnd < item.start) {
+            const hx0 = x(prevEnd), hx1 = x(item.start);
+            ctx.save();
+            ctx.beginPath();
+            ctx.rect(hx0, row.y, hx1 - hx0, rowH);
+            ctx.clip();
+            ctx.strokeStyle = voidC;
+            ctx.globalAlpha = 0.55;
+            ctx.lineWidth = 1;
+            for (let d = -rowH; d < hx1 - hx0 + rowH; d += 5) {
+              ctx.beginPath();
+              ctx.moveTo(hx0 + d, row.y + rowH);
+              ctx.lineTo(hx0 + d + rowH, row.y);
+              ctx.stroke();
+            }
+            ctx.restore();
+          }
+        }
+
+        // The payload itself.
+        ctx.save();
+        ctx.fillStyle = accent;
+        ctx.globalAlpha = row.aligned ? 1 : 0.82;
+        ctx.fillRect(x0, row.y, w, rowH);
+        ctx.restore();
+
+        // A packed tensor that crosses a page line is marked as such.
+        if (!row.aligned && progress > 0.85) {
+          const startPage = Math.floor(item.start / PAGE);
+          const endPage = Math.floor((item.start + item.kib - 1) / PAGE);
+          if (endPage > startPage) {
+            ctx.save();
+            ctx.setLineDash([3, 3]);
+            ctx.strokeStyle = token("--fg");
+            ctx.lineWidth = 1.5;
+            ctx.strokeRect(Math.round(x0) + 0.5, Math.round(row.y) + 0.5,
+                           Math.round(full) - 1, rowH - 1);
+            ctx.restore();
+          }
+        }
+
+        // Name, when the block is wide enough to hold it.
+        if (progress > 0.9 && full > 46) {
+          ctx.save();
+          ctx.font = `10px ${mono}`;
+          ctx.fillStyle = token("--accent-ink");
+          ctx.globalAlpha = 0.85;
+          ctx.textAlign = "left";
+          ctx.fillText(item.name, x0 + 6, row.y + 28);
+          ctx.restore();
+        }
+      }
+    }
+
+    // The verdict, stated once.
+    if (progress > 0.95) {
+      ctx.save();
+      ctx.font = `10px ${mono}`;
+      ctx.fillStyle = dim;
+      ctx.textAlign = "left";
+      const crossing = packed.filter(
+        (o) => Math.floor((o.start + o.kib - 1) / PAGE) > Math.floor(o.start / PAGE)
+      ).length;
+      ctx.fillText(`${crossing} of ${packed.length} cross a boundary`, padL, 262);
+      ctx.restore();
+      ctx.save();
+      ctx.font = `10px ${mono}`;
+      ctx.fillStyle = firm;
+      ctx.textAlign = "right";
+      ctx.fillText("0 of 4", padL + plotW, 262);
+      ctx.restore();
+    }
+  }
+
+  let animation = null;
+  function run() {
+    if (animation) cancelAnimationFrame(animation);
+    if (reduced.matches) { draw(1); return; }
+    const started = performance.now();
+    const DURATION = 900;
+    const step = (now) => {
+      const t = Math.min(1, (now - started) / DURATION);
+      // ease-out cubic: quick to establish, slow to settle
+      draw(1 - Math.pow(1 - t, 3));
+      if (t < 1) animation = requestAnimationFrame(step);
+    };
+    animation = requestAnimationFrame(step);
+  }
+
+  const redraw = () => draw(1);
+  window.addEventListener("resize", redraw);
+  window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", redraw);
+  new MutationObserver(redraw).observe(document.documentElement, {
+    attributes: true, attributeFilter: ["data-theme"],
+  });
+
+  if ("IntersectionObserver" in window) {
+    const io = new IntersectionObserver((entries) => {
+      for (const e of entries) {
+        if (e.isIntersecting) { run(); io.disconnect(); }
+      }
+    }, { threshold: 0.25 });
+    io.observe(canvas);
+  } else {
+    run();
+  }
+})();
+</script>
+
+</body>
+</html>
