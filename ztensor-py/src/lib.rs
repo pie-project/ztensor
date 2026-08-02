@@ -1,8 +1,10 @@
 //! Python bindings: the zTensor object model, pythonically.
 //!
-//! Five concepts, the same five the Rust crate has: a [`Source`] you open, the
-//! [`Tensor`]s in it, what each one [`Caps`] can do, where its bytes are
-//! ([`Location`]), and a [`Writer`] for putting them somewhere.
+//! Five concepts, the same five the Rust crate has: a `Source` you open, the
+//! `Tensor`s in it, what each one `Caps` can do, where its bytes are
+//! (`Location`), and a `Writer` for putting them somewhere. They are the
+//! Python classes of the same names; this crate is a `cdylib`, so its own
+//! rustdoc has nothing to link them to.
 //!
 //! Tensors export the buffer protocol and DLPack, so `np.from_dlpack(t)`,
 //! `torch.from_dlpack(t)` and `memoryview(t)` all work without this crate

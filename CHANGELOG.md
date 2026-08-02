@@ -24,7 +24,7 @@ in the wild uses the old spelling.
   dropped, while a name does not. A name is a **label**: identity is still
   `(size, digest)`, still never a path.
 - **A name is constrained** to `[A-Za-z0-9._-]`, no leading `.`, at most 64
-  bytes. The conventional resolvers spend a name as a single path component,
+  bytes. The conventional resolvers use a name as a single path component,
   so the format is what prevents a manifest from expressing `../../etc/passwd`
   — rather than every consumer having to sanitize it, and one of them
   eventually forgetting.
@@ -123,22 +123,3 @@ checkpoints already ship with.
 - `ztensor_compat::open_any` (now `open`), `layout_profile`,
   `encoding_profile`, `logical_size`, `registered_dtype`.
 
-### Absent, from the 1.2.x lineage
-
-2.0 is a rewrite on a separate lineage (the old tree is the `v1` branch), and
-it does not have everything 1.2.3 did. Recorded here as a gap list, not as
-advice — `Writer::append`, `remove_tensors`, the `merge` / `compress` /
-`decompress` / `migrate` / `download-hf` CLI commands, and Python's
-`read_into`.
-
-Most have an obvious route back: `merge` is `Source::open_all` plus `ingest`,
-`compress` is an encoding profile on the writer, `migrate` is `convert`, and
-`read_into` is better served by `locate()` handing over the address so the
-caller reads into its own buffer. `append` and `remove_tensors` are the two
-that need a decision rather than a port: canonical form is defined by sorted
-insertion and a byte-reproducible result, and reopening a finished file to add
-to it is in tension with both.
-
-## 1.2.3 and earlier
-
-Not catalogued here.

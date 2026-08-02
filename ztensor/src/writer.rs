@@ -244,10 +244,13 @@ impl Writer {
 
     /// Registers an external shard under `name`.
     ///
-    /// The name is a label you choose, and the only thing parts will use to
-    /// refer to this shard; it never appears on disk as a path. It must match
-    /// `[A-Za-z0-9._-]`, not start with `.`, and fit in 64 bytes (spec §7.1),
-    /// so that a resolver can spend it as a path component safely.
+    /// The name is a label you choose, and the only thing parts use to refer
+    /// to this shard; it is never a path. It must match `[A-Za-z0-9._-]`, not
+    /// start with `.`, and fit in 64 bytes (spec §7.1) — narrow enough that a
+    /// resolver can use it as a single path component without sanitizing it.
+    ///
+    /// Registering the same name twice is accepted when the identity matches
+    /// and rejected when it does not: one name means one file.
     ///
     /// The identity is one value, and the two things that produce it —
     /// [`DataShardWriter::finish`] and
@@ -261,7 +264,7 @@ impl Writer {
             ));
         }
         let name = name.into();
-        check_shard_name(&name)?;
+        check_shard_name(&name).map_err(invalid)?;
         check_digest(&shard.digest).map_err(invalid)?;
         if shard.size < MIN_FILE_LEN {
             return Err(Error::InvalidInput(format!(
@@ -281,8 +284,10 @@ impl Writer {
     }
 
     /// Overlay convenience: references every part of `object` (taken from
-    /// another file's manifest) through the shard registered as `shard`,
-    /// writing nothing. Parts must be local in the source manifest.
+    /// another file's manifest) through the shard registered under `shard`,
+    /// writing nothing. Parts must be local in the source manifest, and
+    /// `shard` must already be registered — [`add_shard`](Self::add_shard)
+    /// first.
     pub fn link(&mut self, name: impl Into<String>, object: &Object, shard: &str) -> Result<()> {
         let name = name.into();
         let mut builder = self

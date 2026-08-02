@@ -117,9 +117,9 @@ every foreign format, report what they actually support instead.
 
 ## A note on the 2.0 rewrite
 
-The figures on this page and in the README were measured against the 1.x read
-path. The 2.0 release rewrote the crate API but not the container, so the
-question was whether the new indirection cost anything. It was measured
+The figures on this page and in the README were first measured before the crate
+rewrite. The rewrite changed the API, not the read path's shape, so the question
+was whether the new indirection cost anything. It was measured
 directly: the in-repo harness (`cargo run --release -p benchmark`) run
 alternately against `df9c1c6` (the last commit before the rewrite) and the
 2.0 tree, three rounds of nine runs each at 1 GiB.

@@ -133,7 +133,7 @@ blobs.
 A file whose footer is not at EOF — e.g., after a crashed append — is simply
 invalid; there is no reader-side recovery (§10). Durable publication is a
 transport concern: write to a temporary name, then rename atomically
-(Appendix D).
+(Appendix B).
 
 ---
 
@@ -234,7 +234,7 @@ The *decoded size* of a part is `length` when `encoding` is absent, else
 Digests cover decoded bytes because a digest identifies **content**, not its
 encoding; re-encoding a blob does not change its digest. Transport integrity
 of encoded bytes is the encoding profile's responsibility (e.g., zstd frame
-checksums, §C).
+checksums — see `profiles/zt.zstd-seekable-1.md`).
 
 ### 3.5 Names
 
@@ -494,11 +494,11 @@ anywhere in the format, and a name carries no promise about what any file is
 called. A path is owned by the filesystem, is not verifiable by the format,
 and would couple model identity to naming — a rename would change or break
 the model. Resolving a name to bytes is entirely the transport's concern
-(Appendix D gives the RECOMMENDED conventions); because identity lives in the
+(Appendix B gives the RECOMMENDED conventions); because identity lives in the
 content, a resolver can always ignore the name and locate a file by size and
 digest instead.
 
-The character set is narrow for one reason: the conventional resolvers spend
+The character set is narrow for one reason: the conventional resolvers use
 a name as a single path component. Constraining it here means that a manifest
 cannot express a path such as `../../etc/passwd`, so no consumer has to
 sanitize one — an obligation that, spread across every implementation, would
@@ -589,7 +589,7 @@ This format deliberately does not attempt to be:
   in-place writes.
 - **A crash-recovery journal.** A file whose footer is not at EOF is
   invalid, full stop. Durability comes from atomic publication (write to a
-  temporary name, rename into place — Appendix D), not from reader-side
+  temporary name, rename into place — Appendix B), not from reader-side
   recovery scans.
 - **An encryption container.** Encryption belongs to the transport or
   filesystem layer.

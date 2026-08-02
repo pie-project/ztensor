@@ -119,7 +119,10 @@ impl Model {
 /// Sums every byte. The point is to fault and touch the whole mapping —
 /// anything that skips bytes measures address arithmetic, not I/O.
 fn checksum(bytes: &[u8]) -> u64 {
-    bytes.chunks(8).map(|c| c.iter().map(|&b| b as u64).sum::<u64>()).sum()
+    bytes
+        .chunks(8)
+        .map(|c| c.iter().map(|&b| b as u64).sum::<u64>())
+        .sum()
 }
 
 fn median(mut xs: Vec<Duration>) -> Duration {
@@ -193,9 +196,14 @@ fn main() {
     let mut rows: Vec<(String, f64, Duration)> = Vec::new();
 
     // ---- write ---------------------------------------------------------
-    rows.push(bench("write .zt (canonical, 64 KiB)", runs, payload, || {
-        model.write_zt(&zt, None).unwrap();
-    }));
+    rows.push(bench(
+        "write .zt (canonical, 64 KiB)",
+        runs,
+        payload,
+        || {
+            model.write_zt(&zt, None).unwrap();
+        },
+    ));
     rows.push(bench("write .zt (4 KiB floor)", runs, payload, || {
         model.write_zt(&zt4k, Some(4096)).unwrap();
     }));
@@ -360,17 +368,17 @@ fn main() {
     println!("| Operation | Throughput | Median time |");
     println!("| --- | --- | --- |");
     for (name, rate, d) in &rows {
-        println!("| {name} | {rate:.2} GB/s | {:.1} ms |", d.as_secs_f64() * 1e3);
+        println!(
+            "| {name} | {rate:.2} GB/s | {:.1} ms |",
+            d.as_secs_f64() * 1e3
+        );
     }
 
     println!("\n## Open latency (metadata only)\n");
     println!("| Format | Time to enumerate {} tensors |", names.len());
     println!("| --- | --- |");
     println!("| `.zt` | {:.2} ms |", open_zt.as_secs_f64() * 1e3);
-    println!(
-        "| `.safetensors` | {:.2} ms |",
-        open_st.as_secs_f64() * 1e3
-    );
+    println!("| `.safetensors` | {:.2} ms |", open_st.as_secs_f64() * 1e3);
 
     println!("\n## File size\n");
     println!("| File | Size | Overhead vs payload |");

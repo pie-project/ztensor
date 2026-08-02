@@ -327,8 +327,13 @@ fn a_shard_name_cannot_be_a_path() {
             .canonical(false)
             .create(tmp("badname.zt"))
             .unwrap();
+        // The writer reports reader rules as InvalidInput, carrying the
+        // rule's own message — see `writer::invalid`.
         let err = w.add_shard(name, &identity).unwrap_err();
-        assert_eq!(err.rule(), Some(Rule::ShardName), "{name:?} was accepted");
+        assert!(
+            matches!(err, Error::InvalidInput(_)),
+            "{name:?} was accepted, or reported as {err:?}"
+        );
         w.abandon();
     }
 }

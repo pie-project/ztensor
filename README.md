@@ -6,9 +6,7 @@ that reads every other tensor format into the same object model.
 **Crates 2.0.0 · Format `.zt` version 2 · Spec Draft 3**
 
 *The crate version and the format version are not the same number and do not
-move together. The `.zt` container format 2 is a different format from the one
-the 1.x crates wrote, and 2.0 does not read 1.x files — see
-[Upgrading from 1.x](#upgrading-from-1x).*
+move together.*
 
 ```rust
 // Read anything: .zt, .safetensors, .gguf, .npz, .pt, .h5, .onnx
@@ -68,7 +66,7 @@ arbitrary code can execute.
 | .onnx | **2.30 GB/s** | 0.82 GB/s | 0.81 GB/s ([onnx](https://github.com/onnx/onnx)) |
 | .h5 | **2.36 GB/s** | 0.95 GB/s | 1.47 GB/s ([h5py](https://github.com/h5py/h5py)) |
 
-*Measured on the 1.x read path and re-verified against 2.0 (see
+*Measured before the crate rewrite and re-verified after (see
 [Benchmarks](website/docs/benchmarks.md#a-note-on-the-20-rewrite)); Llama 3.2 1B
 shapes (~2.8 GB). Linux, i9-13900K, NVMe SSD, median of 5 runs, cold reads. ONNX at 1 GB (protobuf limit). †Native zero-copy where available
 (GGUF mmap, SafeTensors `safe_open`). See
@@ -148,19 +146,6 @@ tested**, and until it is, treat it as unverified rather than supported.
 Two capabilities are unix-only by nature and simply do not exist elsewhere:
 `prefetch` (`madvise(WILLNEED)`) and `evict` (`madvise(DONTNEED)`). Everything
 else — reading, writing, mapping, addressing, verification — is portable.
-
-## Upgrading from 1.x
-
-**2.0 does not read 1.x `.zt` files.** They are a different container: 1.x
-wrote the magic `ZTEN1000` with 64-byte alignment and flat blob offsets, while
-format 2 has its own magic, 4 KiB alignment, and a CBOR manifest. Opening a 1.x
-file with 2.0 fails at the header magic, and no conversion path ships in this
-release.
-
-If you have 1.x files, keep a 1.x build to read them and rewrite the tensors
-through 2.0's `Writer`. The crate surface changed as well —
-[CHANGELOG.md](CHANGELOG.md) records what moved and why, including the feature
-gap between the two lineages.
 
 ## Layout of this repository
 
@@ -251,9 +236,7 @@ cargo +nightly fuzz run fuzz_compat       # foreign-format parsers
 ## Status
 
 Pre-1.0 in intent if not in number: the format is Draft 3 and may still
-change. The crate line continues from the 1.2.x series, but this is a
-complete rewrite — the API, the file format, and the guarantees are all
-new, and `.zt` v2 files are not readable by 1.2.x.
+change.
 
 ## Documentation
 

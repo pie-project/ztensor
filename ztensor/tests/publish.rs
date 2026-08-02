@@ -1,6 +1,6 @@
 //! Publishing: a reader never sees a half-written file.
 //!
-//! The spec puts durable publication in the transport's hands (Appendix D),
+//! The spec puts durable publication in the transport's hands (Appendix B),
 //! and it is right that the format does not mandate an fsync. But every
 //! producer needs the same three steps — write beside the target, sync,
 //! rename — and every producer was writing them again. So the library writes

@@ -122,7 +122,7 @@ impl Verified {
 
 /// Resolves a shard name + identity to a file path. A name is a label the
 /// producer chose, not a location: turning it into bytes is entirely the
-/// transport's concern (spec §7.1, Appendix D).
+/// transport's concern (spec §7.1, Appendix B).
 ///
 /// A name is constrained by the format to `[A-Za-z0-9._-]`, no leading dot,
 /// at most 64 bytes, so a resolver may use it as a single path component
@@ -138,7 +138,7 @@ impl<F: Fn(&str, &Shard) -> Result<PathBuf>> ShardResolver for F {
     }
 }
 
-/// The positional convention (Appendix D): root `<dir>/<stem>.zt` maps a
+/// The positional convention (Appendix B): root `<dir>/<stem>.zt` maps a
 /// shard named `n` to `<dir>/<stem>-<n>.zt`.
 ///
 /// Naming shards `00001-of-00003` and so on therefore reproduces the file
@@ -167,7 +167,7 @@ impl ShardResolver for PositionalResolver {
     }
 }
 
-/// The content-addressed convention (Appendix D): a shard with digest
+/// The content-addressed convention (Appendix B): a shard with digest
 /// `algo:hex` lives at `<store>/blobs/<algo>/<hex>`.
 pub struct CasResolver {
     pub store: PathBuf,
@@ -187,39 +187,54 @@ impl ShardResolver for CasResolver {
 /// someone handed you, files renamed on the way. It is the one convention
 /// that keeps working after a rename, because it never consults a name.
 pub struct DirectoryResolver {
-    by_identity: BTreeMap<(u64, String), PathBuf>,
+    /// Digest -> (size, path). Keyed by digest alone, so a lookup needs no
+    /// allocation and a file whose digest matches but whose size does not can
+    /// be reported as the corruption it is, rather than as a missing file.
+    by_digest: BTreeMap<String, (u64, PathBuf)>,
 }
 
 impl DirectoryResolver {
     /// Indexes every `.zt` file directly inside `dir`.
     ///
-    /// Digests are computed eagerly, so this costs one full read of the
-    /// directory's contents. Prefer a cheaper convention when one applies.
+    /// Digests are computed eagerly, so this costs one full read of every
+    /// candidate file. Prefer a cheaper convention when one applies; this is
+    /// the fallback for when no name can be trusted.
+    ///
+    /// Files that are not readable containers are skipped rather than
+    /// reported: a directory is allowed to hold things that are not shards,
+    /// and a shard that is genuinely missing surfaces at `resolve` with the
+    /// identity that was being looked for.
     pub fn scan(dir: impl AsRef<Path>) -> Result<Self> {
-        let mut by_identity = BTreeMap::new();
+        let mut by_digest = BTreeMap::new();
         for entry in std::fs::read_dir(dir.as_ref())? {
             let path = entry?.path();
             if path.extension().is_some_and(|e| e == "zt") {
                 if let Ok(id) = shard_identity(&path) {
-                    by_identity.insert((id.size, id.digest), path);
+                    by_digest.insert(id.digest, (id.size, path));
                 }
             }
         }
-        Ok(Self { by_identity })
+        Ok(Self { by_digest })
     }
 }
 
 impl ShardResolver for DirectoryResolver {
     fn resolve(&self, name: &str, shard: &Shard) -> Result<PathBuf> {
-        self.by_identity
-            .get(&(shard.size, shard.digest.clone()))
-            .cloned()
-            .ok_or_else(|| {
-                Error::NotFound(format!(
-                    "shard {name:?} ({} bytes, {}) is not in the scanned directory",
-                    shard.size, shard.digest
-                ))
-            })
+        match self.by_digest.get(&shard.digest) {
+            Some((size, path)) if *size == shard.size => Ok(path.clone()),
+            Some((size, path)) => Err(Error::reject(
+                Rule::ShardIdentity,
+                format!(
+                    "shard {name:?}: {} has the expected digest but is {size} bytes, not {}",
+                    path.display(),
+                    shard.size
+                ),
+            )),
+            None => Err(Error::NotFound(format!(
+                "shard {name:?} ({} bytes, {}) is not in the scanned directory",
+                shard.size, shard.digest
+            ))),
+        }
     }
 }
 
@@ -632,8 +647,22 @@ impl Source {
         let Some(manifest) = &self.manifest else {
             return Ok(());
         };
+        // `open` pushes the root first, then one store per shard in the
+        // manifest's own (name) order — so position `k + 1` is shard `k`.
+        // That is an invariant of this file rather than a checked fact, so it
+        // is checked here: getting it wrong would silently hash the wrong file
+        // and report a mismatch against a shard that is perfectly fine.
+        if self.stores.len() != manifest.shards.len() + 1 {
+            return Err(Error::reject(
+                Rule::ShardIdentity,
+                format!(
+                    "{} shards resolved for a table of {}",
+                    self.stores.len().saturating_sub(1),
+                    manifest.shards.len()
+                ),
+            ));
+        }
         for (position, (name, shard)) in manifest.shards.iter().enumerate() {
-            // Shards were pushed in name order after the root, which is 0.
             let store = &self.stores[position + 1];
             let mut hasher = Xxh3::new();
             let mut at = 0u64;

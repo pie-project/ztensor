@@ -1,10 +1,10 @@
 //! The `.zt` reading algorithm (spec §8) and validation summary (spec §3.6).
 //!
-//! Two entry points onto the same rules: [`validate_bytes`] over a complete
-//! in-memory image, which is what the conformance corpus and the fuzz targets
-//! drive, and [`read`] over a [`Store`], which reads only the footer and the
-//! manifest blob — so opening a 100 GB checkpoint to plan against it touches
-//! two ranges, not a hundred gigabytes.
+//! Two entry points onto the same rules: [`crate::validate_bytes`] over a
+//! complete in-memory image, which is what the conformance corpus and the fuzz
+//! targets drive, and an internal reader over a [`Store`], which reads only the
+//! footer and the manifest blob — so opening a 100 GB checkpoint to plan
+//! against it touches two ranges, not a hundred gigabytes.
 
 use xxhash_rust::xxh3::xxh3_64;
 
@@ -289,14 +289,14 @@ pub(crate) fn validate_manifest(
             let (a_off, a_len) = w[0];
             let (b_off, _) = w[1];
             if a_off + a_len > b_off {
-                let where_ = match shard {
+                let location = match shard {
                     None => "this file".to_string(),
                     Some(s) => format!("shard {s:?}"),
                 };
                 return Err(Error::reject(
                     Rule::BlobOverlap,
                     format!(
-                        "blobs at {a_off} (+{a_len}) and {b_off} in {where_} \
+                        "blobs at {a_off} (+{a_len}) and {b_off} in {location} \
                          partially overlap"
                     ),
                 ));

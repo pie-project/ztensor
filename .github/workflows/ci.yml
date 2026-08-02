@@ -24,8 +24,19 @@ jobs:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
 
+      # rustfmt was installed but never run, so one crate had drifted.
+      - name: Formatting
+        run: cargo fmt --all -- --check
+
       - name: Clippy
         run: cargo clippy --all-targets --all-features
+
+      # Doc links break silently: an item gets renamed and the link that
+      # pointed at it just stops resolving.
+      - name: Docs (links must resolve)
+        run: cargo doc --workspace --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
 
       # The conformance corpus is the gate: every case in `all_cases()`
       # must behave, and the exported golden files must still match it.

@@ -9,35 +9,64 @@ use std::fmt;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Rule {
+    /// Shorter than a header plus a footer, so there is no container (§2.1).
     FileTooSmall,
+    /// The first eight bytes are not the magic (§2.2).
     HeaderMagic,
+    /// The last eight bytes are not the magic (§2.2).
     FooterMagic,
+    /// The footer's version integer is one this build does not implement.
     Version,
+    /// The manifest blob falls outside the data region, or a data shard's
+    /// footer does not zero the manifest fields (§2.3, §7.2).
     ManifestBounds,
+    /// The declared manifest length exceeds the 1 GiB cap (§3.1).
     ManifestTooLarge,
+    /// The manifest bytes do not hash to what the footer claims (§2.3).
     ManifestHash,
+    /// The manifest is not well-formed CBOR.
     CborSyntax,
+    /// Well-formed CBOR, but not the deterministic encoding the format
+    /// requires: a non-shortest head, an indefinite length, or unsorted map
+    /// keys (§3.1).
     CborDeterminism,
+    /// A CBOR map repeats a key (§3.1).
     CborDuplicateKey,
+    /// CBOR nesting beyond the depth limit — the bound that keeps a hostile
+    /// manifest from exhausting the stack.
     CborDepth,
+    /// The manifest parses but is not the shape the schema describes: a
+    /// missing field, a field of the wrong type, a value out of range (§3).
     Schema,
+    /// An object, part, or attribute name violates §3.5.
     Name,
+    /// A shape exceeds the rank limit, or its element product overflows
+    /// `u64` (§3.3).
     Shape,
+    /// A blob offset is not on the alignment floor (§2.4).
     BlobAlignment,
+    /// A blob runs past the end of the file's data region (§2.4).
     BlobBounds,
+    /// Two blobs in one file overlap partially — sharing is identical-or
+    /// -disjoint, never in between (§2.4).
     BlobOverlap,
-    /// A part names a shard the manifest's table does not declare.
+    /// A part names a shard the manifest's table does not declare (§7.1).
     ShardRef,
-    /// A shard name is outside the character set of spec §7.1.
+    /// A shard name is outside the character set of §7.1.
     ShardName,
+    /// Object metadata violates its layout profile's rules (§5.2).
     LayoutRule,
     /// Data-level violation of a layout profile (e.g., CSR indptr rules).
     LayoutData,
+    /// A dense part's decoded size is not `product(shape) × width(dtype)`
+    /// (§5.1).
     DenseSize,
     /// Stored bytes violate their declared encoding profile.
     Encoding,
+    /// A digest is malformed, or the bytes do not hash to it (§3.4).
     Digest,
-    /// A resolved shard does not match the identity in the root's table.
+    /// A resolved shard does not match the identity in the root's table
+    /// (§7.1, §7.3).
     ShardIdentity,
     /// Two sources of one composite claim the same tensor name.
     NameCollision,

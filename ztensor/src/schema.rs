@@ -31,6 +31,8 @@ pub const ALIGN_CANONICAL: u64 = 65536;
 pub const MAX_MANIFEST_LEN: u64 = 1 << 30;
 /// Maximum name length in bytes (spec §3.5).
 pub const MAX_NAME_LEN: usize = 1024;
+/// Maximum shard name length in bytes (spec §7.1).
+pub const MAX_SHARD_NAME: usize = 64;
 /// Maximum shape rank (spec §3.3).
 pub const MAX_RANK: usize = 64;
 /// Minimum container size: header magic plus footer (spec §2.1).
@@ -122,10 +124,12 @@ impl std::fmt::Display for DType {
 /// somewhere else (spec §3.4).
 ///
 /// `shard` names an entry in the containing manifest's shard table. `None`
-/// means the containing file — the common case, which is why it is the one
-/// that costs nothing to say. A name is a label, not a location: resolving it
-/// to bytes is the transport's job, and the result is a
-/// [`StoreId`](crate::StoreId) the two are related to only after that.
+/// means the containing file — the common case, and the one that costs nothing
+/// to say.
+///
+/// A name is a label, not a location. Turning it into bytes is the transport's
+/// job, and only after that is there a [`StoreId`](crate::StoreId); the two are
+/// unrelated until then.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlobRef {
     pub shard: Option<String>,
@@ -215,13 +219,10 @@ pub struct Manifest {
     pub objects: BTreeMap<String, Object>,
 }
 
-/// Longest permitted shard name, in bytes (spec §7.1).
-pub const MAX_SHARD_NAME: usize = 64;
-
 /// Checks a shard name against §7.1.
 ///
 /// The character set is narrow on purpose. A resolver turns a name into a
-/// location, and the conventional ones (Appendix D) use it as a single path
+/// location, and the conventional ones (Appendix B) use it as a single path
 /// component; if the format let a name be `../../etc/passwd`, every consumer
 /// would have to sanitize it, and one of them would forget. Constraining it
 /// here means a resolver cannot be attacked through a manifest at all.
@@ -236,7 +237,7 @@ pub fn check_shard_name(name: &str) -> Result<()> {
         return bad("must not be empty");
     }
     if name.len() > MAX_SHARD_NAME {
-        return bad("longer than 64 bytes");
+        return bad(&format!("longer than {MAX_SHARD_NAME} bytes"));
     }
     if name.starts_with('.') {
         return bad("must not start with '.'");

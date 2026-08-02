@@ -392,7 +392,7 @@ impl Layout for SparseCsr {
 }
 
 // =======================================================================
-// zt.zstd-seekable/1 (spec Appendix C)
+// zt.zstd-seekable/1 (spec/profiles/zt.zstd-seekable-1.md)
 // =======================================================================
 
 #[cfg(feature = "zstd")]
