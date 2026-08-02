@@ -188,12 +188,7 @@ impl Vocabulary {
     }
 
     /// Content rules of a registered logical type; unknown types are exempt.
-    pub fn check_values(
-        &self,
-        logical: &str,
-        bytes: &[u8],
-        elems: Option<u64>,
-    ) -> Result<()> {
+    pub fn check_values(&self, logical: &str, bytes: &[u8], elems: Option<u64>) -> Result<()> {
         match self.logical(logical) {
             Some(p) => p.check(bytes, elems),
             None => Ok(()),

@@ -118,16 +118,30 @@ impl std::fmt::Display for DType {
     }
 }
 
-/// Blob reference: `[shard_index, offset, length]` (spec §3.4).
+/// Blob reference: `[offset, length]`, plus a shard name when the bytes are
+/// somewhere else (spec §3.4).
 ///
-/// `shard` is an index into the containing manifest's shard table, where 0 is
-/// the containing file itself. It is not a [`StoreId`](crate::StoreId) — the
-/// two are related only after resolution.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// `shard` names an entry in the containing manifest's shard table. `None`
+/// means the containing file — the common case, which is why it is the one
+/// that costs nothing to say. A name is a label, not a location: resolving it
+/// to bytes is the transport's job, and the result is a
+/// [`StoreId`](crate::StoreId) the two are related to only after that.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlobRef {
-    pub shard: u64,
+    pub shard: Option<String>,
     pub offset: u64,
     pub length: u64,
+}
+
+impl BlobRef {
+    /// A reference into the containing file.
+    pub fn local(offset: u64, length: u64) -> Self {
+        Self {
+            shard: None,
+            offset,
+            length,
+        }
+    }
 }
 
 /// A part: one blob plus its interpretation (spec §3.4).
@@ -184,7 +198,7 @@ impl Object {
     }
 }
 
-/// Shard identity: size and digest, never a name (spec §7.1).
+/// Shard identity: size and digest, never a location (spec §7.1).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Shard {
     pub size: u64,
@@ -195,9 +209,45 @@ pub struct Shard {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Manifest {
     pub attributes: Option<Value>,
-    /// Keyed by shard index ≥ 1; index 0 (the containing file) never appears.
-    pub shards: BTreeMap<u64, Shard>,
+    /// Keyed by shard name. The containing file is never a key: it is named by
+    /// the absence of a name (see [`BlobRef::shard`]).
+    pub shards: BTreeMap<String, Shard>,
     pub objects: BTreeMap<String, Object>,
+}
+
+/// Longest permitted shard name, in bytes (spec §7.1).
+pub const MAX_SHARD_NAME: usize = 64;
+
+/// Checks a shard name against §7.1.
+///
+/// The character set is narrow on purpose. A resolver turns a name into a
+/// location, and the conventional ones (Appendix D) use it as a single path
+/// component; if the format let a name be `../../etc/passwd`, every consumer
+/// would have to sanitize it, and one of them would forget. Constraining it
+/// here means a resolver cannot be attacked through a manifest at all.
+pub fn check_shard_name(name: &str) -> Result<()> {
+    let bad = |msg: &str| {
+        Err(Error::reject(
+            Rule::ShardName,
+            format!("shard name {name:?}: {msg}"),
+        ))
+    };
+    if name.is_empty() {
+        return bad("must not be empty");
+    }
+    if name.len() > MAX_SHARD_NAME {
+        return bad("longer than 64 bytes");
+    }
+    if name.starts_with('.') {
+        return bad("must not start with '.'");
+    }
+    if let Some(c) = name
+        .chars()
+        .find(|c| !(c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')))
+    {
+        return bad(&format!("contains {c:?}; allowed: A-Z a-z 0-9 . _ -"));
+    }
+    Ok(())
 }
 
 impl Manifest {
@@ -246,7 +296,9 @@ pub(crate) fn check_attributes(v: &Value) -> Result<()> {
 /// algorithms (Unsupported) or malformed hex (Reject).
 pub(crate) fn parse_xxh3(digest: &str) -> Result<u64> {
     let hex = digest.strip_prefix("xxh3:").ok_or_else(|| {
-        Error::Unsupported(format!("digest algorithm in {digest:?} (only xxh3 supported)"))
+        Error::Unsupported(format!(
+            "digest algorithm in {digest:?} (only xxh3 supported)"
+        ))
     })?;
     u64::from_str_radix(hex, 16)
         .map_err(|_| Error::reject(Rule::Digest, format!("malformed digest {digest:?}")))
@@ -330,9 +382,9 @@ impl Manifest {
             let shards = self
                 .shards
                 .iter()
-                .map(|(&idx, s)| {
+                .map(|(name, s)| {
                     (
-                        Value::Uint(idx),
+                        text(name),
                         Value::Map(vec![
                             (text("size"), Value::Uint(s.size)),
                             (text("digest"), text(&s.digest)),
@@ -382,17 +434,15 @@ impl Manifest {
     }
 }
 
-fn parse_shards(v: Value) -> Result<BTreeMap<u64, Shard>> {
+fn parse_shards(v: Value) -> Result<BTreeMap<String, Shard>> {
     let entries = v.map_or("shards")?;
     let mut shards = BTreeMap::new();
     for (k, val) in entries {
-        let idx = k.u64_or("shard key")?;
-        if idx == 0 {
-            return Err(Error::reject(
-                Rule::ShardIndex,
-                "shard index 0 is the containing file and must not appear",
-            ));
-        }
+        let name = k
+            .as_text()
+            .ok_or_else(|| Error::reject(Rule::Schema, "shard key must be text"))?
+            .to_string();
+        check_shard_name(&name)?;
         let m = val.map_or("shard entry")?;
         let mut size = None;
         let mut digest = None;
@@ -410,7 +460,7 @@ fn parse_shards(v: Value) -> Result<BTreeMap<u64, Shard>> {
             return missing("shard entry", "digest");
         };
         check_digest(&digest)?;
-        shards.insert(idx, Shard { size, digest });
+        shards.insert(name, Shard { size, digest });
     }
     Ok(shards)
 }
@@ -500,11 +550,13 @@ impl Part {
         m.push((
             text("blob"),
             Value::Array(vec![
-                Value::Uint(self.blob.shard),
                 Value::Uint(self.blob.offset),
                 Value::Uint(self.blob.length),
             ]),
         ));
+        if let Some(shard) = &self.blob.shard {
+            m.push((text("shard"), text(shard)));
+        }
         if let Some(enc) = &self.encoding {
             m.push((text("encoding"), text(enc)));
         }
@@ -522,6 +574,7 @@ impl Part {
         let mut dtype = None;
         let mut logical = None;
         let mut blob = None;
+        let mut shard = None;
         let mut encoding = None;
         let mut decoded_length = None;
         let mut digest = None;
@@ -531,14 +584,15 @@ impl Part {
                 Some("type") => logical = Some(val.text_or("type")?.to_string()),
                 Some("blob") => {
                     let nums = val.uints_or("blob")?;
-                    let [shard, offset, length] = nums[..] else {
-                        return Err(Error::reject(Rule::Schema, "'blob' must have 3 elements"));
+                    let [offset, length] = nums[..] else {
+                        return Err(Error::reject(Rule::Schema, "'blob' must have 2 elements"));
                     };
-                    blob = Some(BlobRef {
-                        shard,
-                        offset,
-                        length,
-                    });
+                    blob = Some(BlobRef::local(offset, length));
+                }
+                Some("shard") => {
+                    let name = val.text_or("shard")?;
+                    check_shard_name(name)?;
+                    shard = Some(name.to_string());
                 }
                 Some("encoding") => encoding = Some(val.text_or("encoding")?.to_string()),
                 Some("decoded_length") => decoded_length = Some(val.u64_or("decoded_length")?),
@@ -550,9 +604,10 @@ impl Part {
                 _ => {}
             }
         }
-        let (Some(dtype), Some(blob)) = (dtype, blob) else {
+        let (Some(dtype), Some(mut blob)) = (dtype, blob) else {
             return missing("part", "dtype/blob");
         };
+        blob.shard = shard;
         if encoding.is_some() != decoded_length.is_some() {
             return Err(Error::reject(
                 Rule::Schema,

@@ -108,7 +108,7 @@ mod gguf {
         b.extend(0u64.to_le_bytes()); // shape [0]
         b.extend(0u32.to_le_bytes()); // F32
         b.extend(0u64.to_le_bytes()); // offset
-        // file ends here: 32-byte alignment rounds data_start past EOF
+                                      // file ends here: 32-byte alignment rounds data_start past EOF
         let path = tmp("c8.gguf");
         fs::write(&path, &b).unwrap();
         match ztensor_compat::open(&path) {
@@ -144,8 +144,7 @@ mod npz {
     use std::io::Write;
 
     fn npy(descr: &str, shape: &str, data: &[u8]) -> Vec<u8> {
-        let dict =
-            format!("{{'descr': '{descr}', 'fortran_order': False, 'shape': {shape}, }}");
+        let dict = format!("{{'descr': '{descr}', 'fortran_order': False, 'shape': {shape}, }}");
         let mut out = b"\x93NUMPY\x01\x00".to_vec();
         out.extend((dict.len() as u16).to_le_bytes());
         out.extend(dict.as_bytes());
@@ -222,7 +221,10 @@ mod npz {
                 // Whatever it resolved to, reading it must agree with the
                 // manifest's declared size.
                 let declared = n.tensor("ta").unwrap().part("data").unwrap().nbytes();
-                assert_eq!(n.tensor("ta").unwrap().bytes().unwrap().into_owned().len() as u64, declared);
+                assert_eq!(
+                    n.tensor("ta").unwrap().bytes().unwrap().into_owned().len() as u64,
+                    declared
+                );
             }
         }
     }

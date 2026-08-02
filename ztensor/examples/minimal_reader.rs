@@ -49,14 +49,19 @@ fn main() {
             .and_then(Value::as_array)
             .map(|a| a.iter().filter_map(Value::as_u64).collect())
             .unwrap_or_default();
-        let layout = map_get(obj, "layout").and_then(Value::as_text).unwrap_or("?");
+        let layout = map_get(obj, "layout")
+            .and_then(Value::as_text)
+            .unwrap_or("?");
         let parts = map_get(obj, "parts").and_then(Value::as_map).unwrap_or(&[]);
         let dtype = parts
             .first()
             .and_then(|(_, p)| map_get(p, "dtype"))
             .and_then(Value::as_text)
             .unwrap_or("?");
-        println!("{name}: {layout} {dtype} {shape:?} ({} part(s))", parts.len());
+        println!(
+            "{name}: {layout} {dtype} {shape:?} ({} part(s))",
+            parts.len()
+        );
     }
 }
 

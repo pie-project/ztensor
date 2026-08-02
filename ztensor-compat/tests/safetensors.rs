@@ -70,7 +70,10 @@ fn open_and_read() {
     assert_eq!(obj.part("data").unwrap().dtype(), DType::F32);
     assert!(st.attributes().is_some());
 
-    assert_eq!(st.tensor("a.weight").unwrap().bytes().unwrap().into_owned(), a);
+    assert_eq!(
+        st.tensor("a.weight").unwrap().bytes().unwrap().into_owned(),
+        a
+    );
     assert_eq!(st.tensor("b.weight").unwrap().map().unwrap(), &b[..]);
 
     let caps = st.tensor("a.weight").unwrap().caps().unwrap();
@@ -93,10 +96,7 @@ fn dtype_projections() {
     let mask = st.tensor("mask").unwrap().part("data").unwrap();
     assert_eq!((mask.dtype(), mask.logical()), (DType::U8, Some("bool")));
     let fp8 = st.tensor("fp8").unwrap().part("data").unwrap();
-    assert_eq!(
-        (fp8.dtype(), fp8.logical()),
-        (DType::U8, Some("f8_e4m3fn"))
-    );
+    assert_eq!((fp8.dtype(), fp8.logical()), (DType::U8, Some("f8_e4m3fn")));
 }
 
 #[test]
@@ -111,7 +111,11 @@ fn unknown_dtype_refused() {
 #[test]
 fn rejects_bad_geometry() {
     // size mismatch: F32 [2,2] needs 16 bytes
-    let path = st_file("short.safetensors", &[("t", "F32", &[2, 2], &[0u8; 12])], &[]);
+    let path = st_file(
+        "short.safetensors",
+        &[("t", "F32", &[2, 2], &[0u8; 12])],
+        &[],
+    );
     assert!(ztensor_compat::open(&path).is_err());
 
     // overlap / hole: hand-build offsets that don't tile
@@ -140,7 +144,10 @@ fn convert_to_canonical_zt() {
     let b = vec![3u8; 8];
     let st_path = st_file(
         "convert.safetensors",
-        &[("b.weight", "BF16", &[4], &b), ("a.weight", "F32", &[2, 2], &a)],
+        &[
+            ("b.weight", "BF16", &[4], &b),
+            ("a.weight", "F32", &[2, 2], &a),
+        ],
         &[("format", "pt")],
     );
     let st = ztensor_compat::open(&st_path).unwrap();
@@ -159,8 +166,14 @@ fn convert_to_canonical_zt() {
     assert_eq!(fs::read(&zt1).unwrap(), fs::read(&zt2).unwrap());
 
     let r = ztensor::Source::open(&zt1).unwrap();
-    assert_eq!(r.tensor("a.weight").unwrap().bytes().unwrap().into_owned(), a);
-    assert_eq!(r.tensor("b.weight").unwrap().bytes().unwrap().into_owned(), b);
+    assert_eq!(
+        r.tensor("a.weight").unwrap().bytes().unwrap().into_owned(),
+        a
+    );
+    assert_eq!(
+        r.tensor("b.weight").unwrap().bytes().unwrap().into_owned(),
+        b
+    );
     assert!(r.tensor("a.weight").unwrap().verify().unwrap().checked()); // digests added
     assert!(r.attributes().is_some()); // metadata carried over
 

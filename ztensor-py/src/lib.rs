@@ -235,7 +235,12 @@ impl Tensor {
     #[getter]
     fn shape(&self, py: Python<'_>) -> PyResult<Vec<u64>> {
         let source = self.source.bind(py).borrow();
-        Ok(source.get()?.tensor(&self.name).map_err(err)?.shape().to_vec())
+        Ok(source
+            .get()?
+            .tensor(&self.name)
+            .map_err(err)?
+            .shape()
+            .to_vec())
     }
 
     #[getter]
@@ -744,9 +749,8 @@ unsafe extern "C" fn versioned_capsule_destructor(capsule: *mut ffi::PyObject) {
         if ffi::PyCapsule_IsValid(capsule, DLTENSOR_VERSIONED.as_ptr() as *const c_char) == 0 {
             return;
         }
-        let ptr =
-            ffi::PyCapsule_GetPointer(capsule, DLTENSOR_VERSIONED.as_ptr() as *const c_char)
-                as *mut DlManagedTensorVersioned;
+        let ptr = ffi::PyCapsule_GetPointer(capsule, DLTENSOR_VERSIONED.as_ptr() as *const c_char)
+            as *mut DlManagedTensorVersioned;
         if ptr.is_null() {
             return;
         }
@@ -886,15 +890,18 @@ fn py_to_value(v: &Bound<'_, PyAny>) -> PyResult<ztensor::cbor::Value> {
     }
     if let Ok(items) = v.downcast::<PyList>() {
         return Ok(V::Array(
-            items.iter().map(|i| py_to_value(&i)).collect::<PyResult<_>>()?,
+            items
+                .iter()
+                .map(|i| py_to_value(&i))
+                .collect::<PyResult<_>>()?,
         ));
     }
     if let Ok(d) = v.downcast::<PyDict>() {
         let mut entries = Vec::new();
         for (k, val) in d.iter() {
-            let key = k.extract::<String>().map_err(|_| {
-                PyTypeError::new_err("attribute keys must be strings (spec §3.5)")
-            })?;
+            let key = k
+                .extract::<String>()
+                .map_err(|_| PyTypeError::new_err("attribute keys must be strings (spec §3.5)"))?;
             entries.push((V::Text(key), py_to_value(&val)?));
         }
         return Ok(V::Map(entries));
@@ -1017,10 +1024,7 @@ impl Writer {
 
     #[pyo3(signature = (*args))]
     fn __exit__(&mut self, args: &Bound<'_, PyTuple>) -> PyResult<bool> {
-        let failed = args
-            .get_item(0)
-            .map(|e| !e.is_none())
-            .unwrap_or(false);
+        let failed = args.get_item(0).map(|e| !e.is_none()).unwrap_or(false);
         if failed {
             // Leaving a partial file behind because the body raised would be
             // the one thing publishing exists to prevent.
@@ -1042,9 +1046,9 @@ fn open_paths(paths: &Bound<'_, PyAny>, map: bool) -> PyResult<(ztensor::Source,
         let src = options.open(&path).map_err(err)?;
         return Ok((src, path));
     }
-    let list: Vec<String> = paths.extract().map_err(|_| {
-        PyTypeError::new_err("expected a path or a sequence of paths")
-    })?;
+    let list: Vec<String> = paths
+        .extract()
+        .map_err(|_| PyTypeError::new_err("expected a path or a sequence of paths"))?;
     let label = match list.len() {
         0 => "()".to_string(),
         1 => list[0].clone(),

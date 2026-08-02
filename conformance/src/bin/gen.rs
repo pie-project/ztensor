@@ -31,5 +31,8 @@ fn main() {
         fs::write(dir.join(format!("{}.zt", case.name)), &case.bytes).unwrap();
         *n += 1;
     }
-    println!("wrote {n_valid} valid + {n_reject} reject cases to {}", root.display());
+    println!(
+        "wrote {n_valid} valid + {n_reject} reject cases to {}",
+        root.display()
+    );
 }

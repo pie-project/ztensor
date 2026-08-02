@@ -35,7 +35,7 @@ mod gguf {
         b.extend(3u32.to_le_bytes());
         b.extend(2u64.to_le_bytes()); // tensors
         b.extend(1u64.to_le_bytes()); // kvs
-        // kv: general.name = "test"
+                                      // kv: general.name = "test"
         gstr(&mut b, "general.name");
         b.extend(8u32.to_le_bytes());
         gstr(&mut b, "test");
@@ -46,8 +46,8 @@ mod gguf {
         b.extend(2u64.to_le_bytes());
         b.extend(0u32.to_le_bytes()); // F32
         b.extend(0u64.to_le_bytes()); // offset in data section
-        // tensor 1: "quant" q8_0, logical [2, 64] -> ne [64, 2],
-        // 128 elems / 32 per block * 34 = 136 bytes, at offset 32 (aligned)
+                                      // tensor 1: "quant" q8_0, logical [2, 64] -> ne [64, 2],
+                                      // 128 elems / 32 per block * 34 = 136 bytes, at offset 32 (aligned)
         gstr(&mut b, "quant");
         b.extend(2u32.to_le_bytes());
         b.extend(64u64.to_le_bytes());
@@ -74,13 +74,19 @@ mod gguf {
         let dense = g.tensor("dense").unwrap();
         assert_eq!(dense.shape().to_vec(), vec![2, 4]); // reversed from ne
         assert_eq!(dense.part("data").unwrap().dtype(), DType::F32);
-        assert_eq!(g.tensor("dense").unwrap().bytes().unwrap().into_owned(), f32s(&[0.5; 8]));
+        assert_eq!(
+            g.tensor("dense").unwrap().bytes().unwrap().into_owned(),
+            f32s(&[0.5; 8])
+        );
 
         let quant = g.tensor("quant").unwrap();
         assert_eq!(quant.layout(), "gguf.q8_0/1");
         assert_eq!(quant.shape().to_vec(), vec![2, 64]); // logical shape preserved
         assert_eq!(quant.part("data").unwrap().nbytes(), 136);
-        assert_eq!(g.tensor("quant").unwrap().bytes().unwrap().into_owned(), vec![7u8; 136]);
+        assert_eq!(
+            g.tensor("quant").unwrap().bytes().unwrap().into_owned(),
+            vec![7u8; 136]
+        );
 
         assert!(g.attributes().is_some()); // KVs preserved
         assert!(g.tensor("dense").unwrap().caps().unwrap().map);
@@ -99,7 +105,10 @@ mod gguf {
         let _ = needle;
         let path = tmp("badtype.gguf");
         fs::write(&path, &b).unwrap();
-        assert!(matches!(ztensor_compat::open(&path), Err(Error::Unsupported(_))));
+        assert!(matches!(
+            ztensor_compat::open(&path),
+            Err(Error::Unsupported(_))
+        ));
     }
 
     #[test]
@@ -116,7 +125,10 @@ mod gguf {
         let r = ztensor::Source::open(&zt).unwrap();
         let quant = r.get("quant").unwrap();
         assert_eq!(quant.layout(), "gguf.q8_0/1");
-        assert_eq!(r.tensor("quant").unwrap().bytes().unwrap().into_owned(), vec![7u8; 136]);
+        assert_eq!(
+            r.tensor("quant").unwrap().bytes().unwrap().into_owned(),
+            vec![7u8; 136]
+        );
         assert!(r.tensor("quant").unwrap().verify().unwrap().checked());
     }
 }
@@ -178,7 +190,10 @@ mod npz {
         assert!(n.tensor("a").unwrap().caps().unwrap().map);
 
         assert_eq!(n.tensor("b").unwrap().bytes().unwrap().into_owned(), b); // deflated: lazy read
-        assert!(matches!(n.tensor("b").unwrap().map(), Err(Error::Unsupported(_))));
+        assert!(matches!(
+            n.tensor("b").unwrap().map(),
+            Err(Error::Unsupported(_))
+        ));
         assert!(!n.tensor("b").unwrap().caps().unwrap().map);
     }
 
@@ -187,21 +202,39 @@ mod npz {
         // fortran order: reversing the shape would transpose the data
         let path = write_npz(
             "fortran.npz",
-            &[("t", npy_bytes("<f4", "(2, 3)", true, &f32s(&[0.0; 6])), false)],
+            &[(
+                "t",
+                npy_bytes("<f4", "(2, 3)", true, &f32s(&[0.0; 6])),
+                false,
+            )],
         );
-        assert!(matches!(ztensor_compat::open(&path), Err(Error::Unsupported(_))));
+        assert!(matches!(
+            ztensor_compat::open(&path),
+            Err(Error::Unsupported(_))
+        ));
 
         // big-endian descr
         let path = write_npz(
             "be.npz",
-            &[("t", npy_bytes(">f4", "(2,)", false, &f32s(&[0.0; 2])), false)],
+            &[(
+                "t",
+                npy_bytes(">f4", "(2,)", false, &f32s(&[0.0; 2])),
+                false,
+            )],
         );
-        assert!(matches!(ztensor_compat::open(&path), Err(Error::Unsupported(_))));
+        assert!(matches!(
+            ztensor_compat::open(&path),
+            Err(Error::Unsupported(_))
+        ));
 
         // size mismatch
         let path = write_npz(
             "short.npz",
-            &[("t", npy_bytes("<f4", "(4,)", false, &f32s(&[0.0; 2])), false)],
+            &[(
+                "t",
+                npy_bytes("<f4", "(4,)", false, &f32s(&[0.0; 2])),
+                false,
+            )],
         );
         assert!(ztensor_compat::open(&path).is_err());
     }
@@ -241,21 +274,21 @@ mod hdf5 {
         b[32..40].copy_from_slice(&undef); // free space
         b[40..48].copy_from_slice(&368u64.to_le_bytes()); // eof
         b[48..56].copy_from_slice(&undef); // driver info
-        // root symbol table entry @56
+                                           // root symbol table entry @56
         b[72..76].copy_from_slice(&1u32.to_le_bytes()); // cache type: group
         b[80..88].copy_from_slice(&96u64.to_le_bytes()); // btree
         b[88..96].copy_from_slice(&144u64.to_le_bytes()); // heap
-        // group B-tree @96
+                                                          // group B-tree @96
         b[96..100].copy_from_slice(b"TREE");
         b[102..104].copy_from_slice(&1u16.to_le_bytes()); // entries
         b[104..112].copy_from_slice(&undef);
         b[112..120].copy_from_slice(&undef);
         b[128..136].copy_from_slice(&192u64.to_le_bytes()); // SNOD addr
-        // local heap @144
+                                                            // local heap @144
         b[144..148].copy_from_slice(b"HEAP");
         b[152..160].copy_from_slice(&16u64.to_le_bytes()); // data seg size
         b[168..176].copy_from_slice(&176u64.to_le_bytes()); // data seg addr
-        // heap data @176: name "w" at heap offset 8
+                                                            // heap data @176: name "w" at heap offset 8
         b[184] = b'w';
         // SNOD @192
         b[192..196].copy_from_slice(b"SNOD");
@@ -263,12 +296,12 @@ mod hdf5 {
         b[198..200].copy_from_slice(&1u16.to_le_bytes()); // one symbol
         b[200..208].copy_from_slice(&8u64.to_le_bytes()); // link name offset
         b[208..216].copy_from_slice(&248u64.to_le_bytes()); // object header
-        // object header v1 @248
+                                                            // object header v1 @248
         b[248] = 1;
         b[250..252].copy_from_slice(&3u16.to_le_bytes()); // messages
         b[252..256].copy_from_slice(&1u32.to_le_bytes()); // ref count
         b[256..260].copy_from_slice(&88u32.to_le_bytes()); // header size
-        // dataspace message @264: v1, 1 dim of 4
+                                                           // dataspace message @264: v1, 1 dim of 4
         b[264..266].copy_from_slice(&0x0001u16.to_le_bytes());
         b[266..268].copy_from_slice(&16u16.to_le_bytes());
         b[272] = 1; // version
@@ -300,7 +333,10 @@ mod hdf5 {
         let obj = h.tensor("w").unwrap();
         assert_eq!(obj.shape().to_vec(), vec![4]);
         assert_eq!(obj.part("data").unwrap().dtype(), DType::F32);
-        assert_eq!(h.tensor("w").unwrap().bytes().unwrap().into_owned(), f32s(&vals));
+        assert_eq!(
+            h.tensor("w").unwrap().bytes().unwrap().into_owned(),
+            f32s(&vals)
+        );
         assert!(h.tensor("w").unwrap().caps().unwrap().map);
     }
 
@@ -365,7 +401,10 @@ mod onnx {
         fs::write(&path, &model).unwrap();
 
         let o = ztensor_compat::open(&path).unwrap();
-        assert_eq!(o.tensor("h").unwrap().bytes().unwrap().into_owned(), vec![0x00, 0x3c, 0x00, 0x3c]);
+        assert_eq!(
+            o.tensor("h").unwrap().bytes().unwrap().into_owned(),
+            vec![0x00, 0x3c, 0x00, 0x3c]
+        );
     }
 
     #[test]
@@ -376,7 +415,10 @@ mod onnx {
         let model = len_field(7, &graph);
         let path = tmp("external.onnx");
         fs::write(&path, &model).unwrap();
-        assert!(matches!(ztensor_compat::open(&path), Err(Error::Unsupported(_))));
+        assert!(matches!(
+            ztensor_compat::open(&path),
+            Err(Error::Unsupported(_))
+        ));
     }
 }
 
@@ -396,7 +438,10 @@ mod detect {
         w.add("t", [2].to_vec(), DType::U8, &[1, 2]).unwrap();
         w.finish().unwrap();
         let src = ztensor_compat::open(&zt).unwrap();
-        assert_eq!(src.tensor("t").unwrap().bytes().unwrap().into_owned(), vec![1, 2]);
+        assert_eq!(
+            src.tensor("t").unwrap().bytes().unwrap().into_owned(),
+            vec![1, 2]
+        );
 
         // safetensors
         let st = tmp("detect.safetensors");
@@ -406,12 +451,18 @@ mod detect {
         bytes.extend_from_slice(&[3, 4]);
         fs::write(&st, &bytes).unwrap();
         let src = ztensor_compat::open(&st).unwrap();
-        assert_eq!(src.tensor("t").unwrap().bytes().unwrap().into_owned(), vec![3, 4]);
+        assert_eq!(
+            src.tensor("t").unwrap().bytes().unwrap().into_owned(),
+            vec![3, 4]
+        );
 
         // garbage
         let junk = tmp("detect.junk");
         fs::write(&junk, b"not a tensor file at all").unwrap();
-        assert!(matches!(ztensor_compat::open(&junk), Err(Error::Unsupported(_))));
+        assert!(matches!(
+            ztensor_compat::open(&junk),
+            Err(Error::Unsupported(_))
+        ));
     }
 }
 
@@ -430,7 +481,7 @@ mod pt {
         let mut p = vec![0x80, 0x02, 0x7d]; // PROTO 2, EMPTY_DICT
         p.extend([0x8c, 0x01]);
         p.extend(b"w"); // key "w"
-        // GLOBAL torch._utils _rebuild_tensor_v2
+                        // GLOBAL torch._utils _rebuild_tensor_v2
         p.push(0x63);
         p.extend(b"torch._utils\n_rebuild_tensor_v2\n");
         p.push(0x28); // MARK (args)
@@ -450,12 +501,12 @@ mod pt {
             p.push(0x51); // BINPERSID
         }
         p.extend([0x4b, 0x00]); // storage_offset 0
-        // shape tuple
+                                // shape tuple
         for &d in shape {
             p.extend([0x4b, d]);
         }
         p.push(0x86); // TUPLE2
-        // stride tuple
+                      // stride tuple
         for &s in stride {
             p.extend([0x4b, s]);
         }

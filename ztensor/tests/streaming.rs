@@ -113,7 +113,10 @@ fn a_multi_part_object_streams_in_name_order() {
     let src = Source::open(&path).unwrap();
     let tensor = src.tensor("w").unwrap();
     assert_eq!(&*tensor.part("data").unwrap().bytes().unwrap(), &data[..]);
-    assert_eq!(&*tensor.part("scales").unwrap().bytes().unwrap(), &scales[..]);
+    assert_eq!(
+        &*tensor.part("scales").unwrap().bytes().unwrap(),
+        &scales[..]
+    );
     assert!(tensor.part("scales").unwrap().verify().unwrap().checked());
 }
 

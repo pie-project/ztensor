@@ -11,8 +11,8 @@ use xxhash_rust::xxh3::xxh3_64;
 use crate::cbor;
 use crate::error::{Error, Result, Rule};
 use crate::schema::{
-    check_name, Manifest, ALIGN_FLOOR, FOOTER_LEN, MAGIC, MAX_MANIFEST_LEN, MAX_RANK,
-    MIN_FILE_LEN, VERSION,
+    check_name, check_shard_name, Manifest, ALIGN_FLOOR, FOOTER_LEN, MAGIC, MAX_MANIFEST_LEN,
+    MAX_RANK, MIN_FILE_LEN, VERSION,
 };
 use crate::store::Store;
 use crate::vocab::Vocabulary;
@@ -181,29 +181,33 @@ pub(crate) fn read(store: &Store, vocab: &Vocabulary) -> Result<Parsed> {
     })
 }
 
-/// Every metadata rule of §3.6. Returns the local (shard 0) blob ranges,
-/// manifest blob included.
+/// Every metadata rule of §3.6. Returns the blob ranges that live in this
+/// file, manifest blob included.
 pub(crate) fn validate_manifest(
     manifest: &Manifest,
     data_end: u64,
     manifest_blob: (u64, u64),
     vocab: &Vocabulary,
 ) -> Result<Vec<(u64, u64)>> {
-    for (&idx, shard) in &manifest.shards {
+    for (name, shard) in &manifest.shards {
+        check_shard_name(name)?;
         if shard.size < MIN_FILE_LEN {
             return Err(Error::reject(
                 Rule::Schema,
-                format!("shard {idx}: size {} below minimum file size", shard.size),
+                format!(
+                    "shard {name:?}: size {} below minimum file size",
+                    shard.size
+                ),
             ));
         }
     }
 
     // Blob references grouped by the file they live in, for the per-file
-    // identical-or-disjoint check (§2.4 / §3.6 rule 4). Shard 0 also holds
-    // the manifest blob.
-    let mut refs_by_shard: std::collections::BTreeMap<u64, Vec<(u64, u64)>> =
+    // identical-or-disjoint check (§2.4 / §3.6 rule 4). `None` is the
+    // containing file, which also holds the manifest blob.
+    let mut refs_by_shard: std::collections::BTreeMap<Option<&str>, Vec<(u64, u64)>> =
         std::collections::BTreeMap::new();
-    refs_by_shard.insert(0, vec![manifest_blob]);
+    refs_by_shard.insert(None, vec![manifest_blob]);
 
     for (name, obj) in &manifest.objects {
         check_name(name)?;
@@ -217,26 +221,28 @@ pub(crate) fn validate_manifest(
 
         for (pname, part) in &obj.parts {
             check_name(pname)?;
-            let b = part.blob;
-            if b.shard != 0 && !manifest.shards.contains_key(&b.shard) {
-                return Err(Error::reject(
-                    Rule::ShardIndex,
-                    format!("{name:?}/{pname:?}: shard {} not in table", b.shard),
-                ));
-            }
+            let b = &part.blob;
+            let shard = b.shard.as_deref();
             if b.offset % ALIGN_FLOOR != 0 || b.offset < ALIGN_FLOOR {
                 return Err(Error::reject(
                     Rule::BlobAlignment,
                     format!("{name:?}/{pname:?}: offset {} misaligned", b.offset),
                 ));
             }
-            let region_end = if b.shard == 0 {
-                data_end
-            } else {
-                manifest.shards[&b.shard]
+            let region_end = match shard {
+                None => data_end,
+                Some(s) => manifest
+                    .shards
+                    .get(s)
+                    .ok_or_else(|| {
+                        Error::reject(
+                            Rule::ShardRef,
+                            format!("{name:?}/{pname:?}: shard {s:?} not in table"),
+                        )
+                    })?
                     .size
                     .checked_sub(FOOTER_LEN)
-                    .ok_or_else(|| Error::reject(Rule::BlobBounds, "shard smaller than footer"))?
+                    .ok_or_else(|| Error::reject(Rule::BlobBounds, "shard smaller than footer"))?,
             };
             b.offset
                 .checked_add(b.length)
@@ -249,7 +255,7 @@ pub(crate) fn validate_manifest(
                 })?;
             if b.length > 0 {
                 refs_by_shard
-                    .entry(b.shard)
+                    .entry(shard)
                     .or_default()
                     .push((b.offset, b.length));
             }
@@ -283,15 +289,19 @@ pub(crate) fn validate_manifest(
             let (a_off, a_len) = w[0];
             let (b_off, _) = w[1];
             if a_off + a_len > b_off {
+                let where_ = match shard {
+                    None => "this file".to_string(),
+                    Some(s) => format!("shard {s:?}"),
+                };
                 return Err(Error::reject(
                     Rule::BlobOverlap,
                     format!(
-                        "blobs at {a_off} (+{a_len}) and {b_off} in shard {shard} \
+                        "blobs at {a_off} (+{a_len}) and {b_off} in {where_} \
                          partially overlap"
                     ),
                 ));
             }
         }
     }
-    Ok(refs_by_shard.remove(&0).unwrap_or_default())
+    Ok(refs_by_shard.remove(&None).unwrap_or_default())
 }

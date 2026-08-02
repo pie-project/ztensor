@@ -169,7 +169,11 @@ fn parse_tensor(data: &[u8], base: usize) -> Result<TensorInfo> {
         match (field, wire) {
             (1, LEN) => {
                 let (_, b) = pb.bytes()?;
-                let mut sub = Pb { data: b, pos: 0, base: 0 };
+                let mut sub = Pb {
+                    data: b,
+                    pos: 0,
+                    base: 0,
+                };
                 while !sub.done() {
                     dims.push(sub.varint()?);
                 }
@@ -179,7 +183,11 @@ fn parse_tensor(data: &[u8], base: usize) -> Result<TensorInfo> {
             (4, LEN) => f32s.extend_from_slice(pb.bytes()?.1), // packed floats: LE bytes
             (5, LEN) => {
                 let (_, b) = pb.bytes()?;
-                let mut sub = Pb { data: b, pos: 0, base: 0 };
+                let mut sub = Pb {
+                    data: b,
+                    pos: 0,
+                    base: 0,
+                };
                 while !sub.done() {
                     i32s.push(sub.varint()? as u32);
                 }
@@ -187,7 +195,11 @@ fn parse_tensor(data: &[u8], base: usize) -> Result<TensorInfo> {
             (5, VARINT) => i32s.push(pb.varint()? as u32),
             (7, LEN) | (11, LEN) => {
                 let (_, b) = pb.bytes()?;
-                let mut sub = Pb { data: b, pos: 0, base: 0 };
+                let mut sub = Pb {
+                    data: b,
+                    pos: 0,
+                    base: 0,
+                };
                 while !sub.done() {
                     i64s.push(sub.varint()?);
                 }
@@ -411,8 +423,6 @@ pub(crate) fn project(store: &Store) -> Result<Projection> {
     Ok(if converted.is_empty() {
         projection
     } else {
-        projection.with_opaque(Box::new(Typed {
-            buffers: converted,
-        }))
+        projection.with_opaque(Box::new(Typed { buffers: converted }))
     })
 }

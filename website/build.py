@@ -30,10 +30,16 @@ OUT = HERE / "_site"
 
 # Reading order, which is also the sidebar order. `intro` has `slug: /`, so it
 # is the front page.
+#
+# The specification is read from `spec/` rather than copied into `docs/`. It
+# was a copy once, and the copy drifted from the normative text, which is the
+# one kind of staleness a format specification cannot afford.
+SPEC = Path(__file__).parent.parent / "spec" / "ztensor-v2-spec.md"
+
 PAGES = [
     ("intro.md", "Introduction", "index.html"),
     ("guide.md", "Guide", "guide.html"),
-    ("spec.md", "Specification", "spec.html"),
+    (SPEC, "Specification", "spec.html"),
     ("benchmarks.md", "Benchmarks", "benchmarks.html"),
 ]
 
@@ -232,15 +238,24 @@ def build() -> None:
     )
 
     for i, (md_name, title, slug) in enumerate(PAGES):
-        source = FRONTMATTER.sub("", (DOCS / md_name).read_text())
+        path = md_name if isinstance(md_name, Path) else DOCS / md_name
+        source = FRONTMATTER.sub("", path.read_text())
         html = markdown.markdown(
             source,
             extensions=["tables", "fenced_code", "toc", "attr_list", "sane_lists"],
         )
         # Cross-doc links are written as `./other.md`; here they are pages.
+        # A page may be reached by its source filename or by its slug — the
+        # spec is written as `./spec.md` but lives in `spec/` under its own
+        # name — so both spellings resolve.
         for other_md, _, other_slug in PAGES:
-            stem = other_md[:-3]
-            html = re.sub(rf'href="\.?/?{stem}\.md(#[^"]*)?"', rf'href="{other_slug}\1"', html)
+            stems = {Path(other_md).stem, Path(other_slug).stem}
+            for stem in stems:
+                html = re.sub(
+                    rf'href="\.?/?{re.escape(stem)}\.md(#[^"]*)?"',
+                    rf'href="{other_slug}\1"',
+                    html,
+                )
         # The docs are written to be read in the repo, where they sit one
         # directory below `static/`. On the built site they are at the root, so
         # `../static/` would climb out of it.

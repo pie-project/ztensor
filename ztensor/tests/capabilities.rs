@@ -174,11 +174,7 @@ fn no_digest_file() -> PathBuf {
                             (text("dtype"), text("f32")),
                             (
                                 text("blob"),
-                                Value::Array(vec![
-                                    Value::Uint(0),
-                                    Value::Uint(offset),
-                                    Value::Uint(len),
-                                ]),
+                                Value::Array(vec![Value::Uint(offset), Value::Uint(len)]),
                             ),
                         ]),
                     )]),

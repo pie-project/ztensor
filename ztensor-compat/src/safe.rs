@@ -56,7 +56,6 @@ pub fn slice<'a>(what: &str, buf: &'a [u8], offset: u64, length: u64) -> Result<
     Ok(&buf[start..end])
 }
 
-
 /// Caps a file-declared element count against what the remaining bytes can
 /// possibly hold, so `Vec::with_capacity` can never be driven by a lie.
 pub fn capacity(count: u64, min_bytes_per_item: usize, available: usize) -> usize {

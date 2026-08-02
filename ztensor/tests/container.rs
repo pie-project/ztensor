@@ -250,11 +250,7 @@ fn dense_obj(dtype: &str, shape: &[u64], offset: u64, length: u64) -> Value {
                     (text("dtype"), text(dtype)),
                     (
                         text("blob"),
-                        Value::Array(vec![
-                            Value::Uint(0),
-                            Value::Uint(offset),
-                            Value::Uint(length),
-                        ]),
+                        Value::Array(vec![Value::Uint(offset), Value::Uint(length)]),
                     ),
                 ]),
             )]),

@@ -18,8 +18,8 @@ use std::sync::Arc;
 
 use xxhash_rust::xxh3::{xxh3_64, Xxh3};
 
-use crate::cbor::Value;
 use crate::catalog::{Catalog, Entry, Location, PartEntry, Payload};
+use crate::cbor::Value;
 use crate::error::{Error, Result, Rule};
 use crate::schema::{parse_xxh3, DType, Manifest, Shard};
 use crate::store::{Store, StoreId};
@@ -120,22 +120,29 @@ impl Verified {
 // shard resolution
 // =======================================================================
 
-/// Resolves a shard index + identity to a file path. The format itself
-/// contains no names or paths — resolution is entirely the transport's
-/// concern (spec §7.1, Appendix D).
+/// Resolves a shard name + identity to a file path. A name is a label the
+/// producer chose, not a location: turning it into bytes is entirely the
+/// transport's concern (spec §7.1, Appendix D).
+///
+/// A name is constrained by the format to `[A-Za-z0-9._-]`, no leading dot,
+/// at most 64 bytes, so a resolver may use it as a single path component
+/// without sanitizing it.
 pub trait ShardResolver {
-    fn resolve(&self, index: u64, shard: &Shard) -> Result<PathBuf>;
+    fn resolve(&self, name: &str, shard: &Shard) -> Result<PathBuf>;
 }
 
-/// Closures are resolvers: `|index, shard| Ok(path)`.
-impl<F: Fn(u64, &Shard) -> Result<PathBuf>> ShardResolver for F {
-    fn resolve(&self, index: u64, shard: &Shard) -> Result<PathBuf> {
-        self(index, shard)
+/// Closures are resolvers: `|name, shard| Ok(path)`.
+impl<F: Fn(&str, &Shard) -> Result<PathBuf>> ShardResolver for F {
+    fn resolve(&self, name: &str, shard: &Shard) -> Result<PathBuf> {
+        self(name, shard)
     }
 }
 
-/// The positional convention (Appendix D): root `<dir>/<stem>.zt` maps shard
-/// `k` to `<dir>/<stem>-<k as 5 digits>.zt`.
+/// The positional convention (Appendix D): root `<dir>/<stem>.zt` maps a
+/// shard named `n` to `<dir>/<stem>-<n>.zt`.
+///
+/// Naming shards `00001-of-00003` and so on therefore reproduces the file
+/// names checkpoints already ship with.
 pub struct PositionalResolver {
     dir: PathBuf,
     stem: String,
@@ -155,8 +162,8 @@ impl PositionalResolver {
 }
 
 impl ShardResolver for PositionalResolver {
-    fn resolve(&self, index: u64, _shard: &Shard) -> Result<PathBuf> {
-        Ok(self.dir.join(format!("{}-{index:05}.zt", self.stem)))
+    fn resolve(&self, name: &str, _shard: &Shard) -> Result<PathBuf> {
+        Ok(self.dir.join(format!("{}-{name}.zt", self.stem)))
     }
 }
 
@@ -167,9 +174,52 @@ pub struct CasResolver {
 }
 
 impl ShardResolver for CasResolver {
-    fn resolve(&self, _index: u64, shard: &Shard) -> Result<PathBuf> {
+    fn resolve(&self, _name: &str, shard: &Shard) -> Result<PathBuf> {
         let (algo, hex) = shard.digest.split_once(':').unwrap_or(("", ""));
         Ok(self.store.join("blobs").join(algo).join(hex))
+    }
+}
+
+/// Finds shards by identity: scans a directory once and matches each file by
+/// size and whole-file digest, ignoring what anything is called.
+///
+/// This is the resolver for a set whose names nobody agreed on — a directory
+/// someone handed you, files renamed on the way. It is the one convention
+/// that keeps working after a rename, because it never consults a name.
+pub struct DirectoryResolver {
+    by_identity: BTreeMap<(u64, String), PathBuf>,
+}
+
+impl DirectoryResolver {
+    /// Indexes every `.zt` file directly inside `dir`.
+    ///
+    /// Digests are computed eagerly, so this costs one full read of the
+    /// directory's contents. Prefer a cheaper convention when one applies.
+    pub fn scan(dir: impl AsRef<Path>) -> Result<Self> {
+        let mut by_identity = BTreeMap::new();
+        for entry in std::fs::read_dir(dir.as_ref())? {
+            let path = entry?.path();
+            if path.extension().is_some_and(|e| e == "zt") {
+                if let Ok(id) = shard_identity(&path) {
+                    by_identity.insert((id.size, id.digest), path);
+                }
+            }
+        }
+        Ok(Self { by_identity })
+    }
+}
+
+impl ShardResolver for DirectoryResolver {
+    fn resolve(&self, name: &str, shard: &Shard) -> Result<PathBuf> {
+        self.by_identity
+            .get(&(shard.size, shard.digest.clone()))
+            .cloned()
+            .ok_or_else(|| {
+                Error::NotFound(format!(
+                    "shard {name:?} ({} bytes, {}) is not in the scanned directory",
+                    shard.size, shard.digest
+                ))
+            })
     }
 }
 
@@ -248,8 +298,7 @@ impl Options {
         };
 
         let mut stores = vec![root];
-        let mut store_of: BTreeMap<u64, StoreId> = BTreeMap::new();
-        store_of.insert(0, StoreId(0));
+        let mut store_of: BTreeMap<&str, StoreId> = BTreeMap::new();
 
         let positional;
         let resolver: &dyn ShardResolver = match &self.resolver {
@@ -260,14 +309,14 @@ impl Options {
             }
         };
 
-        for (&index, shard) in &manifest.shards {
-            let shard_path = resolver.resolve(index, shard)?;
+        for (name, shard) in &manifest.shards {
+            let shard_path = resolver.resolve(name, shard)?;
             let store = self.open_store(&shard_path, "zt")?;
             if store.len() != shard.size {
                 return Err(Error::reject(
                     Rule::ShardIdentity,
                     format!(
-                        "shard {index}: {} is {} bytes, the root expects {}",
+                        "shard {name:?}: {} is {} bytes, the root expects {}",
                         shard_path.display(),
                         store.len(),
                         shard.size
@@ -277,8 +326,8 @@ impl Options {
             // The two cheap rungs of the ladder at open time: exact size, and
             // a container frame that parses. Digests are Source::verify_shards.
             let parsed = validate::read(&store, &vocab)
-                .map_err(|e| Error::reject(Rule::ShardIdentity, format!("shard {index}: {e}")))?;
-            store_of.insert(index, StoreId(stores.len() as u32));
+                .map_err(|e| Error::reject(Rule::ShardIdentity, format!("shard {name:?}: {e}")))?;
+            store_of.insert(name.as_str(), StoreId(stores.len() as u32));
             stores.push(store.with_occupied(parsed.occupied));
         }
 
@@ -309,18 +358,22 @@ impl Options {
 }
 
 /// Turns a manifest's blob references into addresses.
-fn resolve_manifest(manifest: &Manifest, store_of: &BTreeMap<u64, StoreId>) -> Result<Catalog> {
+fn resolve_manifest(manifest: &Manifest, store_of: &BTreeMap<&str, StoreId>) -> Result<Catalog> {
     let mut catalog = Catalog::new();
     catalog.set_attributes(manifest.attributes.clone());
     for (name, obj) in &manifest.objects {
         let mut parts = BTreeMap::new();
         for (pname, part) in &obj.parts {
-            let store = *store_of.get(&part.blob.shard).ok_or_else(|| {
-                Error::reject(
-                    Rule::ShardIndex,
-                    format!("{name:?}/{pname:?}: shard {} not resolved", part.blob.shard),
-                )
-            })?;
+            // No shard name is the containing file, which is always store 0.
+            let store = match &part.blob.shard {
+                None => StoreId(0),
+                Some(s) => *store_of.get(s.as_str()).ok_or_else(|| {
+                    Error::reject(
+                        Rule::ShardRef,
+                        format!("{name:?}/{pname:?}: shard {s:?} not resolved"),
+                    )
+                })?,
+            };
             let at = Location {
                 store,
                 offset: part.blob.offset,
@@ -579,10 +632,9 @@ impl Source {
         let Some(manifest) = &self.manifest else {
             return Ok(());
         };
-        for (index, shard) in &manifest.shards {
-            // Shards were pushed in shard-index order after the root.
-            let position = manifest.shards.keys().position(|k| k == index).unwrap() + 1;
-            let store = &self.stores[position];
+        for (position, (name, shard)) in manifest.shards.iter().enumerate() {
+            // Shards were pushed in name order after the root, which is 0.
+            let store = &self.stores[position + 1];
             let mut hasher = Xxh3::new();
             let mut at = 0u64;
             while at < store.len() {
@@ -593,7 +645,7 @@ impl Source {
             if hasher.digest() != parse_xxh3(&shard.digest)? {
                 return Err(Error::reject(
                     Rule::ShardIdentity,
-                    format!("shard {index}: digest mismatch"),
+                    format!("shard {name:?}: digest mismatch"),
                 ));
             }
         }
@@ -792,10 +844,7 @@ impl<'a> Part<'a> {
             locate: self.addressable().is_some(),
             evict: self.evictable().is_some(),
             verify: self.entry.digest.is_some(),
-            alignment: self
-                .addressable()
-                .map(|at| at.alignment())
-                .unwrap_or(1),
+            alignment: self.addressable().map(|at| at.alignment()).unwrap_or(1),
         }
     }
 

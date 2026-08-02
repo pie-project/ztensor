@@ -136,8 +136,14 @@ struct Filter {
 }
 
 enum DataLayout {
-    Contiguous { addr: u64, size: u64 },
-    Chunked { btree_addr: u64, chunk_dims: Vec<u32> },
+    Contiguous {
+        addr: u64,
+        size: u64,
+    },
+    Chunked {
+        btree_addr: u64,
+        chunk_dims: Vec<u32>,
+    },
     Unsupported,
 }
 
@@ -258,7 +264,11 @@ fn parse_superblock(data: &[u8], sb: usize) -> Result<(Ctx, u64, u64)> {
         return Err(bad("root symbol table entry is not a cached group"));
     }
     let scratch = root_entry + 2 * o + 8;
-    Ok((ctx, ctx.offset(data, scratch)?, ctx.offset(data, scratch + o)?))
+    Ok((
+        ctx,
+        ctx.offset(data, scratch)?,
+        ctx.offset(data, scratch + o)?,
+    ))
 }
 
 fn heap_data_addr(data: &[u8], ctx: &Ctx, heap_addr: u64) -> Result<u64> {
@@ -294,7 +304,14 @@ impl Walker<'_> {
         Ok(())
     }
 
-    fn group(&mut self, ctx: &Ctx, btree: u64, heap: u64, prefix: &str, depth: usize) -> Result<()> {
+    fn group(
+        &mut self,
+        ctx: &Ctx,
+        btree: u64,
+        heap: u64,
+        prefix: &str,
+        depth: usize,
+    ) -> Result<()> {
         let heap_data = heap_data_addr(self.data, ctx, heap)?;
         self.btree_group(ctx, btree, heap_data, prefix, depth)
     }
@@ -382,7 +399,13 @@ impl Walker<'_> {
                 let heap = ctx.offset(data, scratch + ctx.o)?;
                 self.group(ctx, btree, heap, &full, depth + 1)?;
             } else {
-                match parse_object_header(data, ctx, at(data, header_addr, 16)?, depth + 1, &mut self.budget)? {
+                match parse_object_header(
+                    data,
+                    ctx,
+                    at(data, header_addr, 16)?,
+                    depth + 1,
+                    &mut self.budget,
+                )? {
                     Header::Group(btree, heap) => self.group(ctx, btree, heap, &full, depth + 1)?,
                     Header::Dataset(info) => self.dataset(ctx, &full, info)?,
                     Header::Skip => self.skipped.push(full),
@@ -573,10 +596,7 @@ fn parse_messages(
             MSG_DATA_LAYOUT => st.layout = Some(parse_layout(data, ctx, body)?),
             MSG_FILTER_PIPELINE => st.filters = parse_filters(data, body)?,
             MSG_SYMBOL_TABLE => {
-                st.group = Some((
-                    ctx.offset(data, body)?,
-                    ctx.offset(data, body + ctx.o)?,
-                ));
+                st.group = Some((ctx.offset(data, body)?, ctx.offset(data, body + ctx.o)?));
             }
             MSG_CONTINUATION => {
                 let cont = ctx.offset(data, body)?;
@@ -618,7 +638,9 @@ fn parse_dataspace(data: &[u8], pos: usize) -> Result<Vec<u64>> {
         2 => pos + 4,
         v => return Err(Error::Unsupported(format!("hdf5: dataspace v{v}"))),
     };
-    (0..ndims).map(|i| u64_at(data, dims_start + i * 8)).collect()
+    (0..ndims)
+        .map(|i| u64_at(data, dims_start + i * 8))
+        .collect()
 }
 
 /// Returns `Ok(None)` for datatype classes without a projection (strings,
@@ -780,7 +802,15 @@ fn collect_chunks(
             let child = ctx.offset(data, keys_start + key_size + i * (key_size + ctx.o))?;
             if !ctx.is_undef(child) {
                 collect_chunks(
-                    data, ctx, child, ndims, shape, element_size, depth + 1, out, budget,
+                    data,
+                    ctx,
+                    child,
+                    ndims,
+                    shape,
+                    element_size,
+                    depth + 1,
+                    out,
+                    budget,
                 )?;
             }
         } else {
@@ -840,8 +870,7 @@ fn apply_filters(
         bytes = match filter.id {
             FILTER_DEFLATE => {
                 let mut out = Vec::new();
-                let mut decoder =
-                    flate2::read::ZlibDecoder::new(bytes.as_slice()).take(limit + 1);
+                let mut decoder = flate2::read::ZlibDecoder::new(bytes.as_slice()).take(limit + 1);
                 decoder
                     .read_to_end(&mut out)
                     .map_err(|e| bad(format!("deflate: {e}")))?;
@@ -894,7 +923,17 @@ fn read_chunked(
 
     let mut chunks = Vec::new();
     let mut budget = MAX_NODES;
-    collect_chunks(data, ctx, btree, ndims, shape, esize, 0, &mut chunks, &mut budget)?;
+    collect_chunks(
+        data,
+        ctx,
+        btree,
+        ndims,
+        shape,
+        esize,
+        0,
+        &mut chunks,
+        &mut budget,
+    )?;
 
     // Every chunk must cover a distinct grid cell, and together they must
     // cover the whole dataset. Without this a missing chunk would surface
@@ -927,12 +966,18 @@ fn read_chunked(
 
     let mut out = vec![0u8; total];
     for chunk in &chunks {
-        let raw = crate::safe::slice("hdf5 chunk", data, chunk.file_addr, chunk.size as u64)?
-            .to_vec();
+        let raw =
+            crate::safe::slice("hdf5 chunk", data, chunk.file_addr, chunk.size as u64)?.to_vec();
         let bytes = if filters.is_empty() {
             raw
         } else {
-            apply_filters(raw, filters, chunk.filter_mask, esize, MAX_CHUNK.min(total_u64))?
+            apply_filters(
+                raw,
+                filters,
+                chunk.filter_mask,
+                esize,
+                MAX_CHUNK.min(total_u64),
+            )?
         };
 
         let offset = crate::safe::to_usize("hdf5 chunk offset", chunk.linear_offset)?;
@@ -975,7 +1020,10 @@ fn copy_chunk(
                     .ok_or_else(|| bad("chunk stride overflows"))?;
             }
             src = src
-                .checked_add(c.checked_mul(cstride).ok_or_else(|| bad("chunk stride overflows"))?)
+                .checked_add(
+                    c.checked_mul(cstride)
+                        .ok_or_else(|| bad("chunk stride overflows"))?,
+                )
                 .ok_or_else(|| bad("chunk stride overflows"))?;
             let mut dstride = 1u64;
             for &s in &shape[d + 1..ndims] {

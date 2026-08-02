@@ -291,7 +291,10 @@ fn project_bytes(buf: &[u8], file_len: u64) -> Result<Projection> {
         let byte_size = crate::safe::mul("gguf tensor size", elems / epb, block_bytes)?;
         let abs = crate::safe::add("gguf tensor offset", data_start, info.offset)?;
         if crate::safe::add("gguf tensor", abs, byte_size)? > file_len {
-            return Err(bad(format!("tensor {:?} extends past end of file", info.name)));
+            return Err(bad(format!(
+                "tensor {:?} extends past end of file",
+                info.name
+            )));
         }
 
         let (layout, attrs, dtype) = match element_dtype(info.type_id) {
@@ -299,10 +302,7 @@ fn project_bytes(buf: &[u8], file_len: u64) -> Result<Projection> {
             None => (
                 format!("gguf.{type_name}/1"),
                 Some(Value::Map(vec![
-                    (
-                        Value::Text("elems_per_block".into()),
-                        Value::Uint(epb),
-                    ),
+                    (Value::Text("elems_per_block".into()), Value::Uint(epb)),
                     (Value::Text("block_bytes".into()), Value::Uint(block_bytes)),
                 ])),
                 DType::U8,

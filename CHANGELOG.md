@@ -3,14 +3,49 @@
 Notable changes to the `ztensor`, `ztensor-compat` and `ztensor-cli` crates
 and the `ztensor` Python package, which are versioned together.
 
-The **file format is versioned separately** and did not change in this
-release. `.zt` is still container version 2, spec Draft 2.
+The **file format is versioned separately**: `.zt` is container version 2,
+spec **Draft 3**.
 
 ## 2.0.0
 
-A rewrite of the crate surface. No change to the format: every `.zt` file
-written by a 1.x release reads unchanged, and the conformance corpus and the
-canonical-determinism tests are the evidence.
+A rewrite of the crate surface, and one change to the L1 manifest schema made
+before the format's first release.
+
+### Format (spec Draft 3)
+
+Draft 3 changes how a part addresses bytes in another file. The footer version
+integer is unchanged at `2`, because Draft 2 was never released: no `.zt` file
+in the wild uses the old spelling.
+
+- **Shards are named, not numbered.** The shard table is keyed by a name
+  chosen by the producer rather than by an integer index. It was the only
+  integer-keyed map in a manifest whose objects, parts and attributes are all
+  keyed by name — and an index has to be renumbered when a shard is added or
+  dropped, while a name does not. A name is a **label**: identity is still
+  `(size, digest)`, still never a path.
+- **A name is constrained** to `[A-Za-z0-9._-]`, no leading `.`, at most 64
+  bytes. The conventional resolvers spend a name as a single path component,
+  so the format is what prevents a manifest from expressing `../../etc/passwd`
+  — rather than every consumer having to sanitize it, and one of them
+  eventually forgetting.
+- **A blob reference is `[offset, length]`**, and the shard moved to its own
+  optional `shard` field. Absent means the containing file. Every other
+  optional part field already works this way, and it means a single-file
+  manifest — the overwhelmingly common case — never mentions sharding at all.
+  The spec claimed the single file was the degenerate case; now the bytes say
+  so too.
+
+`Writer::add_shard` takes a name and returns `()`; `Writer::link` takes a name;
+`ShardResolver::resolve` receives `&str`; `BlobRef::shard` is
+`Option<String>`. The positional convention resolves a shard named `n` to
+`<stem>-<n>.zt`, so naming shards `00001-of-00003` reproduces the file names
+checkpoints already ship with.
+
+### Added
+
+- **`DirectoryResolver`** scans a directory and matches shards by size and
+  whole-file digest, ignoring names entirely — the one convention that keeps
+  working after an arbitrary rename.
 
 ### Changed
 

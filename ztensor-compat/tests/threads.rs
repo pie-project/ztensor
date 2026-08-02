@@ -80,7 +80,10 @@ fn threads_contending_on_an_opaque_reader_all_get_the_right_bytes() {
                     let bytes = src.tensor(name).unwrap().bytes().unwrap();
                     assert_eq!(bytes.len(), *len, "{name}: wrong length");
                     assert!(bytes.iter().all(|b| b == byte), "{name}: wrong content");
-                    assert!(!bytes.is_mapped(), "{name}: a deflated entry cannot be mapped");
+                    assert!(
+                        !bytes.is_mapped(),
+                        "{name}: a deflated entry cannot be mapped"
+                    );
                 }
             }
         }));
@@ -124,8 +127,8 @@ fn one_hot_tensor_read_by_everyone_at_once() {
 fn mapped_and_opaque_tensors_are_read_side_by_side() {
     let path = tmp("threads-mixed.zt");
     let mut zip = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
-    let stored = zip::write::SimpleFileOptions::default()
-        .compression_method(zip::CompressionMethod::Stored);
+    let stored =
+        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
     let deflated = zip::write::SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated);
     zip.start_file("plain.npy", stored).unwrap();

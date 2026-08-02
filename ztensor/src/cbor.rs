@@ -70,9 +70,7 @@ impl Value {
 ///
 /// Attributes are always a map of text keys (spec §3.1/§3.5), so this is the
 /// shape every caller needs and the one they should not have to spell out.
-pub fn map<K: Into<String>, V: Into<Value>>(
-    entries: impl IntoIterator<Item = (K, V)>,
-) -> Value {
+pub fn map<K: Into<String>, V: Into<Value>>(entries: impl IntoIterator<Item = (K, V)>) -> Value {
     Value::Map(
         entries
             .into_iter()
@@ -547,13 +545,19 @@ mod tests {
         let bytes = [0xa2, 0x61, b'b', 0x00, 0x61, b'a', 0x00];
         assert!(matches!(
             decode(&bytes),
-            Err(Error::Reject { rule: Rule::CborDeterminism, .. })
+            Err(Error::Reject {
+                rule: Rule::CborDeterminism,
+                ..
+            })
         ));
         // {"a": 0, "a": 0}
         let bytes = [0xa2, 0x61, b'a', 0x00, 0x61, b'a', 0x00];
         assert!(matches!(
             decode(&bytes),
-            Err(Error::Reject { rule: Rule::CborDuplicateKey, .. })
+            Err(Error::Reject {
+                rule: Rule::CborDuplicateKey,
+                ..
+            })
         ));
     }
 
@@ -585,7 +589,12 @@ mod tests {
     /// exabytes. Every length here is bounded by what remains to be read.
     #[test]
     fn a_declared_length_is_checked_before_it_is_believed() {
-        for major in [2u8 /* bytes */, 3 /* text */, 4 /* array */, 5 /* map */] {
+        for major in [
+            2u8, /* bytes */
+            3,   /* text */
+            4,   /* array */
+            5,   /* map */
+        ] {
             for declared in [u64::MAX, 1 << 40, 1 << 20, 300, 25] {
                 // The shortest head for this length, so the determinism rule
                 // cannot fire first and the length check is what is on trial.
@@ -623,7 +632,10 @@ mod tests {
         ];
         assert!(matches!(
             decode(&input),
-            Err(Error::Reject { rule: Rule::CborDeterminism, .. })
+            Err(Error::Reject {
+                rule: Rule::CborDeterminism,
+                ..
+            })
         ));
     }
 }

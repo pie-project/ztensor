@@ -1,6 +1,6 @@
 # zTensor Container Format, Version 2
 
-**Status:** Draft 2 · **File extension:** `.zt` · **Footer version integer:** `2`
+**Status:** Draft 3 · **File extension:** `.zt` · **Footer version integer:** `2`
 
 ---
 
@@ -172,7 +172,7 @@ Shown in CBOR diagnostic notation:
 ```text
 {
   "attributes": { ... },            ; optional, arbitrary file metadata
-  "shards": { 1: {...}, 2: {...} }, ; optional, see §7; absent ⇒ single file
+  "shards": { "00001": {...}, ... }, ; optional, see §7; absent ⇒ single file
   "objects": {                      ; required in a root manifest
     "layer1.weight": <object>,
     "layer1.bias":   <object>
@@ -183,7 +183,7 @@ Shown in CBOR diagnostic notation:
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `objects` | map | Yes | Named object definitions. |
-| `shards` | map | No | Shard table (§7), keyed by integer shard index ≥ 1. When absent, the file is self-contained. |
+| `shards` | map | No | Shard table (§7), keyed by shard name. When absent, the file is self-contained and no part carries a `shard` field. |
 | `attributes` | map | No | Arbitrary key-value metadata for the whole file. |
 
 ### 3.3 Object
@@ -210,7 +210,8 @@ Shown in CBOR diagnostic notation:
 {
   "dtype": "bf16",
   "type": "...",                    ; optional logical type, §4.2
-  "blob": [0, 65536, 33554432],     ; [shard, offset, length]
+  "blob": [65536, 33554432],        ; [offset, length]
+  "shard": "00001",                 ; optional; absent ⇒ this file, §7.1
   "encoding": "zt.zstd-seekable/1", ; optional; absent ⇒ raw
   "decoded_length": 67108864,       ; required iff encoding is present
   "digest": "xxh3:9f2c..."          ; optional, over decoded bytes
@@ -221,7 +222,8 @@ Shown in CBOR diagnostic notation:
 | --- | --- | --- | --- |
 | `dtype` | string | Yes | Storage type, one of the 12 primitives (§4.1). |
 | `type` | string | No | Logical type (§4.2). Absent ⇒ logical type equals `dtype`. |
-| `blob` | `[u64, u64, u64]` | Yes | `[shard_index, offset, length]`. Shard index `0` always refers to the containing file; the reference is subject to §2.4 within the referenced shard. A blob is contiguous within a single file and never spans shards. |
+| `blob` | `[u64, u64]` | Yes | `[offset, length]` within the file named by `shard`. The reference is subject to §2.4 within that file. A blob is contiguous within a single file and never spans shards. Readers MUST reject an array of any other length. |
+| `shard` | string | No | Names an entry in the manifest's shard table (§7.1). **Absent ⇒ the containing file**, which is why a single-file manifest never mentions sharding at all. Readers MUST reject a name the table does not declare. |
 | `encoding` | string | No | Absent ⇒ raw bytes. Otherwise a namespaced encoding profile id (§5.3). |
 | `decoded_length` | u64 | Cond. | Decoded byte count. MUST be present iff `encoding` is present. Readers MUST verify the decoded output is exactly this long. |
 | `digest` | string | No | `"<algorithm>:<lowercase hex>"`, computed over the **decoded** (logical) bytes. Registered algorithms: `xxh3` (64-bit), `sha256`. |
@@ -252,13 +254,13 @@ A reader MUST reject a file if any of the following fail:
 2. Manifest: bounds (`manifest_offset`/`length` inside the file, off the
    footer), size cap, XXH3-64 match, deterministic-CBOR parse, no duplicate
    keys.
-3. Every blob reference: shard index is `0` or a key of `shards`,
-   `offset % 4096 == 0`,
-   `offset >= 4096`, `offset + length` within the referenced shard's data
-   region.
-4. Blob references are grouped by the file they point into (shard index)
-   and checked per group: within each file, references — plus the manifest
-   blob for shard 0 — are pairwise identical-or-disjoint; any partial
+3. Every blob reference: `blob` has exactly two elements; `shard`, if
+   present, is a key of `shards`; `offset % 4096 == 0`; `offset >= 4096`;
+   `offset + length` within the referenced file's data region.
+4. Blob references are grouped by the file they point into (the `shard`
+   name, or its absence) and checked per group: within each file,
+   references — plus the manifest blob for the containing file — are
+   pairwise identical-or-disjoint; any partial
    overlap is rejected (§2.4). References into a shard are checked from the
    root manifest alone, without opening the shard.
 5. Layout rules for every object whose layout the reader interprets
@@ -467,30 +469,40 @@ the blob reference, with the single file as the degenerate case.
 
 ```text
 "shards": {
-  1: { "size": 8589934592, "digest": "sha256:..." },
-  2: { "size": 8589934592, "digest": "sha256:..." }
+  "00001-of-00002": { "size": 8589934592, "digest": "sha256:..." },
+  "00002-of-00002": { "size": 8589934592, "digest": "sha256:..." }
 }
 ```
 
-- The shard table is a CBOR map from **unsigned integer shard index** to a
-  shard identity. Keys MUST be ≥ 1.
-- Shard index `0` denotes the containing file by definition and MUST NOT
-  appear as a key. It needs no identity entry: its manifest is protected by
-  the footer hash, and a whole-file self-digest would be circular.
+- The shard table is a CBOR map from **shard name** to a shard identity.
+- A shard name MUST be a non-empty text string of at most 64 bytes, made only
+  of `A`–`Z`, `a`–`z`, `0`–`9`, `.`, `_`, `-`, and MUST NOT begin with `.`.
+  Readers MUST reject a name outside this set, and MUST reject a key that is
+  not text.
+- The containing file is **never** a key: it is named by the absence of a
+  `shard` field on a part (§3.4). It needs no identity entry either, since its
+  manifest is protected by the footer hash and a whole-file self-digest would
+  be circular.
 - Every entry MUST carry `size` (exact file size in bytes) and `digest`
-  (whole-file). Because the table contains no names, the digest **is** the
-  shard's identity; it is therefore required, not optional. `xxh3` is the
-  minimum; distribution files intended for signing SHOULD use `sha256`
-  (§6.4).
-- When `shards` is absent, every blob reference MUST use shard index `0`.
+  (whole-file). Because a name is only a label, the digest **is** the shard's
+  identity; it is therefore required, not optional. `xxh3` is the minimum;
+  distribution files intended for signing SHOULD use `sha256` (§6.4).
+- When `shards` is absent, no part may carry a `shard` field.
 
-The manifest stores shard **identity**, never shard **location**: no file
-names, paths, or URLs appear anywhere in the format. A file name is owned by
-the filesystem, is not verifiable by the format, and would couple model
-identity to naming (a rename would change or break the model). Resolution of
-a shard index to bytes is entirely the transport's concern (Appendix D gives
-the RECOMMENDED conventions); because identity lives in the content, a
-resolver can always fall back to locating a file by size and digest.
+A shard name is a **label**, not a **location**: no paths or URLs appear
+anywhere in the format, and a name carries no promise about what any file is
+called. A path is owned by the filesystem, is not verifiable by the format,
+and would couple model identity to naming — a rename would change or break
+the model. Resolving a name to bytes is entirely the transport's concern
+(Appendix D gives the RECOMMENDED conventions); because identity lives in the
+content, a resolver can always ignore the name and locate a file by size and
+digest instead.
+
+The character set is narrow for one reason: the conventional resolvers spend
+a name as a single path component. Constraining it here means that a manifest
+cannot express a path such as `../../etc/passwd`, so no consumer has to
+sanitize one — an obligation that, spread across every implementation, would
+eventually be missed by one of them.
 
 ### 7.2 Data shards
 
@@ -627,16 +639,21 @@ profile gives the `scales` part one `f8_e8m0` element per 32-element block).
 
 ## Appendix B — Recommended conventions (non-normative)
 
-- **Shard resolution (positional):** for a root file named `<stem>.zt`,
-  shard index `k` resolves to a sibling file `<stem>-<k as 5 digits>.zt`
-  (root `model.zt` → shards `model-00001.zt`, `model-00002.zt`, ...).
-  Renaming the family together (`model` → `llama`) keeps it resolvable.
+- **Shard resolution (positional):** for a root file named `<stem>.zt`, a
+  shard named `n` resolves to a sibling file `<stem>-<n>.zt` (root
+  `model.zt` with shards named `00001`, `00002` → `model-00001.zt`,
+  `model-00002.zt`). Naming shards after the segment they already carry in
+  distribution — `00001-of-00003` — reproduces existing file names exactly.
+  Renaming the family together (`model` → `llama`) keeps it resolvable. The
+  name is safe to use as a path component unchanged, because §7.1 admits no
+  separators or `..`.
 - **Shard resolution (content-addressed):** a store MAY resolve by digest
   instead, e.g. `blobs/xxh3/<hex>`; shard references are then
   location-independent, which also enables sharing shards across models.
-- **Shard resolution (fallback):** if a convention lookup fails, a resolver
-  MAY scan the directory for a file matching the expected size, then verify
-  its digest.
+- **Shard resolution (by identity):** a resolver MAY ignore names entirely
+  and scan a directory, matching each file by size and whole-file digest.
+  This is the only convention that survives arbitrary renaming, and it is
+  the recommended fallback when a convention lookup fails.
 - **Writer alignment flag:** reference writer default is canonical placement
   (64 KiB). A `--align` option may lower placement to any multiple of 4096
   for space-sensitive, non-distribution files (e.g., small adapters).

@@ -11,7 +11,7 @@ use std::path::PathBuf;
 
 use xxhash_rust::xxh3::xxh3_64;
 use ztensor::{
-    schema, shard_identity, BlobRef, DataShardWriter, DType, Error, Rule, Shard, ShardResolver,
+    schema, shard_identity, BlobRef, DType, DataShardWriter, Error, Rule, Shard, ShardResolver,
     Source, Writer,
 };
 
@@ -22,7 +22,7 @@ fn tmp(name: &str) -> PathBuf {
 /// Opens a root whose shards all live at one known path.
 fn open_with_shard_at(root: &PathBuf, shard_path: PathBuf) -> ztensor::Result<Source> {
     Source::options()
-        .resolver(move |_index: u64, _shard: &Shard| Ok(shard_path.clone()))
+        .resolver(move |_name: &str, _shard: &Shard| Ok(shard_path.clone()))
         .open(root)
 }
 
@@ -31,7 +31,9 @@ fn open_with_shard_at(root: &PathBuf, shard_path: PathBuf) -> ztensor::Result<So
 #[test]
 fn lora_overlay() {
     let base_path = tmp("overlay-base.zt");
-    let base_data: Vec<u8> = (0..1024u32).flat_map(|i| (i as f32).to_le_bytes()).collect();
+    let base_data: Vec<u8> = (0..1024u32)
+        .flat_map(|i| (i as f32).to_le_bytes())
+        .collect();
     let mut w = Writer::create(&base_path).unwrap();
     w.add("base.weight", [32u64, 32], DType::F32, &base_data)
         .unwrap();
@@ -53,9 +55,8 @@ fn lora_overlay() {
         .align(4096)
         .create(&lora_path)
         .unwrap();
-    let shard = w.add_shard(&base).unwrap();
-    assert_eq!(shard, 1);
-    w.link("base.weight", &base_object, shard).unwrap();
+    w.add_shard("base", &base).unwrap();
+    w.link("base.weight", &base_object, "base").unwrap();
     w.add("base.weight.lora_a", [64u64], DType::F32, &delta)
         .unwrap();
     w.finish().unwrap();
@@ -63,7 +64,10 @@ fn lora_overlay() {
     let model = open_with_shard_at(&lora_path, base_path.clone()).unwrap();
 
     // Cross-file borrow: the base tensor's bytes come from base.zt.
-    assert_eq!(model.tensor("base.weight").unwrap().map().unwrap(), &base_data[..]);
+    assert_eq!(
+        model.tensor("base.weight").unwrap().map().unwrap(),
+        &base_data[..]
+    );
     assert_eq!(
         &*model.tensor("base.weight.lora_a").unwrap().bytes().unwrap(),
         &delta[..]
@@ -72,7 +76,11 @@ fn lora_overlay() {
     // The address names the file it came from, which is the whole point of a
     // store id: two tensors of one model, two different files.
     let base_at = model.tensor("base.weight").unwrap().locate().unwrap();
-    let lora_at = model.tensor("base.weight.lora_a").unwrap().locate().unwrap();
+    let lora_at = model
+        .tensor("base.weight.lora_a")
+        .unwrap()
+        .locate()
+        .unwrap();
     assert_ne!(base_at.store, lora_at.store);
     assert_eq!(model.store(base_at.store).path(), base_path);
     assert_eq!(model.store(lora_at.store).path(), lora_path);
@@ -87,7 +95,12 @@ fn lora_overlay() {
     }
 
     // The digest carried over by link verifies against the base's bytes.
-    assert!(model.tensor("base.weight").unwrap().verify().unwrap().checked());
+    assert!(model
+        .tensor("base.weight")
+        .unwrap()
+        .verify()
+        .unwrap()
+        .checked());
     model.verify_shards().unwrap();
 }
 
@@ -110,12 +123,12 @@ fn positional_shards() {
         .align(4096)
         .create(&root_path)
         .unwrap();
-    let idx = w.add_shard(&identity).unwrap();
+    w.add_shard("00001", &identity).unwrap();
     let part = schema::Part {
         dtype: DType::U8,
         logical: None,
         blob: BlobRef {
-            shard: idx,
+            shard: Some("00001".into()),
             offset,
             length: payload.len() as u64,
         },
@@ -143,7 +156,10 @@ fn positional_shards() {
     // refused rather than assumed safe.
     let caps = model.tensor("t").unwrap().caps().unwrap();
     assert!(caps.map && caps.locate);
-    assert!(!caps.evict, "a manifest-less shard cannot prove exclusivity");
+    assert!(
+        !caps.evict,
+        "a manifest-less shard cannot prove exclusivity"
+    );
 }
 
 #[test]
@@ -168,8 +184,8 @@ fn shard_size_mismatch_rejected() {
         .align(4096)
         .create(&root_path)
         .unwrap();
-    let idx = w.add_shard(&identity).unwrap();
-    w.link("t", &base_object, idx).unwrap();
+    w.add_shard("base", &identity).unwrap();
+    w.link("t", &base_object, "base").unwrap();
     w.finish().unwrap();
 
     let err = open_with_shard_at(&root_path, base_path).unwrap_err();
@@ -203,8 +219,8 @@ fn shard_digest_mismatch_caught_by_deep_verify() {
         .align(4096)
         .create(&root_path)
         .unwrap();
-    let idx = w.add_shard(&identity).unwrap();
-    w.link("t", &base_object, idx).unwrap();
+    w.add_shard("base", &identity).unwrap();
+    w.link("t", &base_object, "base").unwrap();
     w.finish().unwrap();
 
     // The cheap rungs pass: the size is right and the frame parses.
@@ -219,10 +235,13 @@ fn shard_digest_mismatch_caught_by_deep_verify() {
 fn canonical_is_single_file() {
     let mut w = Writer::create(tmp("canon-shard.zt")).unwrap();
     let err = w
-        .add_shard(&Shard {
-            size: 4096,
-            digest: "xxh3:0011223344556677".into(),
-        })
+        .add_shard(
+            "base",
+            &Shard {
+                size: 4096,
+                digest: "xxh3:0011223344556677".into(),
+            },
+        )
         .unwrap_err();
     assert!(matches!(err, Error::InvalidInput(_)));
 }
@@ -238,6 +257,106 @@ fn a_single_file_is_the_degenerate_case() {
     model.verify_shards().unwrap(); // vacuous
 }
 
+/// A name is a label, so the resolver is free to ignore it and match on
+/// identity instead — which is the only thing that survives a rename.
+#[test]
+fn shards_found_by_identity_after_a_rename() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("byid");
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+
+    let base_path = dir.join("original-name.zt");
+    let mut w = Writer::create(&base_path).unwrap();
+    w.add("t", [4u64], DType::U8, &[1, 2, 3, 4]).unwrap();
+    w.finish().unwrap();
+    let identity = shard_identity(&base_path).unwrap();
+    let base_object = Source::open(&base_path)
+        .unwrap()
+        .manifest()
+        .unwrap()
+        .object("t")
+        .unwrap()
+        .clone();
+
+    let root_path = dir.join("root.zt");
+    let mut w = Writer::options()
+        .canonical(false)
+        .align(4096)
+        .create(&root_path)
+        .unwrap();
+    w.add_shard("weights", &identity).unwrap();
+    w.link("t", &base_object, "weights").unwrap();
+    w.finish().unwrap();
+
+    // Rename the shard: no convention that consults a name can find it now.
+    let renamed = dir.join("something-else-entirely.zt");
+    fs::rename(&base_path, &renamed).unwrap();
+    assert!(Source::open(&root_path).is_err(), "positional must miss it");
+
+    let model = Source::options()
+        .resolver(ztensor::DirectoryResolver::scan(&dir).unwrap())
+        .open(&root_path)
+        .unwrap();
+    assert_eq!(&*model.tensor("t").unwrap().bytes().unwrap(), &[1, 2, 3, 4]);
+    assert_eq!(
+        model
+            .store(model.tensor("t").unwrap().locate().unwrap().store)
+            .path(),
+        renamed
+    );
+    model.verify_shards().unwrap();
+}
+
+/// The names a producer may choose are constrained so that a resolver can
+/// spend one as a path component without sanitizing it first.
+#[test]
+fn a_shard_name_cannot_be_a_path() {
+    let identity = Shard {
+        size: 1 << 20,
+        digest: "xxh3:0011223344556677".into(),
+    };
+    for name in [
+        "../etc/passwd",
+        "sub/dir",
+        "",
+        ".hidden",
+        "a b",
+        &"x".repeat(65),
+    ] {
+        let mut w = Writer::options()
+            .canonical(false)
+            .create(tmp("badname.zt"))
+            .unwrap();
+        let err = w.add_shard(name, &identity).unwrap_err();
+        assert_eq!(err.rule(), Some(Rule::ShardName), "{name:?} was accepted");
+        w.abandon();
+    }
+}
+
+/// Registering the same name twice is fine if it means the same file, and an
+/// error if it does not — silently keeping one of two identities would make
+/// the manifest a claim nobody checked.
+#[test]
+fn a_name_means_one_shard() {
+    let identity = Shard {
+        size: 1 << 20,
+        digest: "xxh3:0011223344556677".into(),
+    };
+    let mut w = Writer::options()
+        .canonical(false)
+        .create(tmp("dupname.zt"))
+        .unwrap();
+    w.add_shard("base", &identity).unwrap();
+    w.add_shard("base", &identity).unwrap();
+
+    let other = Shard {
+        size: 1 << 21,
+        digest: "xxh3:8899aabbccddeeff".into(),
+    };
+    assert!(w.add_shard("base", &other).is_err());
+    w.abandon();
+}
+
 #[test]
 fn resolver_trait_objects() {
     // The CAS path shape (no file IO — just the mapping).
@@ -248,6 +367,6 @@ fn resolver_trait_objects() {
         size: 4096,
         digest: "xxh3:00ff00ff00ff00ff".into(),
     };
-    let path = cas.resolve(7, &shard).unwrap();
+    let path = cas.resolve("anything", &shard).unwrap();
     assert_eq!(path, PathBuf::from("/store/blobs/xxh3/00ff00ff00ff00ff"));
 }

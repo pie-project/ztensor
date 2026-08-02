@@ -45,7 +45,10 @@ pub fn read(tensor: &Tensor<'_>) -> Result<Csr> {
     let idx_part = tensor.part("indices")?;
     let idx_dtype = idx_part.dtype();
     let values_part = tensor.part("values")?;
-    let (dtype, logical) = (values_part.dtype(), values_part.logical().map(str::to_string));
+    let (dtype, logical) = (
+        values_part.dtype(),
+        values_part.logical().map(str::to_string),
+    );
 
     let indices = widen(&idx_part.bytes()?, idx_dtype);
     let indptr = widen(&tensor.part("indptr")?.bytes()?, idx_dtype);

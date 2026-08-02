@@ -26,7 +26,10 @@ pub enum Rule {
     BlobAlignment,
     BlobBounds,
     BlobOverlap,
-    ShardIndex,
+    /// A part names a shard the manifest's table does not declare.
+    ShardRef,
+    /// A shard name is outside the character set of spec §7.1.
+    ShardName,
     LayoutRule,
     /// Data-level violation of a layout profile (e.g., CSR indptr rules).
     LayoutData,
@@ -44,7 +47,10 @@ pub enum Rule {
 #[non_exhaustive]
 pub enum Error {
     /// The file violates a MUST of the spec and was rejected.
-    Reject { rule: Rule, detail: String },
+    Reject {
+        rule: Rule,
+        detail: String,
+    },
     /// The named tensor or part does not exist.
     NotFound(String),
     /// The file is valid, but uses vocabulary or requires a capability this

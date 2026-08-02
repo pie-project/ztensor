@@ -36,9 +36,8 @@ fn run(case: &conformance::Case) {
         Op::View(..) | Op::Verify(..) | Op::ReadCsr(..) => {
             let path = tmp(&format!("case-{name}.zt"));
             fs::write(&path, &case.bytes).unwrap();
-            let source = Source::open(&path).unwrap_or_else(|e| {
-                panic!("{name}: this case must open cleanly, got {e}")
-            });
+            let source = Source::open(&path)
+                .unwrap_or_else(|e| panic!("{name}: this case must open cleanly, got {e}"));
             let result = match case.op {
                 Op::View(obj, part) => source
                     .tensor(obj)
@@ -50,10 +49,7 @@ fn run(case: &conformance::Case) {
                     .and_then(|t| t.part(part))
                     .and_then(|p| p.verify())
                     .map(|_| ()),
-                Op::ReadCsr(obj) => source
-                    .tensor(obj)
-                    .and_then(|t| csr::read(&t))
-                    .map(|_| ()),
+                Op::ReadCsr(obj) => source.tensor(obj).and_then(|t| csr::read(&t)).map(|_| ()),
                 Op::Open => unreachable!(),
             };
             match (&case.expect, result) {
@@ -140,7 +136,9 @@ fn mutation_smoke() {
                 let other = &bases[(rng() as usize) % bases.len()];
                 let at = (rng() as usize) % bytes.len();
                 let from = (rng() as usize) % other.len();
-                let n = ((rng() as usize) % 64).min(bytes.len() - at).min(other.len() - from);
+                let n = ((rng() as usize) % 64)
+                    .min(bytes.len() - at)
+                    .min(other.len() - from);
                 bytes[at..at + n].copy_from_slice(&other[from..from + n]);
             }
         }

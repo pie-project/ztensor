@@ -86,10 +86,13 @@ for the registry.
 
 ## One model, several files
 
-A blob reference begins with a shard index, so a manifest can address bytes
-in files other than its own. That is all sharding is — and because the
-shard table records **size and digest rather than a name**, moving or
-renaming the files cannot break or silently change a model.
+A part may name a shard, so a manifest can address bytes in files other than
+its own. That is all sharding is. A part that names none lives here, which is
+why a single-file model never mentions sharding at all — the one file is the
+degenerate case, not a special case.
+
+The name is only a label. What the table records is **size and digest**, so
+moving or renaming the files cannot break or silently change a model.
 
 ![A root manifest naming shards by size and digest; the shards are containers with no manifest of their own](../static/diagrams/sharding.svg)
 

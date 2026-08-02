@@ -21,9 +21,9 @@ use xxhash_rust::xxh3::{xxh3_128, xxh3_64, Xxh3};
 use crate::cbor;
 use crate::error::{Error, Result};
 use crate::schema::{
-    check_attributes, check_digest, check_name, BlobRef, DType, Manifest, Object, Part, Shard,
-    ALIGN_CANONICAL, ALIGN_FLOOR, FOOTER_LEN, MAGIC, MAX_MANIFEST_LEN, MAX_RANK, MIN_FILE_LEN,
-    VERSION,
+    check_attributes, check_digest, check_name, check_shard_name, BlobRef, DType, Manifest, Object,
+    Part, Shard, ALIGN_CANONICAL, ALIGN_FLOOR, FOOTER_LEN, MAGIC, MAX_MANIFEST_LEN, MAX_RANK,
+    MIN_FILE_LEN, VERSION,
 };
 use crate::source::Source;
 use crate::vocab::Vocabulary;
@@ -242,19 +242,26 @@ impl Writer {
         }
     }
 
-    /// Registers an external shard identity and returns its index (≥ 1).
+    /// Registers an external shard under `name`.
+    ///
+    /// The name is a label you choose, and the only thing parts will use to
+    /// refer to this shard; it never appears on disk as a path. It must match
+    /// `[A-Za-z0-9._-]`, not start with `.`, and fit in 64 bytes (spec §7.1),
+    /// so that a resolver can spend it as a path component safely.
     ///
     /// The identity is one value, and the two things that produce it —
     /// [`DataShardWriter::finish`] and
     /// [`shard_identity`](crate::shard_identity) — hand back exactly this.
     /// Canonical form is single-file (spec §6.3), so this needs
     /// `.canonical(false)`.
-    pub fn add_shard(&mut self, shard: &Shard) -> Result<u64> {
+    pub fn add_shard(&mut self, name: impl Into<String>, shard: &Shard) -> Result<()> {
         if self.canonical {
             return Err(Error::InvalidInput(
                 "canonical form is single-file; add .canonical(false)".into(),
             ));
         }
+        let name = name.into();
+        check_shard_name(&name)?;
         check_digest(&shard.digest).map_err(invalid)?;
         if shard.size < MIN_FILE_LEN {
             return Err(Error::InvalidInput(format!(
@@ -262,20 +269,21 @@ impl Writer {
                 shard.size
             )));
         }
-        let index = self
-            .manifest
-            .shards
-            .last_key_value()
-            .map(|(&k, _)| k + 1)
-            .unwrap_or(1);
-        self.manifest.shards.insert(index, shard.clone());
-        Ok(index)
+        if let Some(existing) = self.manifest.shards.get(&name) {
+            if existing != shard {
+                return Err(Error::InvalidInput(format!(
+                    "shard {name:?} is already registered with a different identity"
+                )));
+            }
+        }
+        self.manifest.shards.insert(name, shard.clone());
+        Ok(())
     }
 
     /// Overlay convenience: references every part of `object` (taken from
-    /// another file's manifest) through registered shard `shard`, writing
-    /// nothing. Parts must be local in the source manifest.
-    pub fn link(&mut self, name: impl Into<String>, object: &Object, shard: u64) -> Result<()> {
+    /// another file's manifest) through the shard registered as `shard`,
+    /// writing nothing. Parts must be local in the source manifest.
+    pub fn link(&mut self, name: impl Into<String>, object: &Object, shard: &str) -> Result<()> {
         let name = name.into();
         let mut builder = self
             .object(&name)
@@ -285,13 +293,13 @@ impl Writer {
             builder = builder.attributes(attrs.clone());
         }
         for (pname, part) in &object.parts {
-            if part.blob.shard != 0 {
+            if part.blob.shard.is_some() {
                 return Err(Error::InvalidInput(format!(
                     "part {pname:?} is itself a foreign reference; only local parts can be linked"
                 )));
             }
             let mut linked = part.clone();
-            linked.blob.shard = shard;
+            linked.blob.shard = Some(shard.to_string());
             builder = builder.part(pname).external(linked);
         }
         builder.add()
@@ -772,7 +780,7 @@ impl<'w, 'd> ObjectBuilder<'w, 'd> {
                     dtype,
                     logical: logical.clone(),
                     blob: BlobRef {
-                        shard: 0,
+                        shard: None,
                         offset: 0,
                         length: *length,
                     },
@@ -800,14 +808,18 @@ impl<'w, 'd> ObjectBuilder<'w, 'd> {
                             // the rare path, and holding every encoded payload
                             // for a whole checkpoint is the thing to avoid.
                             let stored = profile.encode(data)?;
-                            (stored.len() as u64, Some(id.clone()), Some(data.len() as u64))
+                            (
+                                stored.len() as u64,
+                                Some(id.clone()),
+                                Some(data.len() as u64),
+                            )
                         }
                     };
                     Part {
                         dtype,
                         logical: logical.clone(),
                         blob: BlobRef {
-                            shard: 0,
+                            shard: None,
                             offset: 0,
                             length,
                         },
@@ -842,7 +854,10 @@ impl<'w, 'd> ObjectBuilder<'w, 'd> {
     /// Writes the object. Every part must have bytes or be external.
     pub fn add(mut self) -> Result<()> {
         let (mut object, drafts) = self.build()?;
-        if drafts.iter().any(|d| matches!(d.source, Source_::Length(_))) {
+        if drafts
+            .iter()
+            .any(|d| matches!(d.source, Source_::Length(_)))
+        {
             return Err(Error::InvalidInput(format!(
                 "object {:?} declares a streamed part; end with .stream() instead of .add()",
                 self.name
@@ -909,11 +924,15 @@ impl<'w, 'd> ObjectBuilder<'w, 'd> {
 }
 
 fn validate_external(manifest: &Manifest, pname: &str, part: &Part) -> Result<()> {
-    let b = part.blob;
-    let shard = manifest.shards.get(&b.shard).ok_or_else(|| {
+    let b = &part.blob;
+    let Some(sname) = &b.shard else {
+        return Err(Error::InvalidInput(format!(
+            "part {pname:?} is an external reference but names no shard"
+        )));
+    };
+    let shard = manifest.shards.get(sname).ok_or_else(|| {
         Error::InvalidInput(format!(
-            "part {pname:?} references unregistered shard {}",
-            b.shard
+            "part {pname:?} references unregistered shard {sname:?}"
         ))
     })?;
     if !b.offset.is_multiple_of(ALIGN_FLOOR) || b.offset < ALIGN_FLOOR {
@@ -923,10 +942,12 @@ fn validate_external(manifest: &Manifest, pname: &str, part: &Part) -> Result<()
         )));
     }
     let region_end = shard.size - FOOTER_LEN;
-    if b.offset.checked_add(b.length).is_none_or(|e| e > region_end) {
+    if b.offset
+        .checked_add(b.length)
+        .is_none_or(|e| e > region_end)
+    {
         return Err(Error::InvalidInput(format!(
-            "part {pname:?}: blob outside shard {}'s data region",
-            b.shard
+            "part {pname:?}: blob outside shard {sname:?}'s data region"
         )));
     }
     if let Some(d) = &part.digest {

@@ -132,25 +132,34 @@ is opt-in.
 
 ## Sharded models and overlays
 
-A multi-file model is one root manifest plus data shards. Shard identity is
-`(size, digest)` — **never a file name**, so renaming a model cannot break or
-change it.
+A multi-file model is one root manifest plus data shards. The root names each
+shard, but a name is only a label: identity is `(size, digest)`, so renaming a
+model cannot break or change it.
 
 ```rust
 let model = ztensor::Source::open("model.zt")?;   // positional resolver
 ```
 
-Because a blob reference names a shard, a file can reference another model's
-blobs. That is how an overlay works: a LoRA stores only its deltas and points
-at the base model's tensors.
+A resolver turns a name into bytes, and can ignore the name entirely:
+
+```rust
+// Match on size and digest instead — the one convention that survives a rename.
+let model = ztensor::Source::options()
+    .resolver(ztensor::DirectoryResolver::scan("checkpoint/")?)
+    .open("checkpoint/model.zt")?;
+```
+
+Because a part may name a shard, a file can reference another model's blobs.
+That is how an overlay works: a LoRA stores only its deltas and points at the
+base model's tensors.
 
 ```rust
 let base = ztensor::Source::open("base.zt")?;
 let object = base.manifest().unwrap().object("base.weight")?.clone();
 
 let mut w = ztensor::Writer::options().canonical(false).align(4096).create("lora.zt")?;
-let shard = w.add_shard(&ztensor::shard_identity("base.zt")?)?;
-w.link("base.weight", &object, shard)?;
+w.add_shard("base", &ztensor::shard_identity("base.zt")?)?;
+w.link("base.weight", &object, "base")?;
 w.add("base.weight.lora_a", [64u64], DType::F32, &delta)?;
 w.finish()?;
 ```

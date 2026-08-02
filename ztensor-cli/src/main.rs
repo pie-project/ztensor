@@ -119,11 +119,15 @@ fn ls(path: &Path) -> Result<ExitCode, Error> {
                 manifest.shards.len()
             );
             let resolver = ztensor::PositionalResolver::for_root(path);
-            for (&idx, shard) in &manifest.shards {
-                let expected = ztensor::ShardResolver::resolve(&resolver, idx, shard)
+            for (name, shard) in &manifest.shards {
+                let expected = ztensor::ShardResolver::resolve(&resolver, name, shard)
                     .map(|p| p.display().to_string())
                     .unwrap_or_default();
-                println!("  {idx}: {expected}  {}  {}", human(shard.size), shard.digest);
+                println!(
+                    "  {name}: {expected}  {}  {}",
+                    human(shard.size),
+                    shard.digest
+                );
             }
         }
         return Ok(ExitCode::SUCCESS);

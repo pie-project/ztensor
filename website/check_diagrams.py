@@ -12,6 +12,11 @@ Both of these have happened, and neither is visible in the source:
    ones. A band drawn after the text that overflowed into it will quietly hide
    that text, which looks like the text was never there.
 
+3. **Text running into text.** The code listings are assembled from runs
+   placed at computed x positions, so editing one run's content without
+   moving the next leaves them overlapping — two strings printed on top of
+   each other, which reads as garbage rather than as a mistake.
+
 Widths here are deliberate overestimates, so a figure that passes has room on
 the widest font a reader is likely to have.
 
@@ -42,7 +47,7 @@ def boxes(source: str):
             width = len(body) * size * (MONO_EM if 'class="mono' in el else SANS_EM)
             anchor = (re.search(r'text-anchor="(\w+)"', el) or [None, "start"])[1]
             left = x if anchor == "start" else (x - width if anchor == "end" else x - width / 2)
-            texts.append((pos, left, y - size * 0.78, left + width, y + size * 0.22, body))
+            texts.append((pos, left, y - size * 0.78, left + width, y + size * 0.22, body, anchor, y))
         elif 'fill="none"' not in el:
             try:
                 x = float(re.search(r'\bx="([-\d.]+)"', el).group(1))
@@ -63,13 +68,28 @@ def check(path: str) -> list[str]:
     vw, vh = (float(v) for v in view.groups())
     texts, shapes = boxes(source)
     found = []
-    for pos, x0, y0, x1, y1, body in texts:
+    for pos, x0, y0, x1, y1, body, _, _ in texts:
         if x1 > vw - EDGE or y1 > vh - EDGE or x0 < 0 or y0 < 0:
             found.append(f"{path}: runs past the frame — {body[:44]!r}")
         for spos, sx0, sy0, sx1, sy1 in shapes:
             if spos > pos and x0 < sx1 and x1 > sx0 and y0 < sy1 and y1 > sy0:
                 found.append(f"{path}: hidden behind a later shape — {body[:44]!r}")
                 break
+
+    # Runs sharing a baseline are one line of text; consecutive ones must not
+    # collide. Only left-anchored runs take part — a centred or right-anchored
+    # label is positioned against something else, not against its neighbour.
+    lines = {}
+    for _, x0, _, x1, _, body, anchor, base in texts:
+        if anchor == "start":
+            lines.setdefault(base, []).append((x0, x1, body))
+    for base, runs in sorted(lines.items()):
+        runs.sort()
+        for (_, end, body), (next_start, _, next_body) in zip(runs, runs[1:]):
+            if end > next_start + 0.5:
+                found.append(
+                    f"{path}: {body[:28]!r} runs into {next_body[:28]!r} at y={base}"
+                )
     return found
 
 

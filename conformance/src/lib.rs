@@ -66,10 +66,33 @@ fn uints(ns: &[u64]) -> Value {
     Value::Array(ns.iter().map(|&n| Value::Uint(n)).collect())
 }
 
-fn part(dtype: &str, blob: [u64; 3], extra: Vec<(&str, Value)>) -> Value {
+fn part(dtype: &str, blob: [u64; 2], extra: Vec<(&str, Value)>) -> Value {
     let mut fields = vec![("dtype", text(dtype)), ("blob", uints(&blob))];
     fields.extend(extra);
     vmap(fields)
+}
+
+/// A part whose bytes live in the shard named `shard`.
+fn part_in(shard: &str, dtype: &str, blob: [u64; 2], extra: Vec<(&str, Value)>) -> Value {
+    let mut fields = vec![("dtype", text(dtype)), ("blob", uints(&blob))];
+    fields.extend(extra);
+    fields.push(("shard", text(shard)));
+    vmap(fields)
+}
+
+/// A shard table entry keyed by name.
+fn shard_table(entries: Vec<(&str, u64, &str)>) -> Value {
+    Value::Map(
+        entries
+            .into_iter()
+            .map(|(name, size, digest)| {
+                (
+                    text(name),
+                    vmap(vec![("size", Value::Uint(size)), ("digest", text(digest))]),
+                )
+            })
+            .collect(),
+    )
 }
 
 fn object(shape: &[u64], layout: &str, parts: Vec<(&str, Value)>) -> Value {
@@ -81,7 +104,11 @@ fn object(shape: &[u64], layout: &str, parts: Vec<(&str, Value)>) -> Value {
 }
 
 fn dense(dtype: &str, shape: &[u64], offset: u64, length: u64) -> Value {
-    object(shape, "dense", vec![("data", part(dtype, [0, offset, length], vec![]))])
+    object(
+        shape,
+        "dense",
+        vec![("data", part(dtype, [offset, length], vec![]))],
+    )
 }
 
 fn manifest(objects: Vec<(&str, Value)>) -> Value {
@@ -95,7 +122,11 @@ pub fn assemble_raw(data_end: u64, manifest_bytes: &[u8]) -> Vec<u8> {
     let m_off = data_end.max(8).div_ceil(4096) * 4096;
     let mut bytes = vec![0xabu8; m_off as usize];
     bytes[..8].copy_from_slice(&MAGIC);
-    for b in bytes.iter_mut().take(m_off as usize).skip(data_end as usize) {
+    for b in bytes
+        .iter_mut()
+        .take(m_off as usize)
+        .skip(data_end as usize)
+    {
         *b = 0; // padding after the data region is zero
     }
     bytes.extend_from_slice(manifest_bytes);
@@ -137,9 +168,9 @@ fn csr_file(indices: &[u64], indptr: &[u64]) -> Vec<u8> {
             &[2, 3],
             "zt.sparse_csr/1",
             vec![
-                ("indices", part("u64", [0, 4096, 24], vec![])),
-                ("indptr", part("u64", [0, 8192, 24], vec![])),
-                ("values", part("f32", [0, 12288, 12], vec![])),
+                ("indices", part("u64", [4096, 24], vec![])),
+                ("indptr", part("u64", [8192, 24], vec![])),
+                ("values", part("f32", [12288, 12], vec![])),
             ],
         ),
     )]);
@@ -195,7 +226,8 @@ pub fn all_cases() -> Vec<Case> {
         "canonical-basic",
         written(|w| {
             w.add("a.bias", [4u64], DType::F32, &[1u8; 16]).unwrap();
-            w.add("a.weight", [2u64, 4], DType::BF16, &[2u8; 16]).unwrap();
+            w.add("a.weight", [2u64, 4], DType::BF16, &[2u8; 16])
+                .unwrap();
             w.add("tied", [2u64, 4], DType::BF16, &[2u8; 16]).unwrap();
         }),
         Expect::Valid,
@@ -237,8 +269,8 @@ pub fn all_cases() -> Vec<Case> {
                     &[64],
                     "x.custom/1",
                     vec![
-                        ("data", part("u8", [0, 4096, 32], vec![])),
-                        ("scales", part("u8", [0, 8192, 104], vec![])),
+                        ("data", part("u8", [4096, 32], vec![])),
+                        ("scales", part("u8", [8192, 104], vec![])),
                     ],
                 ),
             )]),
@@ -254,7 +286,10 @@ pub fn all_cases() -> Vec<Case> {
                 object(
                     &[999],
                     "dense",
-                    vec![("data", part("u8", [0, 4096, 8], vec![("type", text("x.future/1"))]))],
+                    vec![(
+                        "data",
+                        part("u8", [4096, 8], vec![("type", text("x.future/1"))]),
+                    )],
                 ),
             )]),
         ),
@@ -270,7 +305,10 @@ pub fn all_cases() -> Vec<Case> {
                 object(
                     &[5],
                     "dense",
-                    vec![("data", part("u8", [0, 4096, 3], vec![("type", text("f4_e2m1"))]))],
+                    vec![(
+                        "data",
+                        part("u8", [4096, 3], vec![("type", text("f4_e2m1"))]),
+                    )],
                 ),
             )]),
         ),
@@ -288,19 +326,13 @@ pub fn all_cases() -> Vec<Case> {
                         object(
                             &[8],
                             "dense",
-                            vec![("data", part("u8", [1, 4096, 8], vec![]))],
+                            vec![("data", part_in("base", "u8", [4096, 8], vec![]))],
                         ),
                     )]),
                 ),
                 (
                     text("shards"),
-                    Value::Map(vec![(
-                        Value::Uint(1),
-                        vmap(vec![
-                            ("size", Value::Uint(1 << 20)),
-                            ("digest", text("xxh3:00112233445566aa")),
-                        ]),
-                    )]),
+                    shard_table(vec![("base", 1 << 20, "xxh3:00112233445566aa")]),
                 ),
             ]),
         ),
@@ -355,7 +387,7 @@ pub fn all_cases() -> Vec<Case> {
                     "dense",
                     vec![(
                         "data",
-                        part("u8", [0, 4096, 8], vec![("digest", text(&filler_digest(8)))]),
+                        part("u8", [4096, 8], vec![("digest", text(&filler_digest(8)))]),
                     )],
                 ),
             )]),
@@ -376,7 +408,7 @@ pub fn all_cases() -> Vec<Case> {
                         "data",
                         part(
                             "u8",
-                            [0, 4096, 8],
+                            [4096, 8],
                             vec![("digest", text("xxh3:0000000000000000"))],
                         ),
                     )],
@@ -399,7 +431,7 @@ pub fn all_cases() -> Vec<Case> {
                         "data",
                         part(
                             "u8",
-                            [0, 4096, 5],
+                            [4096, 5],
                             vec![
                                 ("encoding", text("x.z/1")),
                                 ("decoded_length", Value::Uint(8)),
@@ -421,18 +453,16 @@ pub fn all_cases() -> Vec<Case> {
                     text("objects"),
                     vmap(vec![(
                         "t",
-                        object(&[8], "dense", vec![("data", part("u8", [1, 4096, 8], vec![]))]),
+                        object(
+                            &[8],
+                            "dense",
+                            vec![("data", part_in("base", "u8", [4096, 8], vec![]))],
+                        ),
                     )]),
                 ),
                 (
                     text("shards"),
-                    Value::Map(vec![(
-                        Value::Uint(1),
-                        vmap(vec![
-                            ("size", Value::Uint(1 << 20)),
-                            ("digest", text("xxh3:00112233445566aa")),
-                        ]),
-                    )]),
+                    shard_table(vec![("base", 1 << 20, "xxh3:00112233445566aa")]),
                 ),
             ]),
         ),
@@ -483,8 +513,11 @@ pub fn all_cases() -> Vec<Case> {
         "manifest-hash-mismatch",
         {
             let bytes = minimal();
-            let m_off =
-                u64::from_le_bytes(bytes[minimal_len - 40..minimal_len - 32].try_into().unwrap());
+            let m_off = u64::from_le_bytes(
+                bytes[minimal_len - 40..minimal_len - 32]
+                    .try_into()
+                    .unwrap(),
+            );
             patched(bytes, m_off as usize, &[0xff])
         },
         Expect::Reject(Rule::ManifestHash),
@@ -564,7 +597,10 @@ pub fn all_cases() -> Vec<Case> {
                 object(
                     &[8],
                     "dense",
-                    vec![("data", vmap(vec![("dtype", text("u8")), ("blob", uints(&[0, 4096]))]))],
+                    vec![(
+                        "data",
+                        vmap(vec![("dtype", text("u8")), ("blob", uints(&[4096]))]),
+                    )],
                 ),
             )]),
         ),
@@ -579,7 +615,10 @@ pub fn all_cases() -> Vec<Case> {
                 object(
                     &[8],
                     "dense",
-                    vec![("data", part("u8", [0, 4096, 8], vec![("encoding", text("x.z/1"))]))],
+                    vec![(
+                        "data",
+                        part("u8", [4096, 8], vec![("encoding", text("x.z/1"))]),
+                    )],
                 ),
             )]),
         ),
@@ -594,7 +633,7 @@ pub fn all_cases() -> Vec<Case> {
                 object(
                     &[2],
                     "dense",
-                    vec![("data", part("f32", [0, 4096, 8], vec![("type", text("bool"))]))],
+                    vec![("data", part("f32", [4096, 8], vec![("type", text("bool"))]))],
                 ),
             )]),
         ),
@@ -611,7 +650,11 @@ pub fn all_cases() -> Vec<Case> {
                     "dense",
                     vec![(
                         "data",
-                        part("u8", [0, 4096, 8], vec![("digest", text("xxh3:00FF00FF00FF00FF"))]),
+                        part(
+                            "u8",
+                            [4096, 8],
+                            vec![("digest", text("xxh3:00FF00FF00FF00FF"))],
+                        ),
                     )],
                 ),
             )]),
@@ -619,7 +662,7 @@ pub fn all_cases() -> Vec<Case> {
         Expect::Reject(Rule::Schema),
     ));
     cases.push(Case::open(
-        "shard-table-key-zero",
+        "shard-table-key-not-text",
         assemble(
             8,
             &Value::Map(vec![
@@ -627,7 +670,7 @@ pub fn all_cases() -> Vec<Case> {
                 (
                     text("shards"),
                     Value::Map(vec![(
-                        Value::Uint(0),
+                        Value::Uint(1),
                         vmap(vec![
                             ("size", Value::Uint(1 << 20)),
                             ("digest", text("xxh3:00112233445566aa")),
@@ -636,18 +679,95 @@ pub fn all_cases() -> Vec<Case> {
                 ),
             ]),
         ),
-        Expect::Reject(Rule::ShardIndex),
+        Expect::Reject(Rule::Schema),
     ));
+    // A name is spent as a path component by the conventional resolvers, so
+    // the format is what stops it from being a path.
+    for (case, name) in [
+        ("shard-name-traversal", "../etc/passwd"),
+        ("shard-name-separator", "sub/dir"),
+        ("shard-name-empty", ""),
+        ("shard-name-leading-dot", ".hidden"),
+    ] {
+        cases.push(Case::open(
+            case,
+            assemble(
+                8,
+                &Value::Map(vec![
+                    (text("objects"), vmap(vec![])),
+                    (
+                        text("shards"),
+                        shard_table(vec![(name, 1 << 20, "xxh3:00112233445566aa")]),
+                    ),
+                ]),
+            ),
+            Expect::Reject(Rule::ShardName),
+        ));
+    }
     cases.push(Case::open(
         "shard-ref-not-in-table",
         assemble(
             8,
             &manifest(vec![(
                 "t",
-                object(&[8], "dense", vec![("data", part("u8", [7, 4096, 8], vec![]))]),
+                object(
+                    &[8],
+                    "dense",
+                    vec![("data", part_in("base", "u8", [4096, 8], vec![]))],
+                ),
             )]),
         ),
-        Expect::Reject(Rule::ShardIndex),
+        Expect::Reject(Rule::ShardRef),
+    ));
+    cases.push(Case::open(
+        "blob-array-with-three-elements",
+        assemble(
+            8,
+            &manifest(vec![(
+                "t",
+                object(
+                    &[8],
+                    "dense",
+                    vec![(
+                        "data",
+                        vmap(vec![("dtype", text("u8")), ("blob", uints(&[0, 4096, 8]))]),
+                    )],
+                ),
+            )]),
+        ),
+        Expect::Reject(Rule::Schema),
+    ));
+    // A shard table does not make every reference foreign: a root that keeps
+    // some tensors and borrows others says so by saying nothing.
+    cases.push(Case::open(
+        "local-and-foreign-parts-together",
+        assemble(
+            8192,
+            &Value::Map(vec![
+                (
+                    text("objects"),
+                    vmap(vec![
+                        (
+                            "here",
+                            object(&[8], "dense", vec![("data", part("u8", [4096, 8], vec![]))]),
+                        ),
+                        (
+                            "there",
+                            object(
+                                &[8],
+                                "dense",
+                                vec![("data", part_in("base", "u8", [4096, 8], vec![]))],
+                            ),
+                        ),
+                    ]),
+                ),
+                (
+                    text("shards"),
+                    shard_table(vec![("base", 1 << 20, "xxh3:00112233445566aa")]),
+                ),
+            ]),
+        ),
+        Expect::Valid,
     ));
 
     // ---- reject: attributes ------------------------------------------
@@ -668,7 +788,10 @@ pub fn all_cases() -> Vec<Case> {
         assemble(
             8,
             &Value::Map(vec![
-                (text("attributes"), Value::Map(vec![(text(""), Value::Null)])),
+                (
+                    text("attributes"),
+                    Value::Map(vec![(text(""), Value::Null)]),
+                ),
                 (text("objects"), Value::Map(vec![])),
             ]),
         ),
@@ -714,7 +837,7 @@ pub fn all_cases() -> Vec<Case> {
                     (text("attributes"), Value::Uint(1)),
                     (
                         text("parts"),
-                        vmap(vec![("data", part("u8", [0, 4096, 8], vec![]))]),
+                        vmap(vec![("data", part("u8", [4096, 8], vec![]))]),
                     ),
                 ]),
             )]),
@@ -736,7 +859,7 @@ pub fn all_cases() -> Vec<Case> {
                             object(
                                 &[2048],
                                 "dense",
-                                vec![("data", part("f32", [1, 4096, 8192], vec![]))],
+                                vec![("data", part_in("base", "f32", [4096, 8192], vec![]))],
                             ),
                         ),
                         (
@@ -744,20 +867,14 @@ pub fn all_cases() -> Vec<Case> {
                             object(
                                 &[2],
                                 "dense",
-                                vec![("data", part("f32", [1, 8192, 8], vec![]))],
+                                vec![("data", part_in("base", "f32", [8192, 8], vec![]))],
                             ),
                         ),
                     ]),
                 ),
                 (
                     text("shards"),
-                    Value::Map(vec![(
-                        Value::Uint(1),
-                        vmap(vec![
-                            ("size", Value::Uint(1 << 20)),
-                            ("digest", text("xxh3:00112233445566aa")),
-                        ]),
-                    )]),
+                    shard_table(vec![("base", 1 << 20, "xxh3:00112233445566aa")]),
                 ),
             ]),
         ),
@@ -774,7 +891,7 @@ pub fn all_cases() -> Vec<Case> {
                 object(
                     &[8],
                     "dense",
-                    vec![("data", part("u8", [0, 4096, 8], vec![("type", text("bool"))]))],
+                    vec![("data", part("u8", [4096, 8], vec![("type", text("bool"))]))],
                 ),
             )]),
         ),
@@ -793,7 +910,7 @@ pub fn all_cases() -> Vec<Case> {
                     "dense",
                     vec![(
                         "data",
-                        part("u8", [0, 4096, 3], vec![("type", text("f4_e2m1"))]),
+                        part("u8", [4096, 3], vec![("type", text("f4_e2m1"))]),
                     )],
                 ),
             )]),
@@ -813,14 +930,18 @@ pub fn all_cases() -> Vec<Case> {
         assemble(4104, &manifest(vec![("a\0b", dense("u8", &[8], 4096, 8))])),
         Expect::Reject(Rule::Name),
     ));
-    cases.push(Case::open("name-too-long", {
-        let long = "n".repeat(1025);
-        let m = Value::Map(vec![(
-            text("objects"),
-            Value::Map(vec![(text(&long), dense("u8", &[8], 4096, 8))]),
-        )]);
-        assemble(4104, &m)
-    }, Expect::Reject(Rule::Name)));
+    cases.push(Case::open(
+        "name-too-long",
+        {
+            let long = "n".repeat(1025);
+            let m = Value::Map(vec![(
+                text("objects"),
+                Value::Map(vec![(text(&long), dense("u8", &[8], 4096, 8))]),
+            )]);
+            assemble(4104, &m)
+        },
+        Expect::Reject(Rule::Name),
+    ));
     cases.push(Case::open(
         "shape-rank-65",
         assemble(
@@ -909,8 +1030,8 @@ pub fn all_cases() -> Vec<Case> {
                     &[2, 3],
                     "zt.sparse_csr/1",
                     vec![
-                        ("indices", part("u64", [0, 4096, 24], vec![])),
-                        ("values", part("f32", [0, 8192, 12], vec![])),
+                        ("indices", part("u64", [4096, 24], vec![])),
+                        ("values", part("f32", [8192, 12], vec![])),
                     ],
                 ),
             )]),
@@ -927,9 +1048,9 @@ pub fn all_cases() -> Vec<Case> {
                     &[2, 3],
                     "zt.sparse_csr/1",
                     vec![
-                        ("indices", part("i64", [0, 4096, 24], vec![])),
-                        ("indptr", part("i64", [0, 8192, 24], vec![])),
-                        ("values", part("f32", [0, 12288, 12], vec![])),
+                        ("indices", part("i64", [4096, 24], vec![])),
+                        ("indptr", part("i64", [8192, 24], vec![])),
+                        ("values", part("f32", [12288, 12], vec![])),
                     ],
                 ),
             )]),
@@ -946,9 +1067,9 @@ pub fn all_cases() -> Vec<Case> {
                     &[2, 3],
                     "zt.sparse_csr/1",
                     vec![
-                        ("indices", part("u64", [0, 4096, 24], vec![])),
-                        ("indptr", part("u64", [0, 8192, 16], vec![])),
-                        ("values", part("f32", [0, 12288, 12], vec![])),
+                        ("indices", part("u64", [4096, 24], vec![])),
+                        ("indptr", part("u64", [8192, 16], vec![])),
+                        ("values", part("f32", [12288, 12], vec![])),
                     ],
                 ),
             )]),
@@ -965,9 +1086,9 @@ pub fn all_cases() -> Vec<Case> {
                     &[2, 3],
                     "zt.sparse_csr/1",
                     vec![
-                        ("indices", part("u64", [0, 4096, 24], vec![])),
-                        ("indptr", part("u64", [0, 8192, 24], vec![])),
-                        ("values", part("f32", [0, 12288, 8], vec![])),
+                        ("indices", part("u64", [4096, 24], vec![])),
+                        ("indptr", part("u64", [8192, 24], vec![])),
+                        ("values", part("f32", [12288, 8], vec![])),
                     ],
                 ),
             )]),
@@ -986,8 +1107,8 @@ pub fn all_cases() -> Vec<Case> {
                     &[8],
                     "dense",
                     vec![
-                        ("data", part("u8", [0, 4096, 8], vec![])),
-                        ("extra", part("u8", [0, 8192, 8], vec![])),
+                        ("data", part("u8", [4096, 8], vec![])),
+                        ("extra", part("u8", [8192, 8], vec![])),
                     ],
                 ),
             )]),
@@ -1008,7 +1129,10 @@ pub fn all_cases() -> Vec<Case> {
                 object(
                     &[5],
                     "dense",
-                    vec![("data", part("u8", [0, 4096, 4], vec![("type", text("f4_e2m1"))]))],
+                    vec![(
+                        "data",
+                        part("u8", [4096, 4], vec![("type", text("f4_e2m1"))]),
+                    )],
                 ),
             )]),
         ),

@@ -45,7 +45,10 @@ fn convert_ls_verify_diff() {
     // ls
     let (ok, out) = zt(&["ls", zt_out.to_str().unwrap()]);
     assert!(ok, "{out}");
-    assert!(out.contains("a.weight") && out.contains("f32 [2,2]"), "{out}");
+    assert!(
+        out.contains("a.weight") && out.contains("f32 [2,2]"),
+        "{out}"
+    );
 
     // verify (digests were added by conversion)
     let (ok, out) = zt(&["verify", zt_out.to_str().unwrap(), "--deep"]);

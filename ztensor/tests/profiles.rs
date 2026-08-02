@@ -103,7 +103,10 @@ fn an_unregistered_layout_is_written_and_stays_structural() {
     let src = Source::open(&path).unwrap();
     let tensor = src.tensor("q").unwrap();
     assert_eq!(tensor.parts().count(), 2);
-    assert_eq!(&*tensor.part("weights").unwrap().bytes().unwrap(), &[2u8; 32]);
+    assert_eq!(
+        &*tensor.part("weights").unwrap().bytes().unwrap(),
+        &[2u8; 32]
+    );
     assert!(matches!(csr::read(&tensor), Err(Error::Unsupported(_))));
 }
 
@@ -137,10 +140,7 @@ fn a_registered_layout_is_checked_like_a_built_in() {
 
     // Writing: the profile refuses the object before a byte is written.
     let path = tmp("registered-layout.zt");
-    let mut w = Writer::options()
-        .vocabulary(&vocab)
-        .create(&path)
-        .unwrap();
+    let mut w = Writer::options().vocabulary(&vocab).create(&path).unwrap();
     let err = w
         .object("q")
         .shape([32u64])

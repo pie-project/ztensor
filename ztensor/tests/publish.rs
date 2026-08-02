@@ -44,7 +44,12 @@ fn nothing_is_at_the_path_until_finish() {
     w.finish().unwrap();
     assert!(path.exists());
     assert_eq!(
-        &*Source::open(&path).unwrap().tensor("t").unwrap().bytes().unwrap(),
+        &*Source::open(&path)
+            .unwrap()
+            .tensor("t")
+            .unwrap()
+            .bytes()
+            .unwrap(),
         &[1, 2, 3, 4]
     );
     assert!(
@@ -91,12 +96,22 @@ fn publishing_replaces_atomically() {
     w.add("t", [1u64], DType::U8, &[2]).unwrap();
     // The old file is still the whole truth at this point.
     assert_eq!(
-        &*Source::open(&path).unwrap().tensor("t").unwrap().bytes().unwrap(),
+        &*Source::open(&path)
+            .unwrap()
+            .tensor("t")
+            .unwrap()
+            .bytes()
+            .unwrap(),
         &[1]
     );
     w.finish().unwrap();
     assert_eq!(
-        &*Source::open(&path).unwrap().tensor("t").unwrap().bytes().unwrap(),
+        &*Source::open(&path)
+            .unwrap()
+            .tensor("t")
+            .unwrap()
+            .bytes()
+            .unwrap(),
         &[2]
     );
 }

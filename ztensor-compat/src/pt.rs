@@ -64,8 +64,15 @@ enum Val {
     Tuple(Vec<Val>),
     List(Vec<Val>),
     Dict(Vec<(Val, Val)>),
-    Global { module: String, name: String },
-    Storage { key: String, dtype: DType, ltype: Option<&'static str> },
+    Global {
+        module: String,
+        name: String,
+    },
+    Storage {
+        key: String,
+        dtype: DType,
+        ltype: Option<&'static str>,
+    },
     Tensor(Box<TensorRef>),
     Mark,
     Opaque,
@@ -196,17 +203,17 @@ impl<'a> Vm<'a> {
                         return Err(bad("FRAME length exceeds stream"));
                     }
                 }
-                0x2e => break,                                    // STOP
+                0x2e => break, // STOP
                 0x28 => {
                     self.marks.push(self.stack.len()); // MARK
                     self.stack.push(Val::Mark);
                 }
-                0x29 => self.stack.push(Val::Tuple(Vec::new())),  // EMPTY_TUPLE
-                0x5d => self.stack.push(Val::List(Vec::new())),   // EMPTY_LIST
-                0x7d => self.stack.push(Val::Dict(Vec::new())),   // EMPTY_DICT
-                0x4e => self.stack.push(Val::None),               // NONE
-                0x88 => self.stack.push(Val::Bool(true)),         // NEWTRUE
-                0x89 => self.stack.push(Val::Bool(false)),        // NEWFALSE
+                0x29 => self.stack.push(Val::Tuple(Vec::new())), // EMPTY_TUPLE
+                0x5d => self.stack.push(Val::List(Vec::new())),  // EMPTY_LIST
+                0x7d => self.stack.push(Val::Dict(Vec::new())),  // EMPTY_DICT
+                0x4e => self.stack.push(Val::None),              // NONE
+                0x88 => self.stack.push(Val::Bool(true)),        // NEWTRUE
+                0x89 => self.stack.push(Val::Bool(false)),       // NEWFALSE
                 0x4a => {
                     let v = self.u32()? as i32;
                     self.stack.push(Val::Int(v as i64)); // BININT
@@ -683,7 +690,12 @@ struct Compressed {
 
 impl Compressed {
     fn ensure_cached(&self, zip_index: usize, length: u64) -> Result<()> {
-        if self.cache.lock().expect("pt cache lock").contains_key(&zip_index) {
+        if self
+            .cache
+            .lock()
+            .expect("pt cache lock")
+            .contains_key(&zip_index)
+        {
             return Ok(());
         }
         let mut archive = self.archive.lock().expect("pt archive lock");
@@ -696,9 +708,14 @@ impl Compressed {
             .read_to_end(&mut bytes)
             .map_err(|e| bad(format!("storage {zip_index}: {e}")))?;
         if bytes.len() as u64 != length {
-            return Err(bad(format!("storage {zip_index} decompressed size mismatch")));
+            return Err(bad(format!(
+                "storage {zip_index} decompressed size mismatch"
+            )));
         }
-        self.cache.lock().expect("pt cache lock").insert(zip_index, bytes);
+        self.cache
+            .lock()
+            .expect("pt cache lock")
+            .insert(zip_index, bytes);
         Ok(())
     }
 }

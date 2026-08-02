@@ -10,8 +10,8 @@ crate surface.
 Three things were conflated.
 
 **1. What a file says vs. what a consumer asks.** `Manifest` is the L1
-structure literally written on disk — `blob: [shard, offset, length]`, where
-`shard` indexes *that file's* shard table. `Source::manifest()` also used it as
+structure literally written on disk — `blob: [offset, length]` plus an
+optional `shard`, which names an entry in *that file's* shard table. `Source::manifest()` also used it as
 the lookup index a consumer queries. Because one type served both, a set of N
 self-describing files could not be a `Source` (merging manifests would rewrite
 blob references against a shard table nobody wrote), so there were three reader
@@ -31,7 +31,7 @@ And one rung was missing. The ladder ran enumerate → copy → map → page, bu
 thing a GPU loader actually wants is *the address*: tell me where the bytes are
 and I will do the I/O myself (io_uring, cuFile/GDS, staged pinned H2D). That
 was only reachable by reaching into `part.blob` and reconstructing which file
-the shard index meant.
+the shard name meant.
 
 `tier()` is gone. It flattened four independent facts onto one ordinal that did
 not match the operations it claimed to gate — `evict()` requires page

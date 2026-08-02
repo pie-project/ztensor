@@ -87,8 +87,7 @@ pub(crate) fn parse_npy_header(data: &[u8]) -> Result<NpyHeader> {
                 .into(),
         ));
     }
-    let descr = find_str(header, "'descr'")
-        .ok_or_else(|| bad("header missing 'descr'"))?;
+    let descr = find_str(header, "'descr'").ok_or_else(|| bad("header missing 'descr'"))?;
     let (dtype, ltype) = map_descr(&descr)?;
     let shape = find_shape(header)?;
 
@@ -148,7 +147,10 @@ enum Where {
     Stored { offset: u64, length: u64 },
     /// Deflated entry: the zip entry to inflate, and how much of the result to
     /// drop (the `.npy` header) before the tensor starts.
-    Deflated { zip_index: usize, data_offset: usize },
+    Deflated {
+        zip_index: usize,
+        data_offset: usize,
+    },
 }
 
 /// Inflates deflated entries on demand. Keeps the archive open because the

@@ -3,12 +3,12 @@
 An aligned, verifiable container format for tensor data — and one loader
 that reads every other tensor format into the same object model.
 
-**Crates 2.0.0 · Format `.zt` version 2 · Spec Draft 2**
+**Crates 2.0.0 · Format `.zt` version 2 · Spec Draft 3**
 
 *The crate version and the format version are not the same number and do not
-move together — 2.0 happens to be both because the API was rewritten while the
-container stayed frozen. A `.zt` file written by any 1.x release is read by 2.0
-unchanged.*
+move together. The `.zt` container format 2 is a different format from the one
+the 1.x crates wrote, and 2.0 does not read 1.x files — see
+[Upgrading from 1.x](#upgrading-from-1x).*
 
 ```rust
 // Read anything: .zt, .safetensors, .gguf, .npz, .pt, .h5, .onnx
@@ -151,9 +151,16 @@ else — reading, writing, mapping, addressing, verification — is portable.
 
 ## Upgrading from 1.x
 
-The container did not change: a `.zt` written by any 1.x release opens in 2.0
-unchanged. The crate surface did — [CHANGELOG.md](CHANGELOG.md) records what
-moved and why.
+**2.0 does not read 1.x `.zt` files.** They are a different container: 1.x
+wrote the magic `ZTEN1000` with 64-byte alignment and flat blob offsets, while
+format 2 has its own magic, 4 KiB alignment, and a CBOR manifest. Opening a 1.x
+file with 2.0 fails at the header magic, and no conversion path ships in this
+release.
+
+If you have 1.x files, keep a 1.x build to read them and rewrite the tensors
+through 2.0's `Writer`. The crate surface changed as well —
+[CHANGELOG.md](CHANGELOG.md) records what moved and why, including the feature
+gap between the two lineages.
 
 ## Layout of this repository
 
@@ -243,7 +250,7 @@ cargo +nightly fuzz run fuzz_compat       # foreign-format parsers
 
 ## Status
 
-Pre-1.0 in intent if not in number: the format is Draft 2 and may still
+Pre-1.0 in intent if not in number: the format is Draft 3 and may still
 change. The crate line continues from the 1.2.x series, but this is a
 complete rewrite — the API, the file format, and the guarantees are all
 new, and `.zt` v2 files are not readable by 1.2.x.
