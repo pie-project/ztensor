@@ -13,6 +13,7 @@ zstd = ["dep:zstd"]
 
 [dependencies]
 memmap2 = "0.9"
+unicode-normalization = "0.1"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 zstd = { version = "0.13", optional = true }
 

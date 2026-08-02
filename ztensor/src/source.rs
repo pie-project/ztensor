@@ -39,6 +39,21 @@ impl Caps {
             _ => 1,
         }
     }
+
+    /// Builds a report from a part's metadata plus the two properties only
+    /// the source can decide.
+    pub(crate) fn for_part(
+        part: &crate::models::Part,
+        zero_copy: bool,
+        page_exclusive: bool,
+    ) -> Self {
+        Caps {
+            zero_copy,
+            alignment: 1u64 << part.blob.offset.trailing_zeros().min(63),
+            verifiable: part.digest.is_some(),
+            page_exclusive,
+        }
+    }
 }
 
 /// A tensor source: anything that projects into the zTensor object model.

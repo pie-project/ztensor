@@ -157,10 +157,13 @@ Readers MUST ignore map keys they do not recognize, at every level. This is
 the L1 minor-evolution mechanism; the footer `version` integer is the major
 one.
 
-Attribute values (at every level) MUST NOT use CBOR tags; permitted types
-are integers, text strings, byte strings, booleans, null, floats, arrays,
-and maps, nested at most 32 levels deep. The manifest blob itself is always
-stored raw; it is never compressed or encoded.
+An `attributes` field MUST be a map whose keys are text strings obeying the
+name rules of §3.5. Attribute values (at every level) MUST NOT use CBOR
+tags; permitted types are integers, text strings, byte strings, booleans,
+null, floats, arrays, and maps. Nesting is limited to 32 levels **measured
+from the manifest root**, so a reader needs one depth counter rather than a
+per-value one. The manifest blob itself is always stored raw; it is never
+compressed or encoded.
 
 ### 3.2 Root schema
 
@@ -198,7 +201,7 @@ Shown in CBOR diagnostic notation:
 | --- | --- | --- | --- |
 | `shape` | array of u64 | Yes | Logical dimensions. Rank MUST be ≤ 64. The element count is the product of dimensions (empty shape ⇒ 1, scalar). The product MUST NOT overflow u64. |
 | `layout` | string | Yes | `"dense"` (core, §5.1) or a namespaced layout profile id (§5.2). |
-| `parts` | map | Yes | One entry per data blob, keyed by role name. |
+| `parts` | map | Yes | One entry per data blob, keyed by role name. MUST be non-empty — an object with no bytes has no meaning, and layouts cannot state that rule for layouts a reader does not know. |
 | `attributes` | map | No | Per-object metadata. Layout profiles define which keys they require. |
 
 ### 3.4 Part
@@ -253,8 +256,11 @@ A reader MUST reject a file if any of the following fail:
    `offset % 4096 == 0`,
    `offset >= 4096`, `offset + length` within the referenced shard's data
    region.
-4. Blob references within each file (including the manifest blob) are
-   pairwise identical-or-disjoint; any partial overlap is rejected (§2.4).
+4. Blob references are grouped by the file they point into (shard index)
+   and checked per group: within each file, references — plus the manifest
+   blob for shard 0 — are pairwise identical-or-disjoint; any partial
+   overlap is rejected (§2.4). References into a shard are checked from the
+   root manifest alone, without opening the shard.
 5. Layout rules for every object whose layout the reader interprets
    (e.g., the dense size equation, §5.1).
 6. Name rules (§3.5); shape rank and overflow rules (§3.3); attribute value
@@ -381,8 +387,11 @@ A file is **canonical** iff all of the following hold:
    rule 3.
 3. Blobs are ordered by the bytewise-lexicographic `(object name, part
    name)` of their first reference. Parts with byte-identical decoded
-   content MUST share a single blob (aliased references, §2.4). The
-   manifest blob comes last; the footer immediately follows it.
+   content MUST share a single blob (aliased references, §2.4); a writer
+   that finds sharing candidates by hashing MUST confirm equality on the
+   bytes themselves, since a hash collision would otherwise alias two
+   different tensors onto one blob.
+   The manifest blob comes last; the footer immediately follows it.
 4. All parts use raw encoding (no `encoding` field) and every part carries
    an `xxh3` digest.
 5. All names are in Unicode Normalization Form C.
@@ -564,13 +573,13 @@ optional to support but mandatory to refuse cleanly (§4.2, §5.2, §5.3).
 
 | `type` | `dtype` | Size for n elements | Notes |
 | --- | --- | --- | --- |
-| `bool` | `u8` | n | Values MUST be `0x00` or `0x01`; readers MUST reject others on decode. |
+| `bool` | `u8` | n | Values MUST be `0x00` or `0x01`; readers MUST reject others when decoding or verifying (a raw structural read of the bytes is exempt). |
 | `f8_e4m3fn` | `u8` | n | OCP / NVIDIA FP8 |
 | `f8_e5m2` | `u8` | n | OCP FP8 |
 | `f8_e4m3fnuz` | `u8` | n | AMD FP8 |
 | `f8_e5m2fnuz` | `u8` | n | AMD FP8 |
 | `f8_e8m0` | `u8` | n | OCP MX block-scale exponent |
-| `f4_e2m1` | `u8` | ⌈n/2⌉ | OCP MXFP4 element. Packed two per byte, low nibble first; the final odd nibble, if any, MUST be zero. |
+| `f4_e2m1` | `u8` | ⌈n/2⌉ | OCP MXFP4 element. Packed two per byte, low nibble first; the final odd nibble, if any, MUST be zero (checked when decoding or verifying). |
 | `complex64` | `f32` | 8n | Interleaved `[real, imag]` |
 | `complex128` | `f64` | 16n | Interleaved `[real, imag]` |
 

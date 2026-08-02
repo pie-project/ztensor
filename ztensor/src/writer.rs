@@ -5,9 +5,9 @@
 //! (spec §6.3): 64 KiB placement, sorted insertion, per-part xxh3 digests,
 //! and blob sharing for byte-identical parts.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
-use std::io::{BufWriter, Write};
+use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 use xxhash_rust::xxh3::{xxh3_128, xxh3_64};
@@ -15,8 +15,9 @@ use xxhash_rust::xxh3::{xxh3_128, xxh3_64};
 use crate::cbor;
 use crate::error::{Error, Result};
 use crate::models::{
-    check_digest, check_name, BlobRef, DType, Layout, Manifest, Object, Part, Shard,
-    ALIGN_CANONICAL, ALIGN_FLOOR, FOOTER_LEN, MAGIC, MAX_MANIFEST_LEN, MAX_RANK, VERSION,
+    check_attributes, check_digest, check_name, registered_dtype, BlobRef, DType, Layout,
+    Manifest, Object, Part, Shard, ALIGN_CANONICAL, ALIGN_FLOOR, FOOTER_LEN, MAGIC,
+    MAX_MANIFEST_LEN, MAX_RANK, MIN_FILE_LEN, VERSION,
 };
 use crate::profiles::{encoding_profile, layout_profile};
 
@@ -32,14 +33,34 @@ pub struct PartDef<'a> {
 
 pub struct Writer {
     out: BufWriter<File>,
+    path: std::path::PathBuf,
     offset: u64,
     align: u64,
     canonical: bool,
     manifest: Manifest,
-    /// (xxh3_128, length) -> offset. Content-keyed blob sharing; a 128-bit
-    /// key makes an accidental collision negligible without a verify read.
+    /// (xxh3_128, length) -> offset of a previously written blob. Hash
+    /// matches are confirmed byte-for-byte before sharing (§6.3 requires
+    /// *byte-identical* sharing, and hashes can collide).
     dedup: HashMap<(u128, u64), u64>,
     last_name: Option<String>,
+}
+
+/// Writer-side violations of reader rules surface as `InvalidInput`
+/// carrying the rule's own message.
+fn invalid(e: Error) -> Error {
+    match e {
+        Error::Reject { detail, .. } => Error::InvalidInput(detail),
+        other => other,
+    }
+}
+
+fn check_alignment(align: u64) -> Result<()> {
+    if !align.is_power_of_two() || align < ALIGN_FLOOR {
+        return Err(Error::InvalidInput(format!(
+            "alignment must be a power of two >= {ALIGN_FLOOR}, got {align}"
+        )));
+    }
+    Ok(())
 }
 
 impl Writer {
@@ -52,20 +73,18 @@ impl Writer {
     /// Creates a non-canonical writer with custom placement alignment
     /// (power of two, ≥ 4096). Insertion order is preserved as-is.
     pub fn create_with_alignment(path: impl AsRef<Path>, align: u64) -> Result<Self> {
-        if !align.is_power_of_two() || align < ALIGN_FLOOR {
-            return Err(Error::InvalidInput(format!(
-                "alignment must be a power of two >= {ALIGN_FLOOR}, got {align}"
-            )));
-        }
+        check_alignment(align)?;
         Self::new(path, align, false)
     }
 
     fn new(path: impl AsRef<Path>, align: u64, canonical: bool) -> Result<Self> {
-        let file = File::create(path)?;
+        let path = path.as_ref().to_path_buf();
+        let file = File::create(&path)?;
         let mut out = BufWriter::with_capacity(1 << 20, file);
         out.write_all(&MAGIC)?;
         Ok(Self {
             out,
+            path,
             offset: MAGIC.len() as u64,
             align,
             canonical,
@@ -73,6 +92,47 @@ impl Writer {
             dedup: HashMap::new(),
             last_name: None,
         })
+    }
+
+    /// Canonical form requires NFC names (spec §6.3 rule 5). ASCII is
+    /// trivially NFC; only non-ASCII names pay for the check.
+    fn check_canonical_name(&self, name: &str) -> Result<()> {
+        if self.canonical && !name.is_ascii() && !unicode_normalization::is_nfc(name) {
+            return Err(Error::InvalidInput(format!(
+                "canonical form requires NFC-normalized names, got {name:?}"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Shared preamble of every object-adding method: name rules, duplicate
+    /// check, shape rules, canonical insertion order.
+    fn check_new_object(&self, name: &str, shape: &[u64]) -> Result<()> {
+        check_name(name).map_err(invalid)?;
+        self.check_canonical_name(name)?;
+        if self.manifest.objects.contains_key(name) {
+            return Err(Error::InvalidInput(format!("duplicate object {name:?}")));
+        }
+        if shape.len() > MAX_RANK {
+            return Err(Error::InvalidInput(format!(
+                "rank {} exceeds {MAX_RANK}",
+                shape.len()
+            )));
+        }
+        shape
+            .iter()
+            .try_fold(1u64, |acc, &d| acc.checked_mul(d))
+            .ok_or_else(|| Error::InvalidInput("shape product overflows u64".into()))?;
+        if self.canonical {
+            if let Some(last) = &self.last_name {
+                if name <= last.as_str() {
+                    return Err(Error::InvalidInput(format!(
+                        "canonical form requires sorted insertion: {name:?} after {last:?}"
+                    )));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Adds a dense object with a single raw `"data"` part.
@@ -120,46 +180,35 @@ impl Writer {
         parts: &[(&str, PartDef)],
         attributes: Option<cbor::Value>,
     ) -> Result<()> {
-        check_name(name).map_err(|_| Error::InvalidInput(format!("invalid name {name:?}")))?;
-        if self.manifest.objects.contains_key(name) {
-            return Err(Error::InvalidInput(format!("duplicate object {name:?}")));
+        self.check_new_object(name, shape)?;
+        if parts.is_empty() {
+            return Err(Error::InvalidInput(format!("object {name:?} has no parts")));
         }
-        if shape.len() > MAX_RANK {
-            return Err(Error::InvalidInput(format!(
-                "rank {} exceeds {MAX_RANK}",
-                shape.len()
-            )));
-        }
-        if self.canonical {
-            if let Some(last) = &self.last_name {
-                if name <= last.as_str() {
-                    return Err(Error::InvalidInput(format!(
-                        "canonical form requires sorted insertion: {name:?} after {last:?}"
-                    )));
-                }
-            }
+        if let Some(attrs) = &attributes {
+            check_attributes(attrs).map_err(invalid)?;
         }
 
-        // Canonical blob order is (object, part) name order: process parts
-        // sorted by name.
+        // Encode payloads and build part metadata (offsets patched after
+        // writing), so known layouts can be validated before any byte is
+        // written. Parts are processed in name order — canonical blob order
+        // is (object name, part name).
+        let mut built: BTreeMap<String, Part> = BTreeMap::new();
+        let mut payloads: Vec<Vec<u8>> = Vec::with_capacity(parts.len());
         let mut order: Vec<usize> = (0..parts.len()).collect();
         order.sort_by_key(|&i| parts[i].0);
-        for w in order.windows(2) {
-            if parts[w[0]].0 == parts[w[1]].0 {
-                return Err(Error::InvalidInput(format!(
-                    "duplicate part {:?}",
-                    parts[w[0]].0
-                )));
-            }
-        }
-
-        // Encode payloads and build part metadata (dummy offsets), so known
-        // layouts can be validated before any byte is written.
-        let mut built: Vec<(String, Part, Vec<u8>, bool)> = Vec::with_capacity(parts.len());
         for &i in &order {
             let (pname, def) = &parts[i];
-            check_name(pname)
-                .map_err(|_| Error::InvalidInput(format!("invalid part name {pname:?}")))?;
+            check_name(pname).map_err(invalid)?;
+            self.check_canonical_name(pname)?;
+            if let Some(lt) = def.ltype {
+                if let Some(required) = registered_dtype(lt) {
+                    if def.dtype != required {
+                        return Err(Error::InvalidInput(format!(
+                            "part {pname:?}: type {lt:?} requires dtype {required:?}"
+                        )));
+                    }
+                }
+            }
             let (stored, encoding, decoded_length) = match def.encoding {
                 None => (def.data.to_vec(), None, None),
                 Some(enc) => {
@@ -179,44 +228,41 @@ impl Writer {
                     )
                 }
             };
-            let raw = encoding.is_none();
             let part = Part {
                 dtype: def.dtype,
                 ltype: def.ltype.map(str::to_string),
                 blob: BlobRef {
                     shard: 0,
-                    offset: 0, // patched after writing
+                    offset: 0, // patched below
                     length: stored.len() as u64,
                 },
                 encoding,
                 decoded_length,
                 digest: Some(format!("xxh3:{:016x}", xxh3_64(def.data))),
             };
-            built.push((pname.to_string(), part, stored, raw));
+            if built.insert(pname.to_string(), part).is_some() {
+                return Err(Error::InvalidInput(format!("duplicate part {pname:?}")));
+            }
+            payloads.push(stored);
         }
 
         let mut obj = Object {
             shape: shape.to_vec(),
             layout: Layout::from_name(layout),
             attributes,
-            parts: built
-                .iter()
-                .map(|(n, p, _, _)| (n.clone(), p.clone()))
-                .collect(),
+            parts: built,
         };
         if let Some(profile) = layout_profile(layout) {
-            profile
-                .validate(name, &obj)
-                .map_err(|e| Error::InvalidInput(e.to_string()))?;
+            profile.validate(name, &obj).map_err(invalid)?;
         }
 
-        for (pname, _, stored, raw) in built {
-            let offset = if raw {
-                self.write_or_share_blob(&stored)?
+        // `obj.parts` and `payloads` are both in part-name order.
+        for (part, stored) in obj.parts.values_mut().zip(&payloads) {
+            part.blob.offset = if part.encoding.is_none() {
+                self.write_or_share_blob(stored)?
             } else {
-                self.write_blob(&stored)?
+                self.write_blob(stored)?
             };
-            obj.parts.get_mut(&pname).unwrap().blob.offset = offset;
         }
         self.manifest.objects.insert(name.to_string(), obj);
         self.last_name = Some(name.to_string());
@@ -237,9 +283,8 @@ impl Writer {
                 "canonical form is single-file; use create_with_alignment".into(),
             ));
         }
-        check_digest(digest)
-            .map_err(|_| Error::InvalidInput(format!("malformed digest {digest:?}")))?;
-        if size < 48 {
+        check_digest(digest).map_err(invalid)?;
+        if size < MIN_FILE_LEN {
             return Err(Error::InvalidInput(format!(
                 "shard size {size} below minimum file size"
             )));
@@ -271,20 +316,26 @@ impl Writer {
         parts: &[(&str, Part)],
         attributes: Option<cbor::Value>,
     ) -> Result<()> {
-        check_name(name).map_err(|_| Error::InvalidInput(format!("invalid name {name:?}")))?;
-        if self.manifest.objects.contains_key(name) {
-            return Err(Error::InvalidInput(format!("duplicate object {name:?}")));
+        self.check_new_object(name, shape)?;
+        if parts.is_empty() {
+            return Err(Error::InvalidInput(format!("object {name:?} has no parts")));
         }
-        if shape.len() > MAX_RANK {
-            return Err(Error::InvalidInput(format!(
-                "rank {} exceeds {MAX_RANK}",
-                shape.len()
-            )));
+        if let Some(attrs) = &attributes {
+            check_attributes(attrs).map_err(invalid)?;
         }
-        let mut built = std::collections::BTreeMap::new();
+        let mut built = BTreeMap::new();
         for (pname, part) in parts {
-            check_name(pname)
-                .map_err(|_| Error::InvalidInput(format!("invalid part name {pname:?}")))?;
+            check_name(pname).map_err(invalid)?;
+            self.check_canonical_name(pname)?;
+            if let Some(lt) = &part.ltype {
+                if let Some(required) = registered_dtype(lt) {
+                    if part.dtype != required {
+                        return Err(Error::InvalidInput(format!(
+                            "part {pname:?}: type {lt:?} requires dtype {required:?}"
+                        )));
+                    }
+                }
+            }
             let b = part.blob;
             let shard = self.manifest.shards.get(&b.shard).ok_or_else(|| {
                 Error::InvalidInput(format!(
@@ -306,9 +357,7 @@ impl Writer {
                 )));
             }
             if let Some(d) = &part.digest {
-                check_digest(d).map_err(|_| {
-                    Error::InvalidInput(format!("part {pname:?}: malformed digest"))
-                })?;
+                check_digest(d).map_err(invalid)?;
             }
             if part.encoding.is_some() != part.decoded_length.is_some() {
                 return Err(Error::InvalidInput(format!(
@@ -326,11 +375,10 @@ impl Writer {
             parts: built,
         };
         if let Some(profile) = layout_profile(layout) {
-            profile
-                .validate(name, &obj)
-                .map_err(|e| Error::InvalidInput(e.to_string()))?;
+            profile.validate(name, &obj).map_err(invalid)?;
         }
         self.manifest.objects.insert(name.to_string(), obj);
+        self.last_name = Some(name.to_string());
         Ok(())
     }
 
@@ -343,7 +391,7 @@ impl Writer {
     /// Objects arrive in name order (the manifest is sorted), satisfying
     /// canonical insertion. File attributes are copied unless already set.
     pub fn ingest(&mut self, src: &dyn crate::Source) -> Result<()> {
-        let manifest = src.manifest().clone();
+        let manifest = src.manifest();
         if self.manifest.attributes.is_none() {
             self.manifest.attributes = manifest.attributes.clone();
         }
@@ -401,14 +449,32 @@ impl Writer {
         )
     }
 
+    /// Writes a blob, or shares an existing one when the bytes are
+    /// identical. §6.3 requires *byte-identical* sharing, so a hash match
+    /// is confirmed by reading the candidate back — a hash collision must
+    /// never alias two different tensors onto one blob.
     fn write_or_share_blob(&mut self, data: &[u8]) -> Result<u64> {
         let key = (xxh3_128(data), data.len() as u64);
         if let Some(&offset) = self.dedup.get(&key) {
-            return Ok(offset);
+            if self.blob_equals(offset, data)? {
+                return Ok(offset);
+            }
+            // Collision: fall through and write the bytes separately.
         }
         let target = self.write_blob(data)?;
-        self.dedup.insert(key, target);
+        self.dedup.entry(key).or_insert(target);
         Ok(target)
+    }
+
+    /// Compares an already-written blob against `data` (via the file, so
+    /// no second copy of every blob is kept in memory).
+    fn blob_equals(&mut self, offset: u64, data: &[u8]) -> Result<bool> {
+        self.out.flush()?;
+        let mut file = File::open(&self.path)?;
+        file.seek(SeekFrom::Start(offset))?;
+        let mut buf = vec![0u8; data.len()];
+        file.read_exact(&mut buf)?;
+        Ok(buf == data)
     }
 
     fn write_blob(&mut self, data: &[u8]) -> Result<u64> {
@@ -486,11 +552,7 @@ impl DataShardWriter {
     }
 
     pub fn create_with_alignment(path: impl AsRef<Path>, align: u64) -> Result<Self> {
-        if !align.is_power_of_two() || align < ALIGN_FLOOR {
-            return Err(Error::InvalidInput(format!(
-                "alignment must be a power of two >= {ALIGN_FLOOR}, got {align}"
-            )));
-        }
+        check_alignment(align)?;
         let file = File::create(path)?;
         let mut shard = Self {
             out: BufWriter::with_capacity(1 << 20, file),

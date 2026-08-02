@@ -13,8 +13,8 @@ use memmap2::Mmap;
 use xxhash_rust::xxh3::xxh3_64;
 
 use crate::error::{Error, Result, Rule};
-use crate::models::{Manifest, Part, Shard, FOOTER_LEN, MAGIC, VERSION};
-use crate::reader::{check_xxh3_digest, decode_part, read_csr, Csr, Reader};
+use crate::models::{parse_xxh3, Manifest, Object, Part, Shard};
+use crate::reader::{check_container, decode_part, read_csr, verify, Csr, Reader};
 use crate::source::{Caps, Source};
 
 /// Resolves a shard index + identity to a file path. The format itself
@@ -118,20 +118,9 @@ impl Model {
             }
             // SAFETY: read-only shared map of untrusted bytes.
             let mmap = unsafe { Mmap::map(&file)? };
-            let footer = &mmap[mmap.len() - FOOTER_LEN as usize..];
-            if mmap[..8] != MAGIC || footer[32..40] != MAGIC {
-                return Err(Error::reject(
-                    Rule::ShardIdentity,
-                    format!("shard {index}: not a .zt file"),
-                ));
-            }
-            let version = u32::from_le_bytes(footer[24..28].try_into().unwrap());
-            if version != VERSION {
-                return Err(Error::reject(
-                    Rule::ShardIdentity,
-                    format!("shard {index}: unsupported version {version}"),
-                ));
-            }
+            check_container(&mmap).map_err(|e| {
+                Error::reject(Rule::ShardIdentity, format!("shard {index}: {e}"))
+            })?;
             shards.insert(index, mmap);
         }
         Ok(Self { root, shards })
@@ -142,21 +131,25 @@ impl Model {
         &self.root
     }
 
+    pub fn manifest(&self) -> &Manifest {
+        self.root.manifest()
+    }
+
+    /// Tier 0: iterate objects and their metadata.
+    pub fn objects(&self) -> impl Iterator<Item = (&str, &Object)> {
+        self.root.objects()
+    }
+
+    pub fn get(&self, name: &str) -> Option<&Object> {
+        self.root.get(name)
+    }
+
     /// Deep verification (ladder rung 3): whole-file digest of every shard
     /// against the root's shard table.
     pub fn verify_shards(&self) -> Result<()> {
         for (&index, shard) in &self.root.manifest().shards {
             let bytes: &[u8] = &self.shards[&index];
-            let Some(hex) = shard.digest.strip_prefix("xxh3:") else {
-                return Err(Error::Unsupported(format!(
-                    "shard {index} digest algorithm in {:?} (only xxh3 supported)",
-                    shard.digest
-                )));
-            };
-            let expected = u64::from_str_radix(hex, 16).map_err(|_| {
-                Error::reject(Rule::Digest, format!("malformed shard digest {hex:?}"))
-            })?;
-            if xxh3_64(bytes) != expected {
+            if xxh3_64(bytes) != parse_xxh3(&shard.digest)? {
                 return Err(Error::reject(
                     Rule::ShardIdentity,
                     format!("shard {index}: digest mismatch"),
@@ -167,15 +160,7 @@ impl Model {
     }
 
     fn part(&self, name: &str, part: &str) -> Result<&Part> {
-        let obj = self
-            .root
-            .manifest()
-            .objects
-            .get(name)
-            .ok_or_else(|| Error::NotFound(format!("object {name:?}")))?;
-        obj.parts
-            .get(part)
-            .ok_or_else(|| Error::NotFound(format!("part {name:?}/{part:?}")))
+        self.root.manifest().part(name, part)
     }
 
     /// The stored (possibly encoded) bytes of a part, wherever it lives.
@@ -216,22 +201,31 @@ impl Model {
         if p.blob.shard == 0 {
             return self.root.caps(name, part);
         }
-        Ok(Caps {
-            zero_copy: p.encoding.is_none(),
-            alignment: 1u64 << p.blob.offset.trailing_zeros().min(63),
-            verifiable: p.digest.is_some(),
-            page_exclusive: false,
-        })
+        Ok(Caps::for_part(p, p.encoding.is_none(), false))
     }
 
-    /// Verifies a part's digest over its decoded bytes.
+    /// Verifies a part's digest and logical-type content rules.
+    /// See [`ztensor::verify`](crate::verify).
     pub fn verify(&self, name: &str, part: &str) -> Result<bool> {
+        verify(self, name, part)
+    }
+
+    /// Hints the OS to prefetch a part's pages, wherever the part lives.
+    #[cfg(unix)]
+    pub fn prefetch(&self, name: &str, part: &str) -> Result<()> {
         let p = self.part(name, part)?;
-        let Some(digest) = p.digest.clone() else {
-            return Ok(false);
-        };
-        let bytes = self.read(name, part)?;
-        check_xxh3_digest(&digest, &bytes, name, part)
+        if p.blob.length == 0 {
+            return Ok(());
+        }
+        if p.blob.shard == 0 {
+            return self.root.prefetch(name, part);
+        }
+        self.shards[&p.blob.shard].advise_range(
+            memmap2::Advice::WillNeed,
+            p.blob.offset as usize,
+            p.blob.length as usize,
+        )?;
+        Ok(())
     }
 
     /// Reads and assembles a `zt.sparse_csr/1` object across shards.

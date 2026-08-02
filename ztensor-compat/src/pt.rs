@@ -39,6 +39,8 @@ const MAX_MEMO: usize = 10_000_000;
 const MAX_OPCODES: usize = 50_000_000;
 const MAX_ITEMS: usize = 1_000_000;
 const MAX_DEPTH: usize = 128;
+/// Longest string kept in the memo table (longer ones become opaque).
+const MAX_MEMO_STR: usize = 4096;
 
 #[derive(Debug, Clone)]
 struct TensorRef {
@@ -93,6 +95,8 @@ struct Vm<'a> {
     data: &'a [u8],
     pos: usize,
     stack: Vec<Val>,
+    /// Stack indices of live MARK sentinels.
+    marks: Vec<usize>,
     memo: BTreeMap<u32, Val>,
     /// A refusal encountered mid-stream (e.g., a non-contiguous tensor):
     /// recorded here so the failure is loud, never a silently dropped
@@ -157,18 +161,17 @@ impl<'a> Vm<'a> {
         self.stack.pop().unwrap_or(Val::None)
     }
 
+    /// Pops back to the most recent MARK. `marks` tracks mark positions so
+    /// this is O(popped items) — a linear rescan would make N mark-less
+    /// POP_MARKs quadratic.
     fn pop_to_mark(&mut self) -> Vec<Val> {
-        let mark = self
-            .stack
-            .iter()
-            .rposition(|v| matches!(v, Val::Mark));
-        match mark {
-            Some(i) => {
+        match self.marks.pop() {
+            Some(i) if i < self.stack.len() => {
                 let items = self.stack.split_off(i + 1);
                 self.stack.pop();
                 items
             }
-            None => Vec::new(),
+            _ => Vec::new(),
         }
     }
 
@@ -196,7 +199,10 @@ impl<'a> Vm<'a> {
                     }
                 }
                 0x2e => break,                                    // STOP
-                0x28 => self.stack.push(Val::Mark),               // MARK
+                0x28 => {
+                    self.marks.push(self.stack.len()); // MARK
+                    self.stack.push(Val::Mark);
+                }
                 0x29 => self.stack.push(Val::Tuple(Vec::new())),  // EMPTY_TUPLE
                 0x5d => self.stack.push(Val::List(Vec::new())),   // EMPTY_LIST
                 0x7d => self.stack.push(Val::Dict(Vec::new())),   // EMPTY_DICT
@@ -441,9 +447,26 @@ impl<'a> Vm<'a> {
             // Containers are memoized as opaque markers: state dicts never
             // need container back-references, and cloning bounded-size
             // scalars keeps the memo cheap.
+            // Only scalars are memoized. Containers (including tuples,
+            // which torch nests freely) would let `T <- (T, T)` double the
+            // heap every few opcodes; state dicts never need container
+            // back-references.
             let stored = match v {
-                Val::Dict(_) | Val::List(_) => Val::Opaque,
-                other => other.clone(),
+                Val::Int(n) => Val::Int(*n),
+                Val::Bool(b) => Val::Bool(*b),
+                Val::Float(f) => Val::Float(*f),
+                Val::None => Val::None,
+                Val::Str(s) if s.len() <= MAX_MEMO_STR => Val::Str(s.clone()),
+                Val::Global { module, name } => Val::Global {
+                    module: module.clone(),
+                    name: name.clone(),
+                },
+                Val::Storage { key, dtype, ltype } => Val::Storage {
+                    key: key.clone(),
+                    dtype: *dtype,
+                    ltype: *ltype,
+                },
+                _ => Val::Opaque,
             };
             self.memo.insert(idx, stored);
         }
@@ -502,9 +525,13 @@ impl<'a> Vm<'a> {
             expected = expected.saturating_mul(dim.max(1));
         }
 
+        let Some(byte_offset) = offset_elems.checked_mul(dtype.width()) else {
+            self.refusal = Some(bad("storage offset overflows"));
+            return Ok(Val::Opaque);
+        };
         Ok(Val::Tensor(Box::new(TensorRef {
             storage_key: key.clone(),
-            byte_offset: offset_elems * dtype.width(),
+            byte_offset,
             shape,
             dtype: *dtype,
             ltype: *ltype,
@@ -681,17 +708,25 @@ impl Pt {
             pickle_name.strip_suffix("data.pkl").unwrap_or_default()
         );
 
+        // The pickle is decompressed here, so its *decompressed* size must
+        // be capped independently of what the ZIP declares.
         let mut pickle = Vec::new();
-        archive
+        let mut entry = archive
             .by_name(&pickle_name)
-            .map_err(|e| bad(format!("{pickle_name}: {e}")))?
+            .map_err(|e| bad(format!("{pickle_name}: {e}")))?;
+        std::io::Read::take(&mut entry, MAX_PICKLE_BYTES as u64 + 1)
             .read_to_end(&mut pickle)?;
+        if pickle.len() > MAX_PICKLE_BYTES {
+            return Err(bad("data.pkl exceeds the 256 MiB limit"));
+        }
+        drop(entry);
 
         // Run the VM and collect tensors.
         let mut vm = Vm {
             data: &pickle,
             pos: 0,
             stack: Vec::new(),
+            marks: Vec::new(),
             memo: BTreeMap::new(),
             refusal: None,
         };
@@ -721,9 +756,7 @@ impl Pt {
             let loc = if entry.compression() == zip::CompressionMethod::Stored {
                 let start = entry.data_start();
                 let size = entry.size();
-                if start + size > mmap.len() as u64 {
-                    return Err(bad(format!("storage {key:?} extends past file")));
-                }
+                crate::safe::range("pt storage", start, size, mmap.len())?;
                 StorageLoc::Stored {
                     offset: start,
                     length: size,
@@ -836,8 +869,9 @@ impl Pt {
         let mut entry = archive
             .by_index(zip_index)
             .map_err(|e| bad(format!("storage {key:?}: {e}")))?;
-        let mut bytes = Vec::with_capacity(length as usize);
-        entry
+        let cap = crate::safe::alloc_size("pt storage", length)?;
+        let mut bytes = Vec::with_capacity(cap);
+        std::io::Read::take(&mut entry, length + 1)
             .read_to_end(&mut bytes)
             .map_err(|e| bad(format!("storage {key:?}: {e}")))?;
         if bytes.len() as u64 != length {

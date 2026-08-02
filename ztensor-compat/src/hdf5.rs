@@ -26,8 +26,14 @@ use ztensor::{
 };
 
 const MAGIC: &[u8; 8] = b"\x89HDF\r\n\x1a\n";
-const UNDEF: u64 = u64::MAX;
 const MAX_DEPTH: usize = 64;
+const MAX_NAME: usize = 1024;
+/// Global budget on parsed header messages and visited B-tree/SNOD nodes.
+/// Depth limits alone do not bound *work*: a self-referential structure can
+/// branch within the depth cap and explore exponentially many paths.
+const MAX_NODES: u32 = 100_000;
+/// Cap on a single decompressed chunk (defends zip-bomb filter pipelines).
+const MAX_CHUNK: u64 = 256 << 20;
 
 const MSG_DATASPACE: u16 = 0x0001;
 const MSG_DATATYPE: u16 = 0x0003;
@@ -44,6 +50,18 @@ fn bad(detail: impl Into<String>) -> Error {
 }
 
 // ---- primitive readers ------------------------------------------------
+
+/// Turns a file-declared address into an in-bounds index, requiring `need`
+/// readable bytes there. Every `u64` address in an HDF5 file is attacker
+/// controlled, so this is the only way addresses enter the parser.
+fn at(data: &[u8], addr: u64, need: usize) -> Result<usize> {
+    let start = crate::safe::to_usize("hdf5 address", addr)?;
+    start
+        .checked_add(need)
+        .filter(|&e| e <= data.len())
+        .ok_or_else(|| bad(format!("address {addr} (+{need}) past end of file")))?;
+    Ok(start)
+}
 
 fn uint(data: &[u8], pos: usize, size: usize) -> Result<u64> {
     let end = pos
@@ -75,13 +93,18 @@ fn u64_at(data: &[u8], pos: usize) -> Result<u64> {
     uint(data, pos, 8)
 }
 
-fn cstring(data: &[u8], pos: usize) -> Result<String> {
-    let end = data[pos..]
+/// Reads a NUL-terminated name at a file-declared address.
+fn cstring(data: &[u8], addr: u64) -> Result<String> {
+    let pos = at(data, addr, 0)?;
+    let rest = &data[pos..];
+    let len = rest
         .iter()
         .position(|&b| b == 0)
-        .map(|i| pos + i)
         .ok_or_else(|| bad("unterminated string"))?;
-    String::from_utf8(data[pos..end].to_vec()).map_err(|_| bad("invalid UTF-8 in name"))
+    if len > MAX_NAME {
+        return Err(bad("name longer than 1024 bytes"));
+    }
+    String::from_utf8(rest[..len].to_vec()).map_err(|_| bad("invalid UTF-8 in name"))
 }
 
 /// Superblock parameters used throughout.
@@ -97,6 +120,11 @@ impl Ctx {
     }
     fn length(&self, data: &[u8], pos: usize) -> Result<u64> {
         uint(data, pos, self.l)
+    }
+    /// The "undefined address" sentinel is all-ones *in this file's offset
+    /// width* — `0xFFFFFFFF` in a 4-byte-offset file, not `u64::MAX`.
+    fn is_undef(&self, addr: u64) -> bool {
+        addr == u64::MAX >> ((8 - self.o.min(8)) * 8)
     }
 }
 
@@ -149,6 +177,7 @@ impl Hdf5 {
         let mmap = unsafe { Mmap::map(&file)? };
         let mut walker = Walker {
             data: &mmap,
+            budget: MAX_NODES,
             objects: BTreeMap::new(),
             locations: BTreeMap::new(),
             skipped: Vec::new(),
@@ -202,21 +231,29 @@ impl Source for Hdf5 {
     fn view(&self, object: &str, part: &str) -> Result<&[u8]> {
         match self.location(object, part)? {
             Loc::Range { offset, length } => {
-                Ok(&self.mmap[*offset as usize..(*offset + *length) as usize])
+                crate::safe::slice("hdf5 dataset", &self.mmap, *offset, *length)
             }
             Loc::Owned(bytes) => Ok(bytes),
         }
     }
 
     fn caps(&self, object: &str, part: &str) -> Result<Caps> {
-        let alignment = match self.location(object, part)? {
-            Loc::Range { offset, .. } if *offset > 0 => {
-                1u64 << offset.trailing_zeros().min(63)
-            }
-            _ => 1,
+        // Owned buffers are materialized, not mapped: their manifest blob
+        // is a placeholder, so reporting zero-copy would be a lie about
+        // what the file itself contains.
+        let (zero_copy, alignment) = match self.location(object, part)? {
+            Loc::Range { offset, .. } => (
+                true,
+                if *offset > 0 {
+                    1u64 << offset.trailing_zeros().min(63)
+                } else {
+                    1
+                },
+            ),
+            Loc::Owned(_) => (false, 1),
         };
         Ok(Caps {
-            zero_copy: true,
+            zero_copy,
             alignment,
             verifiable: false,
             page_exclusive: false,
@@ -268,25 +305,37 @@ fn parse_superblock(data: &[u8], sb: usize) -> Result<(Ctx, u64, u64)> {
     Ok((ctx, ctx.offset(data, scratch)?, ctx.offset(data, scratch + o)?))
 }
 
-fn heap_data_addr(data: &[u8], ctx: &Ctx, heap_addr: u64) -> Result<usize> {
-    let pos = heap_addr as usize;
-    if data.len() < pos + 4 || &data[pos..pos + 4] != b"HEAP" {
+fn heap_data_addr(data: &[u8], ctx: &Ctx, heap_addr: u64) -> Result<u64> {
+    let pos = at(data, heap_addr, 4)?;
+    if &data[pos..pos + 4] != b"HEAP" {
         return Err(bad("missing HEAP signature"));
     }
     let addr = ctx.offset(data, pos + 4 + 1 + 3 + ctx.l + ctx.l)?;
-    Ok(addr as usize)
+    at(data, addr, 0)?; // the heap data segment must be inside the file
+    Ok(addr)
 }
 
 // ---- group traversal --------------------------------------------------
 
 struct Walker<'a> {
     data: &'a [u8],
+    /// Remaining node/message budget (see MAX_NODES).
+    budget: u32,
     objects: BTreeMap<String, Object>,
     locations: BTreeMap<String, Loc>,
     skipped: Vec<String>,
 }
 
 impl Walker<'_> {
+    /// Charges one unit of the global work budget.
+    fn spend(&mut self) -> Result<()> {
+        self.budget = self
+            .budget
+            .checked_sub(1)
+            .ok_or_else(|| bad("structure exceeds the parser's work budget"))?;
+        Ok(())
+    }
+
     fn group(&mut self, ctx: &Ctx, btree: u64, heap: u64, prefix: &str, depth: usize) -> Result<()> {
         let heap_data = heap_data_addr(self.data, ctx, heap)?;
         self.btree_group(ctx, btree, heap_data, prefix, depth)
@@ -296,16 +345,17 @@ impl Walker<'_> {
         &mut self,
         ctx: &Ctx,
         btree: u64,
-        heap_data: usize,
+        heap_data: u64,
         prefix: &str,
         depth: usize,
     ) -> Result<()> {
         if depth > MAX_DEPTH {
             return Err(bad("B-tree recursion too deep"));
         }
+        self.spend()?;
         let data = self.data;
-        let pos = btree as usize;
-        if data.len() < pos + 4 || &data[pos..pos + 4] != b"TREE" {
+        let pos = at(data, btree, 8)?;
+        if &data[pos..pos + 4] != b"TREE" {
             return Err(bad("missing TREE signature"));
         }
         if u8_at(data, pos + 4)? != 0 {
@@ -316,7 +366,7 @@ impl Walker<'_> {
         let keys_start = pos + 8 + 2 * ctx.o;
         for i in 0..entries {
             let child = ctx.offset(data, keys_start + ctx.l + i * (ctx.l + ctx.o))?;
-            if child == UNDEF {
+            if ctx.is_undef(child) {
                 continue;
             }
             if level > 0 {
@@ -332,16 +382,17 @@ impl Walker<'_> {
         &mut self,
         ctx: &Ctx,
         snod: u64,
-        heap_data: usize,
+        heap_data: u64,
         prefix: &str,
         depth: usize,
     ) -> Result<()> {
         if depth > MAX_DEPTH {
             return Err(bad("SNOD recursion too deep"));
         }
+        self.spend()?;
         let data = self.data;
-        let pos = snod as usize;
-        if data.len() < pos + 4 || &data[pos..pos + 4] != b"SNOD" {
+        let pos = at(data, snod, 8)?;
+        if &data[pos..pos + 4] != b"SNOD" {
             return Err(bad("missing SNOD signature"));
         }
         let count = u16_at(data, pos + 6)? as usize;
@@ -354,10 +405,10 @@ impl Walker<'_> {
             let link_name = ctx.offset(data, e)?;
             let header_addr = ctx.offset(data, e + ctx.o)?;
             let cache_type = u32_at(data, e + 2 * ctx.o)?;
-            if header_addr == UNDEF || header_addr == 0 {
+            if ctx.is_undef(header_addr) || header_addr == 0 {
                 continue;
             }
-            let name = cstring(data, heap_data + link_name as usize)?;
+            let name = cstring(data, crate::safe::add("heap name", heap_data, link_name)?)?;
             if name.is_empty() {
                 continue;
             }
@@ -373,7 +424,7 @@ impl Walker<'_> {
                 let heap = ctx.offset(data, scratch + ctx.o)?;
                 self.group(ctx, btree, heap, &full, depth + 1)?;
             } else {
-                match parse_object_header(data, ctx, header_addr as usize, depth + 1)? {
+                match parse_object_header(data, ctx, at(data, header_addr, 16)?, depth + 1, &mut self.budget)? {
                     Header::Group(btree, heap) => self.group(ctx, btree, heap, &full, depth + 1)?,
                     Header::Dataset(info) => self.dataset(ctx, &full, info)?,
                     Header::Skip => self.skipped.push(full),
@@ -384,18 +435,15 @@ impl Walker<'_> {
     }
 
     fn dataset(&mut self, ctx: &Ctx, name: &str, info: DatasetInfo) -> Result<()> {
-        let elems = info
-            .shape
-            .iter()
-            .try_fold(1u64, |acc, &d| acc.checked_mul(d))
-            .ok_or_else(|| bad(format!("dataset {name:?} shape overflows")))?;
-        let expected = elems
-            .checked_mul(info.dtype.width())
-            .ok_or_else(|| bad(format!("dataset {name:?} size overflows")))?;
+        if self.objects.contains_key(name) {
+            return Err(bad(format!("duplicate dataset name {name:?}")));
+        }
+        let elems = crate::safe::product("hdf5 shape", &info.shape)?;
+        let expected = crate::safe::mul("hdf5 dataset size", elems, info.dtype.width())?;
 
         let (loc, blob, encoding) = match info.layout {
             DataLayout::Contiguous { addr, size } => {
-                if addr == UNDEF {
+                if ctx.is_undef(addr) {
                     self.skipped.push(name.to_string());
                     return Ok(());
                 }
@@ -404,9 +452,7 @@ impl Walker<'_> {
                         "dataset {name:?} stores {size} bytes but shape implies {expected}"
                     )));
                 }
-                if addr + size > self.data.len() as u64 {
-                    return Err(bad(format!("dataset {name:?} extends past file")));
-                }
+                crate::safe::range("hdf5 dataset", addr, size, self.data.len())?;
                 (
                     Loc::Range {
                         offset: addr,
@@ -424,6 +470,22 @@ impl Walker<'_> {
                 btree_addr,
                 chunk_dims,
             } => {
+                if ctx.is_undef(btree_addr) {
+                    self.skipped.push(name.to_string());
+                    return Ok(());
+                }
+                // The chunk grid must have one dimension per dataspace
+                // dimension; the two come from independent messages.
+                if chunk_dims.len() != info.shape.len()
+                    || chunk_dims.contains(&0)
+                    || info.shape.contains(&0)
+                {
+                    return Err(bad(format!(
+                        "dataset {name:?}: chunk dims {chunk_dims:?} do not match \
+                         shape {:?} (or contain zero)",
+                        info.shape
+                    )));
+                }
                 let bytes = read_chunked(
                     self.data,
                     ctx,
@@ -484,7 +546,13 @@ enum Header {
     Skip,
 }
 
-fn parse_object_header(data: &[u8], ctx: &Ctx, addr: usize, depth: usize) -> Result<Header> {
+fn parse_object_header(
+    data: &[u8],
+    ctx: &Ctx,
+    addr: usize,
+    depth: usize,
+    budget: &mut u32,
+) -> Result<Header> {
     if depth > MAX_DEPTH {
         return Err(bad("object header recursion too deep"));
     }
@@ -493,17 +561,17 @@ fn parse_object_header(data: &[u8], ctx: &Ctx, addr: usize, depth: usize) -> Res
     }
     let num_messages = u16_at(data, addr + 2)? as usize;
     let header_size = u32_at(data, addr + 8)? as usize;
+    let start = addr
+        .checked_add(16)
+        .filter(|&s| s <= data.len())
+        .ok_or_else(|| bad("object header past end of file"))?;
+    let end = start
+        .checked_add(header_size)
+        .filter(|&e| e <= data.len())
+        .ok_or_else(|| bad("object header extends past end of file"))?;
 
     let mut st = MessageState::default();
-    parse_messages(
-        data,
-        ctx,
-        addr + 16,
-        addr + 16 + header_size,
-        num_messages,
-        &mut st,
-        depth,
-    )?;
+    parse_messages(data, ctx, start, end, num_messages, &mut st, depth, budget)?;
 
     if let Some((btree, heap)) = st.group {
         return Ok(Header::Group(btree, heap));
@@ -528,6 +596,7 @@ struct MessageState {
     group: Option<(u64, u64)>,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn parse_messages(
     data: &[u8],
     ctx: &Ctx,
@@ -536,10 +605,14 @@ fn parse_messages(
     max_messages: usize,
     st: &mut MessageState,
     depth: usize,
+    budget: &mut u32,
 ) -> Result<()> {
     let mut pos = start;
     let mut parsed = 0;
     while pos + 8 <= end && parsed < max_messages {
+        *budget = budget
+            .checked_sub(1)
+            .ok_or_else(|| bad("object header exceeds the parser's work budget"))?;
         let msg_type = u16_at(data, pos)?;
         let msg_size = u16_at(data, pos + 2)? as usize;
         let body = pos + 8;
@@ -560,15 +633,24 @@ fn parse_messages(
             MSG_CONTINUATION => {
                 let cont = ctx.offset(data, body)?;
                 let len = ctx.offset(data, body + ctx.o)?;
-                if cont != UNDEF && len > 0 && depth < MAX_DEPTH {
+                if !ctx.is_undef(cont) && len > 0 {
+                    // Erroring (rather than skipping) at the cap matters:
+                    // a silent skip lets a self-referential header be
+                    // explored along exponentially many paths.
+                    if depth >= MAX_DEPTH {
+                        return Err(bad("object header continuation too deep"));
+                    }
+                    let cont_start = at(data, cont, 0)?;
+                    let cont_end = at(data, crate::safe::add("hdf5 continuation", cont, len)?, 0)?;
                     parse_messages(
                         data,
                         ctx,
-                        cont as usize,
-                        (cont + len) as usize,
+                        cont_start,
+                        cont_end,
                         max_messages - parsed,
                         st,
                         depth + 1,
+                        budget,
                     )?;
                 }
             }
@@ -709,6 +791,8 @@ fn parse_filters(data: &[u8], pos: usize) -> Result<Vec<Filter>> {
 
 struct Chunk {
     linear_offset: u64,
+    /// Chunk origin in element coordinates (validated in range).
+    coords: Vec<u64>,
     file_addr: u64,
     size: u32,
     filter_mask: u32,
@@ -724,12 +808,16 @@ fn collect_chunks(
     element_size: usize,
     depth: usize,
     out: &mut Vec<Chunk>,
+    budget: &mut u32,
 ) -> Result<()> {
     if depth > MAX_DEPTH {
         return Err(bad("chunk B-tree recursion too deep"));
     }
-    let pos = btree as usize;
-    if data.len() < pos + 4 || &data[pos..pos + 4] != b"TREE" {
+    *budget = budget
+        .checked_sub(1)
+        .ok_or_else(|| bad("chunk B-tree exceeds the parser's work budget"))?;
+    let pos = at(data, btree, 8)?;
+    if &data[pos..pos + 4] != b"TREE" {
         return Err(bad("missing chunk TREE signature"));
     }
     if u8_at(data, pos + 4)? != 1 {
@@ -742,8 +830,10 @@ fn collect_chunks(
     for i in 0..entries {
         if level > 0 {
             let child = ctx.offset(data, keys_start + key_size + i * (key_size + ctx.o))?;
-            if child != UNDEF {
-                collect_chunks(data, ctx, child, ndims, shape, element_size, depth + 1, out)?;
+            if !ctx.is_undef(child) {
+                collect_chunks(
+                    data, ctx, child, ndims, shape, element_size, depth + 1, out, budget,
+                )?;
             }
         } else {
             let k = keys_start + i * (key_size + ctx.o);
@@ -751,16 +841,30 @@ fn collect_chunks(
             let filter_mask = u32_at(data, k + 4)?;
             let mut linear = 0u64;
             let mut stride = element_size as u64;
+            let mut coords = vec![0u64; ndims];
             for d in (0..ndims).rev() {
-                linear += u64_at(data, k + 8 + d * 8)? * stride;
-                stride = stride
-                    .checked_mul(shape[d])
-                    .ok_or_else(|| bad("chunk offset overflow"))?;
+                let c = u64_at(data, k + 8 + d * 8)?;
+                // A chunk's origin must be inside the dataset and on the
+                // chunk grid; otherwise its bytes have no home.
+                if c >= shape[d] {
+                    return Err(bad(format!(
+                        "chunk origin {c} outside dimension {d} (size {})",
+                        shape[d]
+                    )));
+                }
+                coords[d] = c;
+                linear = crate::safe::add(
+                    "hdf5 chunk offset",
+                    linear,
+                    crate::safe::mul("hdf5 chunk offset", c, stride)?,
+                )?;
+                stride = crate::safe::mul("hdf5 chunk stride", stride, shape[d])?;
             }
             let file_addr = ctx.offset(data, k + key_size)?;
-            if file_addr != UNDEF {
+            if !ctx.is_undef(file_addr) {
                 out.push(Chunk {
                     linear_offset: linear,
+                    coords,
                     file_addr,
                     size,
                     filter_mask,
@@ -771,11 +875,15 @@ fn collect_chunks(
     Ok(())
 }
 
+/// Reverses the filter pipeline for one chunk. Output is capped: a
+/// pipeline may legitimately list several filters, and nested deflate
+/// stages otherwise turn kilobytes into petabytes.
 fn apply_filters(
     mut bytes: Vec<u8>,
     filters: &[Filter],
     mask: u32,
     element_size: usize,
+    limit: u64,
 ) -> Result<Vec<u8>> {
     for (i, filter) in filters.iter().enumerate().rev() {
         if mask & (1 << i) != 0 {
@@ -784,9 +892,16 @@ fn apply_filters(
         bytes = match filter.id {
             FILTER_DEFLATE => {
                 let mut out = Vec::new();
-                flate2::read::ZlibDecoder::new(bytes.as_slice())
+                let mut decoder =
+                    flate2::read::ZlibDecoder::new(bytes.as_slice()).take(limit + 1);
+                decoder
                     .read_to_end(&mut out)
                     .map_err(|e| bad(format!("deflate: {e}")))?;
+                if out.len() as u64 > limit {
+                    return Err(bad(format!(
+                        "chunk decompresses beyond its {limit}-byte budget"
+                    )));
+                }
                 out
             }
             FILTER_SHUFFLE => unshuffle(&bytes, element_size),
@@ -823,42 +938,61 @@ fn read_chunked(
 ) -> Result<Vec<u8>> {
     let ndims = shape.len();
     let esize = dtype.width() as usize;
-    let total = shape
-        .iter()
-        .try_fold(1u64, |acc, &d| acc.checked_mul(d))
-        .and_then(|n| n.checked_mul(esize as u64))
-        .ok_or_else(|| bad("dataset size overflow"))? as usize;
+    let elems = crate::safe::product("hdf5 shape", shape)?;
+    let total_u64 = crate::safe::mul("hdf5 dataset size", elems, esize as u64)?;
+    // A chunked dataset is materialized in full, so its declared size must
+    // be plausible for the file at hand as well as within the alloc cap.
+    let total = crate::safe::alloc_size("hdf5 dataset", total_u64)?;
 
     let mut chunks = Vec::new();
-    collect_chunks(data, ctx, btree, ndims, shape, esize, 0, &mut chunks)?;
-    chunks.sort_by_key(|c| c.linear_offset);
+    let mut budget = MAX_NODES;
+    collect_chunks(data, ctx, btree, ndims, shape, esize, 0, &mut chunks, &mut budget)?;
+
+    // Every chunk must cover a distinct grid cell, and together they must
+    // cover the whole dataset. Without this a missing chunk would surface
+    // as silently zero-filled data.
+    let cells = chunk_dims
+        .iter()
+        .zip(shape)
+        .try_fold(1u64, |acc, (&c, &s)| {
+            crate::safe::mul("hdf5 chunk grid", acc, s.div_ceil(c as u64))
+        })?;
+    let mut seen: std::collections::BTreeSet<&[u64]> = std::collections::BTreeSet::new();
+    for chunk in &chunks {
+        for (d, (&c, &cd)) in chunk.coords.iter().zip(chunk_dims).enumerate() {
+            if c % cd as u64 != 0 {
+                return Err(bad(format!(
+                    "chunk origin {c} is off the chunk grid in dimension {d}"
+                )));
+            }
+        }
+        if !seen.insert(chunk.coords.as_slice()) {
+            return Err(bad("duplicate chunk in the B-tree"));
+        }
+    }
+    if seen.len() as u64 != cells {
+        return Err(bad(format!(
+            "chunked dataset covers {} of {cells} chunks; refusing to zero-fill the rest",
+            seen.len()
+        )));
+    }
 
     let mut out = vec![0u8; total];
     for chunk in &chunks {
-        let addr = chunk.file_addr as usize;
-        let end = addr
-            .checked_add(chunk.size as usize)
-            .filter(|&e| e <= data.len())
-            .ok_or_else(|| bad("chunk extends past file"))?;
-        let raw = data[addr..end].to_vec();
+        let raw = crate::safe::slice("hdf5 chunk", data, chunk.file_addr, chunk.size as u64)?
+            .to_vec();
         let bytes = if filters.is_empty() {
             raw
         } else {
-            apply_filters(raw, filters, chunk.filter_mask, esize)?
+            apply_filters(raw, filters, chunk.filter_mask, esize, MAX_CHUNK.min(total_u64))?
         };
 
-        let offset = chunk.linear_offset as usize;
+        let offset = crate::safe::to_usize("hdf5 chunk offset", chunk.linear_offset)?;
         if ndims <= 1 {
             let n = bytes.len().min(total.saturating_sub(offset));
             out[offset..offset + n].copy_from_slice(&bytes[..n]);
         } else {
-            let mut rem = offset / esize;
-            let mut start = vec![0u64; ndims];
-            for d in (0..ndims).rev() {
-                start[d] = rem as u64 % shape[d];
-                rem /= shape[d] as usize;
-            }
-            copy_chunk(&bytes, &mut out, shape, chunk_dims, &start, esize);
+            copy_chunk(&bytes, &mut out, shape, chunk_dims, &chunk.coords, esize)?;
         }
     }
     Ok(out)
@@ -871,7 +1005,7 @@ fn copy_chunk(
     chunk_dims: &[u32],
     start: &[u64],
     esize: usize,
-) {
+) -> Result<()> {
     let ndims = shape.len();
     let actual: Vec<usize> = (0..ndims)
         .map(|d| (chunk_dims[d] as u64).min(shape[d] - start[d]) as usize)
@@ -888,21 +1022,41 @@ fn copy_chunk(
             rem /= actual[d];
             let mut cstride = chunk_dims[ndims - 1] as usize * esize;
             for &cd in &chunk_dims[d + 1..ndims - 1] {
-                cstride *= cd as usize;
+                cstride = cstride
+                    .checked_mul(cd as usize)
+                    .ok_or_else(|| bad("chunk stride overflows"))?;
             }
-            src += c * cstride;
+            src = src
+                .checked_add(c.checked_mul(cstride).ok_or_else(|| bad("chunk stride overflows"))?)
+                .ok_or_else(|| bad("chunk stride overflows"))?;
             let mut dstride = 1u64;
             for &s in &shape[d + 1..ndims] {
-                dstride *= s;
+                dstride = crate::safe::mul("hdf5 dataset stride", dstride, s)?;
             }
-            dst += (start[d] + c as u64) * dstride;
+            dst = crate::safe::add(
+                "hdf5 dataset offset",
+                dst,
+                crate::safe::mul("hdf5 dataset offset", start[d] + c as u64, dstride)?,
+            )?;
         }
-        dst += start[ndims - 1];
-        let dst_byte = dst as usize * esize;
-        if dst_byte + row_len <= out.len() && src + row_len <= chunk.len() {
-            out[dst_byte..dst_byte + row_len].copy_from_slice(&chunk[src..src + row_len]);
-        }
+        dst = crate::safe::add("hdf5 dataset offset", dst, start[ndims - 1])?;
+        let dst_byte = crate::safe::to_usize(
+            "hdf5 dataset offset",
+            crate::safe::mul("hdf5 dataset offset", dst, esize as u64)?,
+        )?;
+        // Out-of-range pieces are a malformed file, not something to skip:
+        // skipping would leave zeros behind and call it success.
+        let dst_end = dst_byte
+            .checked_add(row_len)
+            .filter(|&e| e <= out.len())
+            .ok_or_else(|| bad("chunk row lands outside the dataset"))?;
+        let src_end = src
+            .checked_add(row_len)
+            .filter(|&e| e <= chunk.len())
+            .ok_or_else(|| bad("chunk row exceeds the decompressed chunk"))?;
+        out[dst_byte..dst_end].copy_from_slice(&chunk[src..src_end]);
     }
+    Ok(())
 }
 
 #[cfg(test)]

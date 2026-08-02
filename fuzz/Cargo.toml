@@ -12,7 +12,16 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
+tempfile = "3"
 ztensor = { path = "../ztensor" }
+ztensor-compat = { path = "../ztensor-compat", features = [
+    "safetensors",
+    "gguf",
+    "npz",
+    "pickle",
+    "hdf5",
+    "onnx",
+] }
 
 [[bin]]
 name = "fuzz_validate"
@@ -23,6 +32,12 @@ doc = false
 [[bin]]
 name = "fuzz_cbor"
 path = "fuzz_targets/fuzz_cbor.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_compat"
+path = "fuzz_targets/fuzz_compat.rs"
 test = false
 doc = false
 

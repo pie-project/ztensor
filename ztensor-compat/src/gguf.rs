@@ -217,8 +217,7 @@ impl Source for Gguf {
 
     fn view(&self, object: &str, part: &str) -> Result<&[u8]> {
         let p = self.part(object, part)?;
-        let start = p.blob.offset as usize;
-        Ok(&self.mmap[start..start + p.blob.length as usize])
+        crate::safe::slice("gguf tensor", &self.mmap, p.blob.offset, p.blob.length)
     }
 
     fn caps(&self, object: &str, part: &str) -> Result<Caps> {
@@ -263,7 +262,10 @@ fn project(buf: &[u8]) -> Result<(Manifest, Vec<(u64, u64)>)> {
 
     // Metadata.
     let mut alignment = 32u64;
-    let mut attributes: Vec<(Value, Value)> = Vec::with_capacity(kv_count as usize);
+    // A KV needs at least a 8-byte length + 4-byte type on disk; a count
+    // beyond that is a lie and must not drive the allocation.
+    let mut attributes: Vec<(Value, Value)> =
+        Vec::with_capacity(crate::safe::capacity(kv_count, 13, buf.len()));
     for _ in 0..kv_count {
         let key = c.string()?;
         let vtype = c.u32()?;
@@ -284,7 +286,7 @@ fn project(buf: &[u8]) -> Result<(Manifest, Vec<(u64, u64)>)> {
         type_id: u32,
         offset: u64,
     }
-    let mut infos = Vec::with_capacity(tensor_count as usize);
+    let mut infos = Vec::with_capacity(crate::safe::capacity(tensor_count, 24, buf.len()));
     for _ in 0..tensor_count {
         let name = c.string()?;
         let n_dims = c.u32()?;
@@ -307,8 +309,15 @@ fn project(buf: &[u8]) -> Result<(Manifest, Vec<(u64, u64)>)> {
         });
     }
 
-    let data_start = (c.pos as u64).div_ceil(alignment) * alignment;
-    let data_len = (buf.len() as u64).saturating_sub(data_start);
+    let data_start = crate::safe::mul(
+        "gguf data section",
+        (c.pos as u64).div_ceil(alignment),
+        alignment,
+    )?;
+    if data_start > buf.len() as u64 {
+        return Err(bad("aligned data section starts past end of file"));
+    }
+    let data_len = buf.len() as u64 - data_start;
 
     let mut objects = BTreeMap::new();
     let mut ranges = vec![(0u64, data_start.min(buf.len() as u64))]; // header region
@@ -322,18 +331,11 @@ fn project(buf: &[u8]) -> Result<(Manifest, Vec<(u64, u64)>)> {
                 info.name
             )));
         }
-        let elems = info
-            .shape
-            .iter()
-            .try_fold(1u64, |acc, &d| acc.checked_mul(d))
-            .ok_or_else(|| bad(format!("tensor {:?} shape overflows", info.name)))?;
-        let byte_size = (elems / epb)
-            .checked_mul(block_bytes)
-            .ok_or_else(|| bad(format!("tensor {:?} size overflows", info.name)))?;
-        let abs = data_start
-            .checked_add(info.offset)
-            .filter(|&s| s.checked_add(byte_size).is_some_and(|e| e - data_start <= data_len))
-            .ok_or_else(|| bad(format!("tensor {:?} extends past end of file", info.name)))?;
+        let elems = crate::safe::product("gguf shape", &info.shape)?;
+        let byte_size = crate::safe::mul("gguf tensor size", elems / epb, block_bytes)?;
+        let abs = crate::safe::add("gguf tensor offset", data_start, info.offset)?;
+        crate::safe::range("gguf tensor", abs, byte_size, buf.len())?;
+        let _ = data_len;
 
         let (layout, attrs, dtype) = match element_dtype(info.type_id) {
             Some(dt) => (Layout::Dense, None, dt),

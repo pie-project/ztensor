@@ -7,7 +7,7 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use xxhash_rust::xxh3::xxh3_64;
-use ztensor::{Error, Reader, Source, Writer};
+use ztensor::{Error, Reader, Writer};
 use ztensor_compat::{detect, open_any};
 
 const USAGE: &str = "\
@@ -158,27 +158,32 @@ fn verify(path: &Path, deep: bool) -> Result<ExitCode, Error> {
     }
 
     let model = ztensor::Model::open(path)?;
-    let manifest = model.manifest().clone();
+    // Names are collected first so the borrow ends before verify() runs.
+    let parts: Vec<(String, String)> = model
+        .manifest()
+        .objects
+        .iter()
+        .flat_map(|(name, obj)| obj.parts.keys().map(move |p| (name.clone(), p.clone())))
+        .collect();
     let (mut verified, mut undigested) = (0u64, 0u64);
-    for (name, obj) in &manifest.objects {
-        for part in obj.parts.keys() {
-            if model.verify(name, part)? {
-                verified += 1;
-            } else {
-                undigested += 1;
-            }
+    for (name, part) in &parts {
+        if model.verify(name, part)? {
+            verified += 1;
+        } else {
+            undigested += 1;
         }
     }
     if deep {
         model.verify_shards()?;
     }
+    let shard_count = model.manifest().shards.len();
     println!(
         "{}: ok — {verified} part(s) digest-verified, {undigested} without digests{}{}",
         path.display(),
-        if manifest.shards.is_empty() {
+        if shard_count == 0 {
             String::new()
         } else {
-            format!(", {} shard(s) resolved", manifest.shards.len())
+            format!(", {shard_count} shard(s) resolved")
         },
         if deep { ", shard digests verified" } else { "" },
     );
@@ -211,7 +216,7 @@ fn convert(input: &Path, output: &Path, align: Option<u64>) -> Result<ExitCode, 
 fn diff(a_path: &Path, b_path: &Path) -> Result<ExitCode, Error> {
     let a = open_any(a_path)?;
     let b = open_any(b_path)?;
-    let (ma, mb) = (a.manifest().clone(), b.manifest().clone());
+    let (ma, mb) = (a.manifest(), b.manifest());
 
     let mut added = 0u64;
     let mut removed = 0u64;

@@ -15,8 +15,8 @@ use xxhash_rust::xxh3::xxh3_64;
 
 use crate::error::{Error, Result, Rule};
 use crate::models::{
-    check_name, registered_dtype, DType, Manifest, Object, Part, ALIGN_FLOOR, FOOTER_LEN, MAGIC,
-    MAX_MANIFEST_LEN, MAX_RANK, VERSION,
+    check_logical_values, check_name, parse_xxh3, registered_dtype, DType, Manifest, Object,
+    Part, ALIGN_FLOOR, FOOTER_LEN, MAGIC, MAX_MANIFEST_LEN, MAX_RANK, MIN_FILE_LEN, VERSION,
 };
 use crate::cbor;
 use crate::profiles::{encoding_profile, layout_profile};
@@ -84,12 +84,7 @@ impl Reader {
     }
 
     fn part(&self, name: &str, part: &str) -> Result<&Part> {
-        let obj = self
-            .get(name)
-            .ok_or_else(|| Error::NotFound(format!("object {name:?}")))?;
-        obj.parts
-            .get(part)
-            .ok_or_else(|| Error::NotFound(format!("part {name:?}/{part:?}")))
+        self.manifest.part(name, part)
     }
 
     /// Tier 2: zero-copy view of a part's stored bytes.
@@ -140,12 +135,7 @@ impl Reader {
         let raw_local = p.blob.shard == 0 && p.encoding.is_none();
         let page_exclusive = raw_local
             && is_page_exclusive(&self.ranges, p.blob.offset, p.blob.length, page_size());
-        Ok(Caps {
-            zero_copy: raw_local,
-            alignment: 1u64 << p.blob.offset.trailing_zeros().min(63),
-            verifiable: p.digest.is_some(),
-            page_exclusive,
-        })
+        Ok(Caps::for_part(p, raw_local, page_exclusive))
     }
 
     /// Drops the OS page cache for a part's exact page range (weight
@@ -157,24 +147,19 @@ impl Reader {
         if p.blob.length == 0 {
             return Ok(());
         }
-        let caps = self.caps(name, part)?;
-        if !caps.zero_copy {
+        if p.blob.shard != 0 || p.encoding.is_some() {
             return Err(Error::Unsupported(
                 "evict applies to raw local parts only".into(),
             ));
         }
-        if !caps.page_exclusive {
+        if !is_page_exclusive(&self.ranges, p.blob.offset, p.blob.length, page_size()) {
             return Err(Error::Unsupported(format!(
                 "{name:?}/{part:?} shares an OS page with another blob; \
                  eviction would drop a neighbor's cache"
             )));
         }
-        let page = page_size();
-        let start = p.blob.offset & !(page - 1);
-        let end = (p.blob.offset + p.blob.length)
-            .div_ceil(page)
-            .saturating_mul(page)
-            .min(self.mmap.len() as u64);
+        let (start, end) = page_envelope(p.blob.offset, p.blob.length, page_size());
+        let end = end.min(self.mmap.len() as u64);
         // SAFETY: the map is a read-only shared file mapping — DontNeed
         // only drops clean page-cache pages; later accesses re-fault from
         // the file. It cannot discard writes because none exist.
@@ -203,24 +188,66 @@ impl Reader {
         Ok(())
     }
 
-    /// Verifies a part's stored digest against its decoded bytes.
-    /// Returns `Ok(false)` when the part carries no digest.
+    /// Verifies a part's digest and logical-type content rules.
+    /// See the free [`verify`] function.
     pub fn verify(&self, name: &str, part: &str) -> Result<bool> {
-        let p = self.part(name, part)?;
-        let Some(digest) = p.digest.clone() else {
-            return Ok(false);
-        };
-        // Digests cover decoded bytes (§3.4): zero-copy for raw parts,
-        // decode for encoded ones.
-        let owned;
-        let bytes: &[u8] = if p.encoding.is_none() {
-            self.view(name, part)?
-        } else {
-            owned = self.read(name, part)?;
-            &owned
-        };
-        check_xxh3_digest(&digest, bytes, name, part)
+        verify(self, name, part)
     }
+}
+
+/// Verifies one part of any [`Source`]: its digest (if present) over the
+/// decoded bytes, plus the content rules of registered logical types
+/// (spec Appendix A — e.g. `bool` bytes must be 0 or 1).
+///
+/// Returns `Ok(true)` when a digest was checked, `Ok(false)` when the part
+/// carries none; content-rule violations are errors either way.
+pub fn verify(src: &dyn Source, name: &str, part: &str) -> Result<bool> {
+    let manifest = src.manifest();
+    let obj = manifest.object(name)?;
+    let p = manifest.part(name, part)?;
+    let digest = p.digest.clone();
+    let ltype = p.ltype.clone();
+    let elems = if obj.layout.as_str() == "dense" {
+        Some(obj.num_elements()?)
+    } else {
+        None
+    };
+
+    if digest.is_none() && ltype.is_none() {
+        return Ok(false);
+    }
+    // Digests and content rules cover decoded bytes (§3.4): zero-copy when
+    // the source can serve a view, decoded read otherwise.
+    let owned;
+    let bytes: &[u8] = if src.caps(name, part)?.zero_copy {
+        src.view(name, part)?
+    } else {
+        owned = src.read(name, part)?;
+        &owned
+    };
+    if let Some(lt) = &ltype {
+        check_logical_values(lt, bytes, elems)?;
+    }
+    match digest {
+        None => Ok(false),
+        Some(d) => {
+            if xxh3_64(bytes) != parse_xxh3(&d)? {
+                return Err(Error::reject(
+                    Rule::Digest,
+                    format!("digest mismatch for {name:?}/{part:?}"),
+                ));
+            }
+            Ok(true)
+        }
+    }
+}
+
+/// Page-aligned envelope of a byte range.
+pub(crate) fn page_envelope(offset: u64, length: u64, page: u64) -> (u64, u64) {
+    (
+        offset & !(page - 1),
+        (offset + length).div_ceil(page).saturating_mul(page),
+    )
 }
 
 /// An assembled `zt.sparse_csr/1` object with its data-level rules checked.
@@ -250,62 +277,59 @@ impl Reader {
 /// non-decreasing, `indptr[rows] == nnz`, per-row strictly increasing
 /// indices, and every index `< cols`.
 pub fn read_csr(src: &dyn Source, name: &str) -> Result<Csr> {
-    let (rows, cols, idx_dtype, vpart) = {
-        let obj = src
-            .manifest()
-            .objects
-            .get(name)
-            .ok_or_else(|| Error::NotFound(format!("object {name:?}")))?;
-        if obj.layout.as_str() != "zt.sparse_csr/1" {
-            return Err(Error::Unsupported(format!(
-                "{name:?} has layout {:?}, not zt.sparse_csr/1",
-                obj.layout.as_str()
-            )));
-        }
-        // rank and part presence were validated at open
-        (
-            obj.shape[0],
-            obj.shape[1],
-            obj.parts["indices"].dtype,
-            obj.parts["values"].clone(),
-        )
-    };
-    {
-        let indices = widen_indices(&src.read(name, "indices")?, idx_dtype);
-        let indptr = widen_indices(&src.read(name, "indptr")?, idx_dtype);
-        let values = src.read(name, "values")?;
-        let nnz = indices.len() as u64;
-
-        let bad = |detail: String| Err(Error::reject(Rule::LayoutData, detail));
-        if indptr.first() != Some(&0) {
-            return bad(format!("{name:?}: indptr must start at 0"));
-        }
-        if indptr.windows(2).any(|w| w[0] > w[1]) {
-            return bad(format!("{name:?}: indptr must be non-decreasing"));
-        }
-        if indptr.last() != Some(&nnz) {
-            return bad(format!("{name:?}: indptr must end at nnz ({nnz})"));
-        }
-        for r in 0..rows as usize {
-            let row = &indices[indptr[r] as usize..indptr[r + 1] as usize];
-            if row.windows(2).any(|w| w[0] >= w[1]) {
-                return bad(format!("{name:?}: row {r} indices not strictly increasing"));
-            }
-            if row.last().is_some_and(|&c| c >= cols) {
-                return bad(format!("{name:?}: row {r} has an index >= cols ({cols})"));
-            }
-        }
-
-        Ok(Csr {
-            rows,
-            cols,
-            values,
-            dtype: vpart.dtype,
-            ltype: vpart.ltype,
-            indices,
-            indptr,
-        })
+    let obj = src.manifest().object(name)?;
+    if obj.layout.as_str() != "zt.sparse_csr/1" {
+        return Err(Error::Unsupported(format!(
+            "{name:?} has layout {:?}, not zt.sparse_csr/1",
+            obj.layout.as_str()
+        )));
     }
+    // Re-run the metadata rules so this holds for any Source, including
+    // projections that never went through .zt open-time validation.
+    crate::profiles::layout_profile("zt.sparse_csr/1")
+        .expect("built-in profile")
+        .validate(name, obj)?;
+    let (rows, cols) = (obj.shape[0], obj.shape[1]);
+    let idx_dtype = obj.parts["indices"].dtype;
+    let (vdtype, vltype) = {
+        let v = &obj.parts["values"];
+        (v.dtype, v.ltype.clone())
+    };
+
+    let indices = widen_indices(&src.read(name, "indices")?, idx_dtype);
+    let indptr = widen_indices(&src.read(name, "indptr")?, idx_dtype);
+    let values = src.read(name, "values")?;
+    let nnz = indices.len() as u64;
+
+    let bad = |detail: String| Err(Error::reject(Rule::LayoutData, detail));
+    if indptr.first() != Some(&0) {
+        return bad(format!("{name:?}: indptr must start at 0"));
+    }
+    if indptr.windows(2).any(|w| w[0] > w[1]) {
+        return bad(format!("{name:?}: indptr must be non-decreasing"));
+    }
+    if indptr.last() != Some(&nnz) {
+        return bad(format!("{name:?}: indptr must end at nnz ({nnz})"));
+    }
+    for r in 0..rows as usize {
+        let row = &indices[indptr[r] as usize..indptr[r + 1] as usize];
+        if row.windows(2).any(|w| w[0] >= w[1]) {
+            return bad(format!("{name:?}: row {r} indices not strictly increasing"));
+        }
+        if row.last().is_some_and(|&c| c >= cols) {
+            return bad(format!("{name:?}: row {r} has an index >= cols ({cols})"));
+        }
+    }
+
+    Ok(Csr {
+        rows,
+        cols,
+        values,
+        dtype: vdtype,
+        ltype: vltype,
+        indices,
+        indptr,
+    })
 }
 
 /// Decodes a part's stored bytes per its encoding profile (identity for
@@ -319,29 +343,6 @@ pub(crate) fn decode_part(part: &Part, stored: &[u8]) -> Result<Vec<u8>> {
             profile.decode(stored, part.decoded_size())
         }
     }
-}
-
-/// Verifies an `xxh3:` digest string over decoded bytes.
-pub(crate) fn check_xxh3_digest(
-    digest: &str,
-    bytes: &[u8],
-    name: &str,
-    part: &str,
-) -> Result<bool> {
-    let Some(hex) = digest.strip_prefix("xxh3:") else {
-        return Err(Error::Unsupported(format!(
-            "digest algorithm in {digest:?} (only xxh3 supported)"
-        )));
-    };
-    let expected = u64::from_str_radix(hex, 16)
-        .map_err(|_| Error::reject(Rule::Digest, format!("malformed digest {digest:?}")))?;
-    if xxh3_64(bytes) != expected {
-        return Err(Error::reject(
-            Rule::Digest,
-            format!("digest mismatch for {name:?}/{part:?}"),
-        ));
-    }
-    Ok(true)
 }
 
 fn widen_indices(bytes: &[u8], dtype: DType) -> Vec<u64> {
@@ -383,8 +384,7 @@ fn is_page_exclusive(ranges: &[(u64, u64)], offset: u64, length: u64, page: u64)
     if length == 0 {
         return true;
     }
-    let env_start = offset & !(page - 1);
-    let env_end = (offset + length).div_ceil(page).saturating_mul(page);
+    let (env_start, env_end) = page_envelope(offset, length, page);
     let Ok(i) = ranges.binary_search(&(offset, length)) else {
         return false; // not an occupied range we know about
     };
@@ -403,30 +403,39 @@ fn is_page_exclusive(ranges: &[(u64, u64)], offset: u64, length: u64, page: u64)
 /// (manifest, is_data_shard, sorted local blob ranges incl. the manifest).
 type ParsedFile = (Manifest, bool, Vec<(u64, u64)>);
 
-fn parse_and_validate(buf: &[u8]) -> Result<ParsedFile> {
-    let file_len = buf.len() as u64;
-    if file_len < 48 {
-        return Err(Error::reject(Rule::FileTooSmall, "file shorter than 48 B"));
+/// Checks the frame every container shares — minimum size, header magic,
+/// footer magic, supported version — and returns the footer slice.
+/// (Reserved footer bytes are written as zero and ignored on read.)
+pub(crate) fn check_container(buf: &[u8]) -> Result<&[u8]> {
+    if (buf.len() as u64) < MIN_FILE_LEN {
+        return Err(Error::reject(
+            Rule::FileTooSmall,
+            format!("file shorter than {MIN_FILE_LEN} B"),
+        ));
     }
     if buf[..8] != MAGIC {
         return Err(Error::reject(Rule::HeaderMagic, "bad header magic"));
     }
-
     let footer = &buf[buf.len() - FOOTER_LEN as usize..];
-    let manifest_offset = u64::from_le_bytes(footer[0..8].try_into().unwrap());
-    let manifest_length = u64::from_le_bytes(footer[8..16].try_into().unwrap());
-    let manifest_hash = u64::from_le_bytes(footer[16..24].try_into().unwrap());
-    let version = u32::from_le_bytes(footer[24..28].try_into().unwrap());
-    // footer[28..32] is reserved: written as zero, ignored on read.
     if footer[32..40] != MAGIC {
         return Err(Error::reject(Rule::FooterMagic, "bad footer magic"));
     }
+    let version = u32::from_le_bytes(footer[24..28].try_into().unwrap());
     if version != VERSION {
         return Err(Error::reject(
             Rule::Version,
             format!("unsupported version {version}"),
         ));
     }
+    Ok(footer)
+}
+
+fn parse_and_validate(buf: &[u8]) -> Result<ParsedFile> {
+    let file_len = buf.len() as u64;
+    let footer = check_container(buf)?;
+    let manifest_offset = u64::from_le_bytes(footer[0..8].try_into().unwrap());
+    let manifest_length = u64::from_le_bytes(footer[8..16].try_into().unwrap());
+    let manifest_hash = u64::from_le_bytes(footer[16..24].try_into().unwrap());
 
     if manifest_length == 0 {
         if manifest_offset != 0 || manifest_hash != 0 {
@@ -479,7 +488,7 @@ fn validate_manifest(
     manifest_blob: (u64, u64),
 ) -> Result<Vec<(u64, u64)>> {
     for (&idx, shard) in &manifest.shards {
-        if shard.size < 48 {
+        if shard.size < crate::models::MIN_FILE_LEN {
             return Err(Error::reject(
                 Rule::Schema,
                 format!("shard {idx}: size {} below minimum file size", shard.size),
@@ -487,8 +496,12 @@ fn validate_manifest(
         }
     }
 
-    // Local blob references, for the identical-or-disjoint check (§2.4).
-    let mut local_refs: Vec<(u64, u64)> = vec![manifest_blob];
+    // Blob references grouped by the file they live in, for the per-file
+    // identical-or-disjoint check (§2.4 / §3.6 rule 4). Shard 0 also holds
+    // the manifest blob.
+    let mut refs_by_shard: std::collections::BTreeMap<u64, Vec<(u64, u64)>> =
+        std::collections::BTreeMap::new();
+    refs_by_shard.insert(0, vec![manifest_blob]);
 
     for (name, obj) in &manifest.objects {
         check_name(name)?;
@@ -532,8 +545,11 @@ fn validate_manifest(
                         format!("{name:?}/{pname:?}: blob outside data region"),
                     )
                 })?;
-            if b.shard == 0 && b.length > 0 {
-                local_refs.push((b.offset, b.length));
+            if b.length > 0 {
+                refs_by_shard
+                    .entry(b.shard)
+                    .or_default()
+                    .push((b.offset, b.length));
             }
             // Registered logical types pin their storage type (§4.2),
             // regardless of layout.
@@ -556,21 +572,27 @@ fn validate_manifest(
         }
     }
 
-    // Identical-or-disjoint (§2.4): sort, drop exact duplicates, then any
-    // remaining pair that overlaps is a partial overlap.
-    local_refs.sort_unstable();
-    local_refs.dedup();
-    for w in local_refs.windows(2) {
-        let (a_off, a_len) = w[0];
-        let (b_off, _) = w[1];
-        if a_off + a_len > b_off {
-            return Err(Error::reject(
-                Rule::BlobOverlap,
-                format!("blobs at {a_off} (+{a_len}) and {b_off} partially overlap"),
-            ));
+    // Identical-or-disjoint per referenced file (§2.4): sort, drop exact
+    // duplicates, then any remaining pair that overlaps is a partial
+    // overlap.
+    for (shard, refs) in &mut refs_by_shard {
+        refs.sort_unstable();
+        refs.dedup();
+        for w in refs.windows(2) {
+            let (a_off, a_len) = w[0];
+            let (b_off, _) = w[1];
+            if a_off + a_len > b_off {
+                return Err(Error::reject(
+                    Rule::BlobOverlap,
+                    format!(
+                        "blobs at {a_off} (+{a_len}) and {b_off} in shard {shard} \
+                         partially overlap"
+                    ),
+                ));
+            }
         }
     }
-    Ok(local_refs)
+    Ok(refs_by_shard.remove(&0).unwrap_or_default())
 }
 
 #[cfg(test)]

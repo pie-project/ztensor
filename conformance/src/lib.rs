@@ -647,6 +647,158 @@ pub fn all_cases() -> Vec<Case> {
         Expect::Reject(Rule::ShardIndex),
     ));
 
+    // ---- reject: attributes ------------------------------------------
+    cases.push(Case::open(
+        "attributes-not-a-map",
+        assemble_raw(
+            8,
+            &cbor::encode(&Value::Map(vec![
+                (text("attributes"), Value::Uint(7)),
+                (text("objects"), Value::Map(vec![])),
+            ]))
+            .unwrap(),
+        ),
+        Expect::Reject(Rule::Schema),
+    ));
+    cases.push(Case::open(
+        "attribute-key-empty",
+        assemble(
+            8,
+            &Value::Map(vec![
+                (text("attributes"), Value::Map(vec![(text(""), Value::Null)])),
+                (text("objects"), Value::Map(vec![])),
+            ]),
+        ),
+        Expect::Reject(Rule::Name),
+    ));
+    cases.push(Case::open(
+        "attribute-key-nul",
+        assemble(
+            8,
+            &Value::Map(vec![
+                (
+                    text("attributes"),
+                    Value::Map(vec![(text("a\u{0000}b"), Value::Null)]),
+                ),
+                (text("objects"), Value::Map(vec![])),
+            ]),
+        ),
+        Expect::Reject(Rule::Name),
+    ));
+    cases.push(Case::open(
+        "attribute-key-not-text",
+        assemble(
+            8,
+            &Value::Map(vec![
+                (
+                    text("attributes"),
+                    Value::Map(vec![(Value::Uint(1), Value::Null)]),
+                ),
+                (text("objects"), Value::Map(vec![])),
+            ]),
+        ),
+        Expect::Reject(Rule::Schema),
+    ));
+    cases.push(Case::open(
+        "object-attributes-not-a-map",
+        assemble(
+            4104,
+            &manifest(vec![(
+                "t",
+                Value::Map(vec![
+                    (text("shape"), uints(&[8])),
+                    (text("layout"), text("dense")),
+                    (text("attributes"), Value::Uint(1)),
+                    (
+                        text("parts"),
+                        vmap(vec![("data", part("u8", [0, 4096, 8], vec![]))]),
+                    ),
+                ]),
+            )]),
+        ),
+        Expect::Reject(Rule::Schema),
+    ));
+
+    // ---- reject: cross-shard overlap ---------------------------------
+    cases.push(Case::open(
+        "shard-blob-partial-overlap",
+        assemble(
+            8,
+            &Value::Map(vec![
+                (
+                    text("objects"),
+                    vmap(vec![
+                        (
+                            "a",
+                            object(
+                                &[2048],
+                                "dense",
+                                vec![("data", part("f32", [1, 4096, 8192], vec![]))],
+                            ),
+                        ),
+                        (
+                            "b",
+                            object(
+                                &[2],
+                                "dense",
+                                vec![("data", part("f32", [1, 8192, 8], vec![]))],
+                            ),
+                        ),
+                    ]),
+                ),
+                (
+                    text("shards"),
+                    Value::Map(vec![(
+                        Value::Uint(1),
+                        vmap(vec![
+                            ("size", Value::Uint(1 << 20)),
+                            ("digest", text("xxh3:00112233445566aa")),
+                        ]),
+                    )]),
+                ),
+            ]),
+        ),
+        Expect::Reject(Rule::BlobOverlap),
+    ));
+
+    // ---- logical-type content rules (Appendix A) ---------------------
+    cases.push(Case {
+        name: "bool-invalid-byte",
+        bytes: assemble(
+            4104,
+            &manifest(vec![(
+                "t",
+                object(
+                    &[8],
+                    "dense",
+                    vec![("data", part("u8", [0, 4096, 8], vec![("type", text("bool"))]))],
+                ),
+            )]),
+        ),
+        op: Op::Verify("t", "data"),
+        expect: Expect::Reject(Rule::LayoutData),
+    });
+    cases.push(Case {
+        name: "f4-nonzero-odd-nibble",
+        // 5 elements -> 3 bytes; the filler 0xab has a nonzero high nibble
+        bytes: assemble(
+            4099,
+            &manifest(vec![(
+                "t",
+                object(
+                    &[5],
+                    "dense",
+                    vec![(
+                        "data",
+                        part("u8", [0, 4096, 3], vec![("type", text("f4_e2m1"))]),
+                    )],
+                ),
+            )]),
+        ),
+        op: Op::Verify("t", "data"),
+        expect: Expect::Reject(Rule::LayoutData),
+    });
+
     // ---- reject: names and shapes ------------------------------------
     cases.push(Case::open(
         "name-empty",

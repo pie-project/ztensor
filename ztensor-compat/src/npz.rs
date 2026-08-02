@@ -126,6 +126,9 @@ fn find_shape(header: &str) -> Result<Vec<u64>> {
         .ok_or_else(|| bad("header missing 'shape'"))?;
     let open = after.find('(').ok_or_else(|| bad("shape missing '('"))?;
     let close = after.find(')').ok_or_else(|| bad("shape missing ')'"))?;
+    if close < open {
+        return Err(bad("malformed shape tuple"));
+    }
     let mut dims = Vec::new();
     for tok in after[open + 1..close].split(',') {
         let tok = tok.trim();
@@ -231,11 +234,7 @@ impl Npz {
             };
 
             // Size equation: never trust the header blindly.
-            let elems = header
-                .shape
-                .iter()
-                .try_fold(1u64, |acc, &d| acc.checked_mul(d))
-                .ok_or_else(|| bad(format!("entry {name:?} shape overflows")))?;
+            let elems = crate::safe::product("npz shape", &header.shape)?;
             let expected = ztensor::logical_size(header.ltype, header.dtype, elems)
                 .ok_or_else(|| bad("size not computable"))?;
             let actual = match &location {
@@ -263,15 +262,20 @@ impl Npz {
             let mut parts = BTreeMap::new();
             parts.insert("data".to_string(), part);
             locations.insert(name.clone(), location);
-            objects.insert(
-                name,
-                Object {
-                    shape: header.shape,
-                    layout: Layout::Dense,
-                    attributes: None,
-                    parts,
-                },
-            );
+            if objects
+                .insert(
+                    name.clone(),
+                    Object {
+                        shape: header.shape,
+                        layout: Layout::Dense,
+                        attributes: None,
+                        parts,
+                    },
+                )
+                .is_some()
+            {
+                return Err(bad(format!("duplicate entry name {name:?}")));
+            }
         }
 
         Ok(Self {
@@ -304,22 +308,33 @@ impl Source for Npz {
     fn read(&self, object: &str, part: &str) -> Result<Vec<u8>> {
         match self.location(object, part)? {
             Location::Stored { offset, length } => {
-                Ok(self.mmap[*offset as usize..(*offset + *length) as usize].to_vec())
+                crate::safe::slice("npz entry", &self.mmap, *offset, *length)
+                    .map(<[u8]>::to_vec)
             }
             Location::Deflated {
                 zip_index,
                 data_offset,
                 data_len,
             } => {
+                // The expected size is the *validated* one (shape × width
+                // plus the header), never the ZIP's declared size: reading
+                // with a hard limit keeps a lying entry from driving the
+                // allocation.
+                let expected = crate::safe::add(
+                    "npz entry",
+                    *data_offset as u64,
+                    *data_len,
+                )?;
+                let cap = crate::safe::alloc_size("npz entry", expected)?;
                 let mut archive = self.archive.borrow_mut();
                 let mut entry = archive
                     .by_index(*zip_index)
                     .map_err(|e| bad(format!("ZIP entry: {e}")))?;
-                let mut bytes = Vec::with_capacity((*data_offset as u64 + data_len) as usize);
-                entry
+                let mut bytes = Vec::with_capacity(cap);
+                std::io::Read::take(&mut entry, expected + 1)
                     .read_to_end(&mut bytes)
                     .map_err(|e| bad(format!("decompress: {e}")))?;
-                if bytes.len() as u64 != *data_offset as u64 + data_len {
+                if bytes.len() as u64 != expected {
                     return Err(bad("decompressed size mismatch"));
                 }
                 Ok(bytes.split_off(*data_offset))
@@ -330,7 +345,7 @@ impl Source for Npz {
     fn view(&self, object: &str, part: &str) -> Result<&[u8]> {
         match self.location(object, part)? {
             Location::Stored { offset, length } => {
-                Ok(&self.mmap[*offset as usize..(*offset + *length) as usize])
+                crate::safe::slice("npz entry", &self.mmap, *offset, *length)
             }
             Location::Deflated { .. } => Err(Error::Unsupported(
                 "deflated npz entry has no zero-copy view".into(),

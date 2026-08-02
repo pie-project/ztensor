@@ -8,7 +8,6 @@ use pyo3::exceptions::{PyIOError, PyKeyError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict};
 
-use ztensor::Source as _;
 
 fn err(e: ztensor::Error) -> PyErr {
     match e {

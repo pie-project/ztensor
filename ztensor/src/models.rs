@@ -21,6 +21,8 @@ pub const MAX_MANIFEST_LEN: u64 = 1 << 30;
 pub const MAX_NAME_LEN: usize = 1024;
 /// Maximum shape rank (spec §3.3).
 pub const MAX_RANK: usize = 64;
+/// Minimum container size: header magic plus footer (spec §2.1).
+pub const MIN_FILE_LEN: u64 = MAGIC.len() as u64 + FOOTER_LEN;
 
 /// Storage types: the closed set of 12 primitives (spec §4.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -204,11 +206,87 @@ pub struct Manifest {
     pub objects: BTreeMap<String, Object>,
 }
 
+impl Manifest {
+    /// Looks up an object by name.
+    pub fn object(&self, name: &str) -> Result<&Object> {
+        self.objects
+            .get(name)
+            .ok_or_else(|| Error::NotFound(format!("object {name:?}")))
+    }
+
+    /// Looks up a part of an object.
+    pub fn part(&self, name: &str, part: &str) -> Result<&Part> {
+        self.object(name)?
+            .parts
+            .get(part)
+            .ok_or_else(|| Error::NotFound(format!("part {name:?}/{part:?}")))
+    }
+}
+
 /// Name rules (spec §3.5): non-empty UTF-8 (guaranteed by CBOR decode),
 /// ≤ 1024 bytes, no NUL. NFC is a writer duty, not a reader check.
 pub(crate) fn check_name(s: &str) -> Result<()> {
     if s.is_empty() || s.len() > MAX_NAME_LEN || s.contains('\0') {
         return Err(Error::reject(Rule::Name, format!("invalid name {s:?}")));
+    }
+    Ok(())
+}
+
+/// Attributes rules (spec §3.1/§3.5): the value MUST be a map whose
+/// top-level keys are text obeying the name rules. Nested values are free
+/// within the §3.1 type set (the codec already enforces that).
+pub(crate) fn check_attributes(v: &Value) -> Result<()> {
+    let entries = v
+        .as_map()
+        .ok_or_else(|| Error::reject(Rule::Schema, "'attributes' must be a map"))?;
+    for (k, _) in entries {
+        let key = k
+            .as_text()
+            .ok_or_else(|| Error::reject(Rule::Schema, "attribute keys must be text"))?;
+        check_name(key)?;
+    }
+    Ok(())
+}
+
+/// Parses an `xxh3:` digest string to its expected value. Errors on other
+/// algorithms (Unsupported) or malformed hex (Reject).
+pub(crate) fn parse_xxh3(digest: &str) -> Result<u64> {
+    let hex = digest.strip_prefix("xxh3:").ok_or_else(|| {
+        Error::Unsupported(format!("digest algorithm in {digest:?} (only xxh3 supported)"))
+    })?;
+    u64::from_str_radix(hex, 16)
+        .map_err(|_| Error::reject(Rule::Digest, format!("malformed digest {digest:?}")))
+}
+
+/// Content rules of registered logical types (spec Appendix A): applied
+/// wherever bytes are decoded or verified; raw structural access is exempt.
+pub(crate) fn check_logical_values(
+    ltype: &str,
+    bytes: &[u8],
+    elems: Option<u64>,
+) -> Result<()> {
+    match ltype {
+        "bool" => {
+            if bytes.iter().any(|&b| b > 1) {
+                return Err(Error::reject(
+                    Rule::LayoutData,
+                    "bool bytes must be 0x00 or 0x01",
+                ));
+            }
+        }
+        "f4_e2m1" => {
+            // Packed two per byte, low nibble first: an odd element count
+            // leaves the final high nibble unused, and it must be zero.
+            if let Some(n) = elems {
+                if n % 2 == 1 && bytes.last().is_some_and(|&b| b & 0xf0 != 0) {
+                    return Err(Error::reject(
+                        Rule::LayoutData,
+                        "final odd f4 nibble must be zero",
+                    ));
+                }
+            }
+        }
+        _ => {}
     }
     Ok(())
 }
@@ -281,7 +359,10 @@ impl Manifest {
                 continue; // unknown (non-text) root key: ignore
             };
             match key {
-                "attributes" => manifest.attributes = Some(val),
+                "attributes" => {
+                    check_attributes(&val)?;
+                    manifest.attributes = Some(val);
+                }
                 "shards" => manifest.shards = parse_shards(val)?,
                 "objects" => {
                     has_objects = true;
@@ -393,7 +474,10 @@ impl Object {
                         Error::reject(Rule::Schema, "'layout' must be text")
                     })?));
                 }
-                Some("attributes") => attributes = Some(val.clone()),
+                Some("attributes") => {
+                    check_attributes(val)?;
+                    attributes = Some(val.clone());
+                }
                 Some("parts") => parts = Some(parse_parts(val)?),
                 _ => {}
             }

@@ -176,7 +176,7 @@ fn parse_tensor(data: &[u8], base: usize) -> Result<TensorInfo> {
             }
             (1, VARINT) => dims.push(pb.varint()?),
             (2, VARINT) => data_type = pb.varint()?,
-            (4, LEN) => f32s = pb.bytes()?.1.to_vec(), // packed floats: already LE bytes
+            (4, LEN) => f32s.extend_from_slice(pb.bytes()?.1), // packed floats: LE bytes
             (5, LEN) => {
                 let (_, b) = pb.bytes()?;
                 let mut sub = Pb { data: b, pos: 0, base: 0 };
@@ -201,7 +201,7 @@ fn parse_tensor(data: &[u8], base: usize) -> Result<TensorInfo> {
                 let (abs, b) = pb.bytes()?;
                 raw = Some((abs as u64, b.len() as u64));
             }
-            (10, LEN) => f64s = pb.bytes()?.1.to_vec(), // packed doubles
+            (10, LEN) => f64s.extend_from_slice(pb.bytes()?.1), // packed doubles
             (13, LEN) => {
                 // external_data entries: presence alone means the payload
                 // lives in another file.
@@ -231,6 +231,12 @@ fn parse_tensor(data: &[u8], base: usize) -> Result<TensorInfo> {
     // int32_data carries every type of width ≤ 4 (one element per entry),
     // int64_data carries i64, uint64_data carries u32/u64, float/double
     // are packed IEEE bytes.
+    if raw.is_some() && !(f32s.is_empty() && f64s.is_empty() && i32s.is_empty() && i64s.is_empty())
+    {
+        return Err(bad(format!(
+            "tensor {name:?} carries both raw_data and a typed data field"
+        )));
+    }
     let data = if let Some((offset, length)) = raw {
         TensorData::Raw { offset, length }
     } else if !f32s.is_empty() {
@@ -298,24 +304,25 @@ impl Onnx {
             pos: 0,
             base: 0,
         };
-        let mut graph: Option<(usize, Vec<u8>)> = None;
+        let mut graph: Option<(usize, usize)> = None;
         while !pb.done() {
             let (field, wire) = pb.tag()?;
             if field == 7 && wire == LEN {
                 let (abs, b) = pb.bytes()?;
-                graph = Some((abs, b.to_vec()));
+                graph = Some((abs, b.len()));
                 break;
             }
             pb.skip(wire)?;
         }
-        let (graph_base, graph_bytes) =
+        let (graph_base, graph_len) =
             graph.ok_or_else(|| bad("no graph field in ModelProto"))?;
+        let graph_bytes = &mmap[graph_base..graph_base + graph_len];
 
         // GraphProto.initializer is field 5.
         let mut objects = BTreeMap::new();
         let mut locations = BTreeMap::new();
         let mut pb = Pb {
-            data: &graph_bytes,
+            data: graph_bytes,
             pos: 0,
             base: graph_base,
         };
@@ -331,11 +338,7 @@ impl Onnx {
                 continue;
             }
             let (dtype, ltype) = map_dtype(info.data_type)?;
-            let elems = info
-                .dims
-                .iter()
-                .try_fold(1u64, |acc, &d| acc.checked_mul(d))
-                .ok_or_else(|| bad(format!("tensor {:?} shape overflows", info.name)))?;
+            let elems = crate::safe::product("onnx shape", &info.dims)?;
             let expected = ztensor::logical_size(ltype, dtype, elems)
                 .ok_or_else(|| bad("size not computable"))?;
             let actual = match &info.data {
@@ -429,21 +432,29 @@ impl Source for Onnx {
     fn view(&self, object: &str, part: &str) -> Result<&[u8]> {
         match self.location(object, part)? {
             Loc::Range { offset, length } => {
-                Ok(&self.mmap[*offset as usize..(*offset + *length) as usize])
+                crate::safe::slice("onnx tensor", &self.mmap, *offset, *length)
             }
             Loc::Owned(bytes) => Ok(bytes),
         }
     }
 
     fn caps(&self, object: &str, part: &str) -> Result<Caps> {
-        let alignment = match self.location(object, part)? {
-            Loc::Range { offset, .. } if *offset > 0 => {
-                1u64 << offset.trailing_zeros().min(63)
-            }
-            _ => 1,
+        // Owned buffers are materialized, not mapped: their manifest blob
+        // is a placeholder, so reporting zero-copy would be a lie about
+        // what the file itself contains.
+        let (zero_copy, alignment) = match self.location(object, part)? {
+            Loc::Range { offset, .. } => (
+                true,
+                if *offset > 0 {
+                    1u64 << offset.trailing_zeros().min(63)
+                } else {
+                    1
+                },
+            ),
+            Loc::Owned(_) => (false, 1),
         };
         Ok(Caps {
-            zero_copy: true,
+            zero_copy,
             alignment,
             verifiable: false,
             page_exclusive: false,

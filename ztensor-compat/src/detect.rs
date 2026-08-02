@@ -15,8 +15,17 @@ use ztensor::{Error, Result, Source};
 /// `"zt"`, `"safetensors"`, `"gguf"`, `"npz"`, `"pt"`, `"hdf5"`, `"onnx"`.
 pub fn detect(path: impl AsRef<Path>) -> Result<&'static str> {
     let path = path.as_ref();
+    // A single read() may return fewer bytes than asked for; fill the
+    // buffer so a short read cannot cause a mis-detection.
+    let mut file = File::open(path)?;
     let mut head = [0u8; 9];
-    let n = File::open(path)?.read(&mut head)?;
+    let mut n = 0;
+    while n < head.len() {
+        match file.read(&mut head[n..])? {
+            0 => break,
+            got => n += got,
+        }
+    }
     let head = &head[..n];
 
     if head.len() >= 8 && head[..8] == ztensor::MAGIC {
