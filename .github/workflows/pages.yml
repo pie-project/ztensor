@@ -29,6 +29,12 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      # The figures are hand-authored SVG, and both ways they break — text past
+      # the frame, text painted over by a later shape — are invisible in the
+      # source and easy to miss in review.
+      - name: Figures stay inside their frames
+        run: python website/check_diagrams.py
+
       - name: Build
         run: |
           pip install markdown
