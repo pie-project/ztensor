@@ -1,0 +1,12 @@
+[workspace]
+members = ["ztensor"]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/pie-project/ztensor"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1

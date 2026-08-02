@@ -1,0 +1,12 @@
+[package]
+name = "ztensor"
+version = "2.0.0-alpha.0"
+description = "zTensor v2: an aligned, verifiable container format for tensor data"
+authors = ["In Gim <in.gim@icloud.com>"]
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+memmap2 = "0.9"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }

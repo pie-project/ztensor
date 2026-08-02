@@ -1,0 +1,463 @@
+//! Minimal CBOR codec for the zTensor manifest.
+//!
+//! Implements exactly the subset the spec permits (§3.1): unsigned and
+//! negative integers, byte strings, text strings, arrays, maps, false/true/
+//! null, and floats. Definite lengths only, no tags, depth ≤ 32.
+//!
+//! RFC 8949 core deterministic encoding is enforced in both directions: the
+//! encoder emits shortest-form heads, sorts map keys by their encoded bytes,
+//! and rejects duplicates; the decoder requires shortest-form heads and
+//! strictly ascending key order (which also catches duplicates).
+
+use crate::error::{Error, Result, Rule};
+
+pub const MAX_DEPTH: u32 = 32;
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Value {
+    Uint(u64),
+    /// Negative integer with value `-1 - n` (CBOR major type 1).
+    Nint(u64),
+    Bytes(Vec<u8>),
+    Text(String),
+    Array(Vec<Value>),
+    /// Entries in any order; the encoder sorts by encoded key bytes.
+    Map(Vec<(Value, Value)>),
+    Bool(bool),
+    Null,
+    Float(f64),
+}
+
+impl Value {
+    pub fn as_u64(&self) -> Option<u64> {
+        match self {
+            Value::Uint(n) => Some(*n),
+            _ => None,
+        }
+    }
+
+    pub fn as_text(&self) -> Option<&str> {
+        match self {
+            Value::Text(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    pub fn as_array(&self) -> Option<&[Value]> {
+        match self {
+            Value::Array(a) => Some(a),
+            _ => None,
+        }
+    }
+
+    pub fn as_map(&self) -> Option<&[(Value, Value)]> {
+        match self {
+            Value::Map(m) => Some(m),
+            _ => None,
+        }
+    }
+}
+
+// =======================================================================
+// Encoding
+// =======================================================================
+
+pub fn encode(v: &Value) -> Result<Vec<u8>> {
+    let mut out = Vec::new();
+    encode_into(v, &mut out, 0)?;
+    Ok(out)
+}
+
+fn head(major: u8, arg: u64, out: &mut Vec<u8>) {
+    let mt = major << 5;
+    if arg < 24 {
+        out.push(mt | arg as u8);
+    } else if arg <= 0xff {
+        out.push(mt | 24);
+        out.push(arg as u8);
+    } else if arg <= 0xffff {
+        out.push(mt | 25);
+        out.extend((arg as u16).to_be_bytes());
+    } else if arg <= 0xffff_ffff {
+        out.push(mt | 26);
+        out.extend((arg as u32).to_be_bytes());
+    } else {
+        out.push(mt | 27);
+        out.extend(arg.to_be_bytes());
+    }
+}
+
+fn encode_into(v: &Value, out: &mut Vec<u8>, depth: u32) -> Result<()> {
+    if depth > MAX_DEPTH {
+        return Err(Error::InvalidInput(format!(
+            "CBOR nesting exceeds {MAX_DEPTH}"
+        )));
+    }
+    match v {
+        Value::Uint(n) => head(0, *n, out),
+        Value::Nint(n) => head(1, *n, out),
+        Value::Bytes(b) => {
+            head(2, b.len() as u64, out);
+            out.extend_from_slice(b);
+        }
+        Value::Text(s) => {
+            head(3, s.len() as u64, out);
+            out.extend_from_slice(s.as_bytes());
+        }
+        Value::Array(items) => {
+            head(4, items.len() as u64, out);
+            for item in items {
+                encode_into(item, out, depth + 1)?;
+            }
+        }
+        Value::Map(entries) => {
+            let mut enc: Vec<(Vec<u8>, Vec<u8>)> = Vec::with_capacity(entries.len());
+            for (k, val) in entries {
+                let mut kb = Vec::new();
+                encode_into(k, &mut kb, depth + 1)?;
+                let mut vb = Vec::new();
+                encode_into(val, &mut vb, depth + 1)?;
+                enc.push((kb, vb));
+            }
+            enc.sort_by(|a, b| a.0.cmp(&b.0));
+            for w in enc.windows(2) {
+                if w[0].0 == w[1].0 {
+                    return Err(Error::InvalidInput("duplicate map key".into()));
+                }
+            }
+            head(5, enc.len() as u64, out);
+            for (kb, vb) in enc {
+                out.extend_from_slice(&kb);
+                out.extend_from_slice(&vb);
+            }
+        }
+        Value::Bool(b) => out.push(if *b { 0xf5 } else { 0xf4 }),
+        Value::Null => out.push(0xf6),
+        Value::Float(x) => encode_float(*x, out),
+    }
+    Ok(())
+}
+
+/// Shortest float encoding that preserves the value (deterministic profile).
+fn encode_float(x: f64, out: &mut Vec<u8>) {
+    if x.is_nan() {
+        out.push(0xf9);
+        out.extend(0x7e00u16.to_be_bytes());
+        return;
+    }
+    let as32 = x as f32;
+    if as32 as f64 == x {
+        let h = f32_to_f16_bits(as32);
+        if f16_bits_to_f32(h) == as32 {
+            out.push(0xf9);
+            out.extend(h.to_be_bytes());
+            return;
+        }
+        out.push(0xfa);
+        out.extend(as32.to_bits().to_be_bytes());
+        return;
+    }
+    out.push(0xfb);
+    out.extend(x.to_bits().to_be_bytes());
+}
+
+fn f32_to_f16_bits(x: f32) -> u16 {
+    let b = x.to_bits();
+    let sign = ((b >> 16) & 0x8000) as u16;
+    let exp = ((b >> 23) & 0xff) as i32;
+    let man = b & 0x007f_ffff;
+    if exp == 0xff {
+        return sign | 0x7c00 | if man != 0 { 0x0200 } else { 0 };
+    }
+    let e = exp - 127 + 15;
+    if e >= 0x1f {
+        return sign | 0x7c00; // overflows half range; roundtrip check filters
+    }
+    if e <= 0 {
+        if e < -10 {
+            return sign;
+        }
+        let man = man | 0x0080_0000;
+        return sign | (man >> (14 - e)) as u16;
+    }
+    sign | ((e as u16) << 10) | (man >> 13) as u16
+}
+
+fn f16_bits_to_f32(h: u16) -> f32 {
+    let sign = ((h & 0x8000) as u32) << 16;
+    let exp = (h >> 10) & 0x1f;
+    let man = (h & 0x03ff) as u32;
+    let bits = match exp {
+        0 => {
+            if man == 0 {
+                sign
+            } else {
+                let mut e = 127 - 15 + 1;
+                let mut m = man;
+                while m & 0x400 == 0 {
+                    m <<= 1;
+                    e -= 1;
+                }
+                sign | ((e as u32) << 23) | ((m & 0x3ff) << 13)
+            }
+        }
+        0x1f => sign | 0x7f80_0000 | (man << 13),
+        e => sign | ((e as u32 + 127 - 15) << 23) | (man << 13),
+    };
+    f32::from_bits(bits)
+}
+
+// =======================================================================
+// Decoding
+// =======================================================================
+
+pub fn decode(input: &[u8]) -> Result<Value> {
+    let mut d = Decoder { input, pos: 0 };
+    let v = d.value(0)?;
+    if d.pos != input.len() {
+        return Err(Error::reject(Rule::CborSyntax, "trailing bytes"));
+    }
+    Ok(v)
+}
+
+struct Decoder<'a> {
+    input: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> Decoder<'a> {
+    fn remaining(&self) -> usize {
+        self.input.len() - self.pos
+    }
+
+    fn byte(&mut self) -> Result<u8> {
+        let b = *self
+            .input
+            .get(self.pos)
+            .ok_or_else(|| Error::reject(Rule::CborSyntax, "unexpected end of input"))?;
+        self.pos += 1;
+        Ok(b)
+    }
+
+    fn take(&mut self, n: usize) -> Result<&'a [u8]> {
+        if self.remaining() < n {
+            return Err(Error::reject(Rule::CborSyntax, "unexpected end of input"));
+        }
+        let s = &self.input[self.pos..self.pos + n];
+        self.pos += n;
+        Ok(s)
+    }
+
+    /// Reads a head for major types 0-5, enforcing shortest form.
+    fn head_arg(&mut self, ai: u8) -> Result<u64> {
+        let arg = match ai {
+            0..=23 => ai as u64,
+            24 => {
+                let v = self.byte()? as u64;
+                if v < 24 {
+                    return Err(Error::reject(Rule::CborDeterminism, "non-shortest head"));
+                }
+                v
+            }
+            25 => {
+                let v = u16::from_be_bytes(self.take(2)?.try_into().unwrap()) as u64;
+                if v <= 0xff {
+                    return Err(Error::reject(Rule::CborDeterminism, "non-shortest head"));
+                }
+                v
+            }
+            26 => {
+                let v = u32::from_be_bytes(self.take(4)?.try_into().unwrap()) as u64;
+                if v <= 0xffff {
+                    return Err(Error::reject(Rule::CborDeterminism, "non-shortest head"));
+                }
+                v
+            }
+            27 => {
+                let v = u64::from_be_bytes(self.take(8)?.try_into().unwrap());
+                if v <= 0xffff_ffff {
+                    return Err(Error::reject(Rule::CborDeterminism, "non-shortest head"));
+                }
+                v
+            }
+            _ => {
+                return Err(Error::reject(
+                    Rule::CborSyntax,
+                    "indefinite length or reserved head",
+                ))
+            }
+        };
+        Ok(arg)
+    }
+
+    fn value(&mut self, depth: u32) -> Result<Value> {
+        if depth > MAX_DEPTH {
+            return Err(Error::reject(Rule::CborDepth, "nesting too deep"));
+        }
+        let first = self.byte()?;
+        let major = first >> 5;
+        let ai = first & 0x1f;
+
+        if major == 7 {
+            return match ai {
+                20 => Ok(Value::Bool(false)),
+                21 => Ok(Value::Bool(true)),
+                22 => Ok(Value::Null),
+                25 => {
+                    let h = u16::from_be_bytes(self.take(2)?.try_into().unwrap());
+                    Ok(Value::Float(f16_bits_to_f32(h) as f64))
+                }
+                26 => {
+                    let b = u32::from_be_bytes(self.take(4)?.try_into().unwrap());
+                    Ok(Value::Float(f32::from_bits(b) as f64))
+                }
+                27 => {
+                    let b = u64::from_be_bytes(self.take(8)?.try_into().unwrap());
+                    Ok(Value::Float(f64::from_bits(b)))
+                }
+                _ => Err(Error::reject(Rule::CborSyntax, "unsupported simple value")),
+            };
+        }
+        if major == 6 {
+            return Err(Error::reject(Rule::CborSyntax, "tags are not permitted"));
+        }
+
+        let arg = self.head_arg(ai)?;
+        match major {
+            0 => Ok(Value::Uint(arg)),
+            1 => Ok(Value::Nint(arg)),
+            2 => {
+                let n = self.checked_len(arg, 1)?;
+                Ok(Value::Bytes(self.take(n)?.to_vec()))
+            }
+            3 => {
+                let n = self.checked_len(arg, 1)?;
+                let s = std::str::from_utf8(self.take(n)?)
+                    .map_err(|_| Error::reject(Rule::CborSyntax, "invalid UTF-8 in text"))?;
+                Ok(Value::Text(s.to_string()))
+            }
+            4 => {
+                let n = self.checked_len(arg, 1)?;
+                let mut items = Vec::with_capacity(n);
+                for _ in 0..n {
+                    items.push(self.value(depth + 1)?);
+                }
+                Ok(Value::Array(items))
+            }
+            5 => {
+                let n = self.checked_len(arg, 2)?;
+                let mut entries = Vec::with_capacity(n);
+                let mut prev: Option<(usize, usize)> = None;
+                for _ in 0..n {
+                    let ks = self.pos;
+                    let key = self.value(depth + 1)?;
+                    let ke = self.pos;
+                    if let Some((ps, pe)) = prev {
+                        use std::cmp::Ordering::*;
+                        match self.input[ps..pe].cmp(&self.input[ks..ke]) {
+                            Less => {}
+                            Equal => {
+                                return Err(Error::reject(
+                                    Rule::CborDuplicateKey,
+                                    "duplicate map key",
+                                ))
+                            }
+                            Greater => {
+                                return Err(Error::reject(
+                                    Rule::CborDeterminism,
+                                    "map keys not in canonical order",
+                                ))
+                            }
+                        }
+                    }
+                    prev = Some((ks, ke));
+                    let val = self.value(depth + 1)?;
+                    entries.push((key, val));
+                }
+                Ok(Value::Map(entries))
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    /// Bounds a declared element count by the remaining input (each element
+    /// occupies at least `min_bytes`), preventing huge pre-allocations.
+    fn checked_len(&self, arg: u64, min_bytes: usize) -> Result<usize> {
+        let max = (self.remaining() / min_bytes) as u64;
+        if arg > max {
+            return Err(Error::reject(
+                Rule::CborSyntax,
+                "declared length exceeds input",
+            ));
+        }
+        Ok(arg as usize)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn roundtrip(v: Value) {
+        let bytes = encode(&v).unwrap();
+        assert_eq!(decode(&bytes).unwrap(), v);
+    }
+
+    #[test]
+    fn scalars() {
+        roundtrip(Value::Uint(0));
+        roundtrip(Value::Uint(23));
+        roundtrip(Value::Uint(24));
+        roundtrip(Value::Uint(u64::MAX));
+        roundtrip(Value::Nint(0)); // -1
+        roundtrip(Value::Bool(true));
+        roundtrip(Value::Null);
+        roundtrip(Value::Text("hello".into()));
+        roundtrip(Value::Bytes(vec![1, 2, 3]));
+        roundtrip(Value::Float(1.5));
+        roundtrip(Value::Float(1.1));
+        roundtrip(Value::Float(65504.0)); // max f16
+    }
+
+    #[test]
+    fn maps_sorted_and_deduped() {
+        let v = Value::Map(vec![
+            (Value::Text("bb".into()), Value::Uint(1)),
+            (Value::Text("a".into()), Value::Uint(2)),
+        ]);
+        let bytes = encode(&v).unwrap();
+        // decoder accepts (encoder sorted: "a" < "bb" by encoded bytes)
+        let back = decode(&bytes).unwrap();
+        let m = back.as_map().unwrap();
+        assert_eq!(m[0].0.as_text().unwrap(), "a");
+
+        let dup = Value::Map(vec![
+            (Value::Text("a".into()), Value::Uint(1)),
+            (Value::Text("a".into()), Value::Uint(2)),
+        ]);
+        assert!(encode(&dup).is_err());
+    }
+
+    #[test]
+    fn rejects_unsorted_and_dup_on_decode() {
+        // {"b": 0, "a": 0} — wrong order
+        let bytes = [0xa2, 0x61, b'b', 0x00, 0x61, b'a', 0x00];
+        assert!(matches!(
+            decode(&bytes),
+            Err(Error::Reject { rule: Rule::CborDeterminism, .. })
+        ));
+        // {"a": 0, "a": 0}
+        let bytes = [0xa2, 0x61, b'a', 0x00, 0x61, b'a', 0x00];
+        assert!(matches!(
+            decode(&bytes),
+            Err(Error::Reject { rule: Rule::CborDuplicateKey, .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_tags_and_indefinite() {
+        assert!(decode(&[0xc0, 0x00]).is_err()); // tag 0
+        assert!(decode(&[0x9f, 0xff]).is_err()); // indefinite array
+        assert!(decode(&[0x18, 0x05]).is_err()); // non-shortest uint 5
+    }
+}
