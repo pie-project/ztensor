@@ -65,33 +65,37 @@ jobs:
         run: cargo fuzz run fuzz_compat -- -max_total_time=120 -rss_limit_mb=2048
 
   python:
-    name: python bindings
+    name: python (${{ matrix.python }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The bindings are not abi3 — the buffer protocol is not in the
+        # limited API — so a wheel is per-version. CI covers the floor and
+        # the current release; publishing covers every version in between.
+        python: ["3.9", "3.13"]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.9"
+          python-version: ${{ matrix.python }}
       - uses: Swatinem/rust-cache@v2
       - name: Build wheel
         run: |
           pip install maturin
           maturin build -m ztensor-py/Cargo.toml --release
-      - name: Install and smoke-test
+      # The suite, not a hand-written snippet. An inline smoke test is a
+      # second copy of the API that nothing forces anyone to update, and
+      # this one sat here calling four methods that no longer existed.
+      #
+      # numpy is not optional here even though it is optional for the
+      # library: the DLPack and buffer-protocol tests are the ones that
+      # exercise the unsafe code, and without numpy they quietly skip.
+      - name: Install and test
         run: |
           # Install the built wheel by path: `pip install ztensor` would
           # resolve the unrelated package of that name on PyPI.
-          pip install --no-index target/wheels/*.whl
-          python - <<'EOF'
-          import struct, tempfile, os, ztensor
-          path = os.path.join(tempfile.mkdtemp(), "m.zt")
-          w = ztensor.Writer(path)
-          w.add("a", [2], "f32", struct.pack("<2f", 1, 2))
-          w.finish()
-          src = ztensor.open(path)
-          assert struct.unpack("<2f", src.read("a")) == (1.0, 2.0)
-          assert ztensor.verify(path) == 1
-          assert src.caps("a")["tier"] >= 2
-          print("python smoke ok")
-          EOF
+          pip install --no-index --find-links target/wheels ztensor
+          pip install pytest numpy
+          pytest ztensor-py/tests -q
