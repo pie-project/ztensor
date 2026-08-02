@@ -42,6 +42,22 @@ jobs:
           cargo run -q -p conformance --bin gen
           git diff --exit-code conformance/corpus
 
+  # `cfg(not(unix))` code is code no CI platform above compiles, and a
+  # fallback whose first build is a user's is not a fallback. wasi is the
+  # cheapest non-unix target there is, so it stands in as the compile gate;
+  # what the fallback actually *does* is tested on unix, against the
+  # platform path it replaces.
+  portability:
+    name: non-unix compiles
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check -p ztensor --target wasm32-wasip1 --all-targets
+
   fuzz:
     name: fuzz smoke
     runs-on: ubuntu-latest

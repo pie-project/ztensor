@@ -137,6 +137,18 @@ at the 4 KiB floor gives 1.32 GB/s into 1.21× — see
 ² Partial support (requires specific alignment or uncompressed data).
 ³ Zip append support (not standard API).
 
+## Platform support
+
+Developed and tested on **Linux and macOS**, which is what CI runs. The crate
+carries no unix-only dependency and its non-unix code path is compiled on every
+push (against `wasm32-wasip1`, the cheapest non-unix target) and its behaviour
+tested on unix against the platform path it replaces — but **Windows is not
+tested**, and until it is, treat it as unverified rather than supported.
+
+Two capabilities are unix-only by nature and simply do not exist elsewhere:
+`prefetch` (`madvise(WILLNEED)`) and `evict` (`madvise(DONTNEED)`). Everything
+else — reading, writing, mapping, addressing, verification — is portable.
+
 ## Upgrading from 1.x
 
 The container did not change: a `.zt` written by any 1.x release opens in 2.0

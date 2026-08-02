@@ -268,11 +268,22 @@ fn read_exact_at(file: &File, buf: &mut [u8], offset: u64) -> std::io::Result<()
     }
     #[cfg(not(unix))]
     {
-        use std::io::{Read, Seek, SeekFrom};
-        let mut handle = file.try_clone()?;
-        handle.seek(SeekFrom::Start(offset))?;
-        handle.read_exact(buf)
+        read_exact_at_portable(file, buf, offset)
     }
+}
+
+/// The positioned read every platform can do: clone the handle so the seek is
+/// this call's own, then read.
+///
+/// Not behind a `cfg`, deliberately. A fallback that only compiles on the
+/// platform that needs it is a fallback whose first test is someone else's
+/// build, so this one is compiled everywhere and exercised by the test below
+/// on the platform that does not use it.
+fn read_exact_at_portable(file: &File, buf: &mut [u8], offset: u64) -> std::io::Result<()> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut handle = file.try_clone()?;
+    handle.seek(SeekFrom::Start(offset))?;
+    handle.read_exact(buf)
 }
 
 #[cfg(test)]
@@ -285,6 +296,31 @@ mod tests {
         Store::index(&path, "zt")
             .unwrap()
             .with_occupied(ranges.to_vec())
+    }
+
+    /// The portable positioned read agrees with the platform one, at the
+    /// start, in the middle, and up against the end.
+    #[test]
+    fn the_portable_read_path_reads_the_same_bytes() {
+        let path = std::env::temp_dir().join("ztensor-portable-read-probe");
+        let content: Vec<u8> = (0..=255u8).cycle().take(4096).collect();
+        std::fs::write(&path, &content).unwrap();
+        let file = File::open(&path).unwrap();
+
+        for (offset, len) in [(0u64, 16usize), (1, 3), (1000, 100), (4080, 16)] {
+            let mut portable = vec![0u8; len];
+            read_exact_at_portable(&file, &mut portable, offset).unwrap();
+            let mut platform = vec![0u8; len];
+            read_exact_at(&file, &mut platform, offset).unwrap();
+            let expect = &content[offset as usize..offset as usize + len];
+            assert_eq!(portable, expect, "portable read at {offset}+{len}");
+            assert_eq!(platform, expect, "platform read at {offset}+{len}");
+        }
+
+        // Reading past the end is an error, not a short read.
+        let mut buf = [0u8; 32];
+        assert!(read_exact_at_portable(&file, &mut buf, 4090).is_err());
+        let _ = std::fs::remove_file(&path);
     }
 
     /// The page-exclusivity predicate, which is the whole of `Caps::evict`.
