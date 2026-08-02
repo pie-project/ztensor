@@ -11,6 +11,7 @@
 //! numpy dtype table never could.
 
 use std::os::raw::{c_char, c_int, c_void};
+use std::sync::Arc;
 
 use pyo3::exceptions::{PyBufferError, PyIOError, PyKeyError, PyTypeError, PyValueError};
 use pyo3::ffi;
@@ -32,14 +33,24 @@ fn err(e: ztensor::Error) -> PyErr {
 /// A tensor file — or several read as one — of any supported format.
 #[pyclass(unsendable)]
 struct Source {
-    inner: Option<ztensor::Source>,
+    /// Shared, because a zero-copy export outlives the handle it came from.
+    /// Closing a source drops *this* reference; a buffer or a DLPack tensor
+    /// already handed out keeps its own, so the mapping stays under it.
+    inner: Option<Arc<ztensor::Source>>,
     label: String,
 }
 
 impl Source {
     fn get(&self) -> PyResult<&ztensor::Source> {
         self.inner
-            .as_ref()
+            .as_deref()
+            .ok_or_else(|| PyValueError::new_err("source is closed"))
+    }
+
+    /// A reference that keeps the mapping alive on its own.
+    fn shared(&self) -> PyResult<Arc<ztensor::Source>> {
+        self.inner
+            .clone()
             .ok_or_else(|| PyValueError::new_err("source is closed"))
     }
 }
@@ -386,6 +397,7 @@ impl Tensor {
             return Err(PyBufferError::new_err("tensor views are read-only"));
         }
         let py = slf.py();
+        let owner = slf.source.bind(py).borrow().shared()?;
         let (ptr, len) = with_part(py, &slf, |p| {
             let bytes = p.map().map_err(|_| {
                 PyBufferError::new_err(
@@ -412,14 +424,27 @@ impl Tensor {
             (*view).shape = std::ptr::null_mut();
             (*view).strides = std::ptr::null_mut();
             (*view).suboffsets = std::ptr::null_mut();
-            (*view).internal = std::ptr::null_mut();
+            // `internal` is the exporter's to use: it carries the reference
+            // that keeps this memory mapped, which the release below drops.
+            // Holding only the Python object would not be enough — closing a
+            // source unmaps it while the object is still alive.
+            (*view).internal = Box::into_raw(Box::new(owner)) as *mut c_void;
             let obj: Py<Self> = slf.into();
             (*view).obj = obj.into_ptr();
         }
         Ok(())
     }
 
-    unsafe fn __releasebuffer__(&self, _view: *mut ffi::Py_buffer) {}
+    unsafe fn __releasebuffer__(&self, view: *mut ffi::Py_buffer) {
+        // SAFETY: `internal` is the box `__getbuffer__` put there, and CPython
+        // calls this exactly once per successful export.
+        unsafe {
+            if !view.is_null() && !(*view).internal.is_null() {
+                drop(Box::from_raw((*view).internal as *mut Arc<ztensor::Source>));
+                (*view).internal = std::ptr::null_mut();
+            }
+        }
+    }
 
     /// DLPack export: `np.from_dlpack(t)`, `torch.from_dlpack(t)`.
     ///
@@ -440,6 +465,7 @@ impl Tensor {
             }
         }
         let this = slf.borrow();
+        let owner = this.source.bind(py).borrow().shared()?;
         let (ptr, len, dtype, shape) = with_part(py, &this, |p| {
             let bytes = p.map().map_err(|_| {
                 PyValueError::new_err(
@@ -478,24 +504,30 @@ impl Tensor {
                 deleter: Some(dlpack_deleter),
             },
             shape,
-            // Keeps the source (and therefore the mapping) alive for as long as
-            // the consumer holds the tensor.
-            owner: slf.clone().unbind(),
+            // Keeps the mapping alive for as long as the consumer holds the
+            // tensor — even if the source it came from was closed meanwhile.
+            owner,
         });
         let raw = Box::into_raw(managed);
-        // SAFETY: `raw` is a live, uniquely-owned allocation; the pointers we
-        // write into it point into that same allocation.
-        unsafe {
+        // SAFETY: `raw` is a live, uniquely-owned allocation; the pointers
+        // written into it point into that same allocation.
+        //
+        // The capsule carries the address of the `DLManagedTensor` *field*,
+        // not of this wrapper: that struct is the ABI the consumer casts to,
+        // and `Managed` is ordinary Rust with no layout guarantee. Handing
+        // over the wrapper would work only by accident of field order.
+        let tensor = unsafe {
             (*raw).tensor.dl_tensor.shape = (*raw).shape.as_mut_ptr();
             (*raw).tensor.manager_ctx = raw as *mut c_void;
-        }
+            std::ptr::addr_of_mut!((*raw).tensor)
+        };
 
         let capsule = unsafe {
             // SAFETY: the capsule takes the pointer with a destructor that
             // frees it exactly once, and only if the consumer did not rename
             // the capsule to claim ownership.
             let ptr = ffi::PyCapsule_New(
-                raw as *mut c_void,
+                tensor as *mut c_void,
                 DLTENSOR_NAME.as_ptr() as *const c_char,
                 Some(capsule_destructor),
             );
@@ -550,11 +582,15 @@ struct DlManagedTensor {
 
 /// What the capsule owns: the ABI struct, the shape it points at, and a
 /// reference that keeps the mapping alive.
+///
+/// The reference is to the *mapping*, not to the Python object that produced
+/// it. That is what lets an exported array outlive the source handle — and it
+/// means the deleter drops an `Arc`, which needs no interpreter at all.
 struct Managed {
     tensor: DlManagedTensor,
     shape: Vec<i64>,
     #[allow(dead_code)]
-    owner: Py<Tensor>,
+    owner: Arc<ztensor::Source>,
 }
 
 /// Called by the consumer once it is done with the tensor.
@@ -566,9 +602,12 @@ unsafe extern "C" fn dlpack_deleter(tensor: *mut DlManagedTensor) {
     // and the deleter runs exactly once.
     unsafe {
         let ctx = (*tensor).manager_ctx as *mut Managed;
-        if !ctx.is_null() {
-            drop(Box::from_raw(ctx));
+        if ctx.is_null() {
+            return;
         }
+        // Plain Rust: no GIL, so this is safe from any thread and at any
+        // point in the interpreter's life, including after it has gone.
+        drop(Box::from_raw(ctx));
     }
 }
 
@@ -897,7 +936,7 @@ fn open_paths(paths: &Bound<'_, PyAny>, map: bool) -> PyResult<(ztensor::Source,
 fn open_(paths: &Bound<'_, PyAny>) -> PyResult<Source> {
     let (inner, label) = open_paths(paths, true)?;
     Ok(Source {
-        inner: Some(inner),
+        inner: Some(Arc::new(inner)),
         label,
     })
 }
@@ -909,7 +948,7 @@ fn open_(paths: &Bound<'_, PyAny>) -> PyResult<Source> {
 fn index(paths: &Bound<'_, PyAny>) -> PyResult<Source> {
     let (inner, label) = open_paths(paths, false)?;
     Ok(Source {
-        inner: Some(inner),
+        inner: Some(Arc::new(inner)),
         label,
     })
 }

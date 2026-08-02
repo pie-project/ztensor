@@ -105,11 +105,27 @@ def test_dlpack_gives_a_typed_array(simple):
 
 @requires_numpy
 def test_dlpack_array_outlives_the_handle(simple):
-    """The consumer holds the mapping through the capsule, not through us."""
+    """A zero-copy export holds the mapping itself.
+
+    Closing the source it came from must not pull the memory out from under an
+    array that was already handed over — the reference has to be to the
+    mapping, not to the Python object that produced it.
+    """
     with ztensor.open(str(simple)) as src:
         arr = numpy.from_dlpack(src["a.weight"])
     del src
     assert arr[0, 0] == 1.0
+    assert arr[1, 2] == 6.0
+
+
+def test_a_memoryview_outlives_the_handle(simple):
+    """The same promise, through the buffer protocol."""
+    src = ztensor.open(str(simple))
+    view = memoryview(src["a.weight"])
+    src.close()
+    del src
+    assert bytes(view) == f32(1, 2, 3, 4, 5, 6)
+    view.release()
 
 
 def test_location_is_an_address(simple):
