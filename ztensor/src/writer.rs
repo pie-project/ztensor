@@ -334,6 +334,49 @@ impl Writer {
         Ok(())
     }
 
+    /// Copies every object of a [`Source`] into this file — the universal
+    /// conversion path. Reads decoded bytes tier-1 from the source and
+    /// writes them raw, so a canonical writer turns *any* source (a foreign
+    /// format projection, another `.zt`, an overlay model) into a
+    /// canonical, tier-3, bit-reproducible `.zt` file.
+    ///
+    /// Objects arrive in name order (the manifest is sorted), satisfying
+    /// canonical insertion. File attributes are copied unless already set.
+    pub fn ingest(&mut self, src: &dyn crate::Source) -> Result<()> {
+        let manifest = src.manifest().clone();
+        if self.manifest.attributes.is_none() {
+            self.manifest.attributes = manifest.attributes.clone();
+        }
+        for (name, obj) in &manifest.objects {
+            let mut payloads: Vec<(&str, DType, Option<&str>, Vec<u8>)> =
+                Vec::with_capacity(obj.parts.len());
+            for (pname, part) in &obj.parts {
+                payloads.push((
+                    pname,
+                    part.dtype,
+                    part.ltype.as_deref(),
+                    src.read(name, pname)?,
+                ));
+            }
+            let defs: Vec<(&str, PartDef)> = payloads
+                .iter()
+                .map(|(pname, dtype, ltype, data)| {
+                    (
+                        *pname,
+                        PartDef {
+                            dtype: *dtype,
+                            ltype: *ltype,
+                            encoding: None,
+                            data,
+                        },
+                    )
+                })
+                .collect();
+            self.add_object(name, &obj.shape, obj.layout.as_str(), &defs, obj.attributes.clone())?;
+        }
+        Ok(())
+    }
+
     /// Overlay convenience: references every part of `obj` (an object from
     /// another file's manifest) through registered shard `shard`. Parts
     /// must be local (`shard 0`) in the source manifest.

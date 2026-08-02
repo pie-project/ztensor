@@ -1,0 +1,17 @@
+[package]
+name = "ztensor-compat"
+version = "2.0.0-alpha.0"
+description = "Foreign tensor formats projected into the zTensor object model"
+authors = ["In Gim <in.gim@icloud.com>"]
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = ["safetensors"]
+safetensors = ["dep:serde_json"]
+
+[dependencies]
+ztensor = { path = "../ztensor" }
+memmap2 = "0.9"
+serde_json = { version = "1", optional = true }
