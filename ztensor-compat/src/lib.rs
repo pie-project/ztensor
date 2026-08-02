@@ -32,3 +32,16 @@ pub use npz::Npz;
 mod pt;
 #[cfg(feature = "pickle")]
 pub use pt::Pt;
+
+#[cfg(feature = "hdf5")]
+mod hdf5;
+#[cfg(feature = "hdf5")]
+pub use hdf5::Hdf5;
+
+#[cfg(feature = "onnx")]
+mod onnx;
+#[cfg(feature = "onnx")]
+pub use onnx::Onnx;
+
+mod detect;
+pub use detect::open_any;

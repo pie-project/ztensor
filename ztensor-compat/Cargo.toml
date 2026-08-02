@@ -16,12 +16,15 @@ safetensors = ["dep:serde_json"]
 gguf = []
 npz = ["dep:zip"]
 pickle = ["dep:zip"]
+hdf5 = ["dep:flate2"]
+onnx = []
 
 [dependencies]
 ztensor = { path = "../ztensor" }
 memmap2 = "0.9"
 serde_json = { version = "1", optional = true }
 zip = { version = "2", optional = true, default-features = false, features = ["deflate"] }
+flate2 = { version = "1", optional = true }
 
 [dev-dependencies]
 zip = { version = "2", default-features = false, features = ["deflate"] }

@@ -221,6 +221,206 @@ mod npz {
 }
 
 // =======================================================================
+// hdf5
+// =======================================================================
+
+#[cfg(feature = "hdf5")]
+mod hdf5 {
+    use super::*;
+    use ztensor_compat::Hdf5;
+
+    /// A minimal HDF5 file: superblock v0, one contiguous f32 dataset "w"
+    /// of shape [4] in the root group. Offsets laid out by hand.
+    fn h5_bytes(vals: &[f32]) -> Vec<u8> {
+        assert_eq!(vals.len(), 4);
+        let mut b = vec![0u8; 368];
+        let undef = [0xffu8; 8];
+        // superblock v0 @0
+        b[0..8].copy_from_slice(b"\x89HDF\r\n\x1a\n");
+        b[13] = 8; // offset size
+        b[14] = 8; // length size
+        b[16..18].copy_from_slice(&4u16.to_le_bytes()); // leaf k
+        b[18..20].copy_from_slice(&16u16.to_le_bytes()); // internal k
+        b[32..40].copy_from_slice(&undef); // free space
+        b[40..48].copy_from_slice(&368u64.to_le_bytes()); // eof
+        b[48..56].copy_from_slice(&undef); // driver info
+        // root symbol table entry @56
+        b[72..76].copy_from_slice(&1u32.to_le_bytes()); // cache type: group
+        b[80..88].copy_from_slice(&96u64.to_le_bytes()); // btree
+        b[88..96].copy_from_slice(&144u64.to_le_bytes()); // heap
+        // group B-tree @96
+        b[96..100].copy_from_slice(b"TREE");
+        b[102..104].copy_from_slice(&1u16.to_le_bytes()); // entries
+        b[104..112].copy_from_slice(&undef);
+        b[112..120].copy_from_slice(&undef);
+        b[128..136].copy_from_slice(&192u64.to_le_bytes()); // SNOD addr
+        // local heap @144
+        b[144..148].copy_from_slice(b"HEAP");
+        b[152..160].copy_from_slice(&16u64.to_le_bytes()); // data seg size
+        b[168..176].copy_from_slice(&176u64.to_le_bytes()); // data seg addr
+        // heap data @176: name "w" at heap offset 8
+        b[184] = b'w';
+        // SNOD @192
+        b[192..196].copy_from_slice(b"SNOD");
+        b[196] = 1;
+        b[198..200].copy_from_slice(&1u16.to_le_bytes()); // one symbol
+        b[200..208].copy_from_slice(&8u64.to_le_bytes()); // link name offset
+        b[208..216].copy_from_slice(&248u64.to_le_bytes()); // object header
+        // object header v1 @248
+        b[248] = 1;
+        b[250..252].copy_from_slice(&3u16.to_le_bytes()); // messages
+        b[252..256].copy_from_slice(&1u32.to_le_bytes()); // ref count
+        b[256..260].copy_from_slice(&88u32.to_le_bytes()); // header size
+        // dataspace message @264: v1, 1 dim of 4
+        b[264..266].copy_from_slice(&0x0001u16.to_le_bytes());
+        b[266..268].copy_from_slice(&16u16.to_le_bytes());
+        b[272] = 1; // version
+        b[273] = 1; // ndims
+        b[280..288].copy_from_slice(&4u64.to_le_bytes());
+        // datatype message @288: f32
+        b[288..290].copy_from_slice(&0x0003u16.to_le_bytes());
+        b[290..292].copy_from_slice(&24u16.to_le_bytes());
+        b[296..304].copy_from_slice(&[0x11, 0x20, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00]);
+        // layout message @320: v3 contiguous @352, 16 bytes
+        b[320..322].copy_from_slice(&0x0008u16.to_le_bytes());
+        b[322..324].copy_from_slice(&24u16.to_le_bytes());
+        b[328] = 3; // version
+        b[329] = 1; // contiguous
+        b[330..338].copy_from_slice(&352u64.to_le_bytes());
+        b[338..346].copy_from_slice(&16u64.to_le_bytes());
+        // data @352
+        b[352..368].copy_from_slice(&f32s(vals));
+        b
+    }
+
+    #[test]
+    fn contiguous_dataset() {
+        let vals = [1.5f32, 2.5, 3.5, 4.5];
+        let path = tmp("basic.h5");
+        fs::write(&path, h5_bytes(&vals)).unwrap();
+        let h = Hdf5::open(&path).unwrap();
+        assert!(h.skipped().is_empty());
+        let obj = &h.manifest().objects["w"];
+        assert_eq!(obj.shape, vec![4]);
+        assert_eq!(obj.parts["data"].dtype, DType::F32);
+        assert_eq!(h.read("w", "data").unwrap(), f32s(&vals));
+        assert!(h.caps("w", "data").unwrap().zero_copy);
+    }
+
+    #[test]
+    fn size_lie_rejected() {
+        // Claim 24 bytes of data for a 4-element f32 dataset.
+        let mut b = h5_bytes(&[0.0; 4]);
+        b[338..346].copy_from_slice(&24u64.to_le_bytes());
+        let path = tmp("badsize.h5");
+        fs::write(&path, &b).unwrap();
+        assert!(Hdf5::open(&path).is_err());
+    }
+}
+
+// =======================================================================
+// onnx
+// =======================================================================
+
+#[cfg(feature = "onnx")]
+mod onnx {
+    use super::*;
+    use ztensor_compat::Onnx;
+
+    fn len_field(field: u32, body: &[u8]) -> Vec<u8> {
+        let mut out = vec![(field << 3 | 2) as u8];
+        assert!(body.len() < 128);
+        out.push(body.len() as u8);
+        out.extend_from_slice(body);
+        out
+    }
+
+    #[test]
+    fn raw_data_initializer() {
+        let data = f32s(&[1.0, 2.0, 3.0, 4.0]);
+        // TensorProto: dims 2,2 / dtype F32 / name "w" / raw_data
+        let mut tensor = vec![0x08, 2, 0x08, 2, 0x10, 1];
+        tensor.extend(len_field(8, b"w"));
+        tensor.extend(len_field(9, &data));
+        let graph = len_field(5, &tensor);
+        let model = len_field(7, &graph);
+        let path = tmp("basic.onnx");
+        fs::write(&path, &model).unwrap();
+
+        let o = Onnx::open(&path).unwrap();
+        let obj = &o.manifest().objects["w"];
+        assert_eq!(obj.shape, vec![2, 2]);
+        assert_eq!(obj.parts["data"].dtype, DType::F32);
+        assert_eq!(o.read("w", "data").unwrap(), data);
+        assert!(o.caps("w", "data").unwrap().zero_copy);
+    }
+
+    /// f16 stored in int32_data: one element per int32 (v1 assembled these
+    /// as 4-byte ints — silently wrong sizes).
+    #[test]
+    fn f16_in_int32_data() {
+        // two f16 1.0 values (0x3c00) as packed varints
+        let mut tensor = vec![0x08, 2, 0x10, 10];
+        tensor.extend(len_field(8, b"h"));
+        tensor.extend(len_field(5, &[0x80, 0x78, 0x80, 0x78]));
+        let graph = len_field(5, &tensor);
+        let model = len_field(7, &graph);
+        let path = tmp("f16.onnx");
+        fs::write(&path, &model).unwrap();
+
+        let o = Onnx::open(&path).unwrap();
+        assert_eq!(o.read("h", "data").unwrap(), vec![0x00, 0x3c, 0x00, 0x3c]);
+    }
+
+    #[test]
+    fn external_data_refused() {
+        let mut tensor = vec![0x08, 2, 0x10, 1, 0x70, 1]; // data_location = 1
+        tensor.extend(len_field(8, b"x"));
+        let graph = len_field(5, &tensor);
+        let model = len_field(7, &graph);
+        let path = tmp("external.onnx");
+        fs::write(&path, &model).unwrap();
+        assert!(matches!(Onnx::open(&path), Err(Error::Unsupported(_))));
+    }
+}
+
+// =======================================================================
+// open_any detection
+// =======================================================================
+
+#[cfg(all(feature = "safetensors", feature = "gguf"))]
+mod detect {
+    use super::*;
+    use ztensor_compat::open_any;
+
+    #[test]
+    fn detects_zt_and_foreign() {
+        // .zt
+        let zt = tmp("detect.zt");
+        let mut w = ztensor::Writer::create(&zt).unwrap();
+        w.add_dense("t", &[2], DType::U8, &[1, 2]).unwrap();
+        w.finish().unwrap();
+        let src = open_any(&zt).unwrap();
+        assert_eq!(src.read("t", "data").unwrap(), vec![1, 2]);
+
+        // safetensors
+        let st = tmp("detect.safetensors");
+        let header = br#"{"t":{"dtype":"U8","shape":[2],"data_offsets":[0,2]}}"#;
+        let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
+        bytes.extend_from_slice(header);
+        bytes.extend_from_slice(&[3, 4]);
+        fs::write(&st, &bytes).unwrap();
+        let src = open_any(&st).unwrap();
+        assert_eq!(src.read("t", "data").unwrap(), vec![3, 4]);
+
+        // garbage
+        let junk = tmp("detect.junk");
+        fs::write(&junk, b"not a tensor file at all").unwrap();
+        assert!(matches!(open_any(&junk), Err(Error::Unsupported(_))));
+    }
+}
+
+// =======================================================================
 // pt (pickle)
 // =======================================================================
 
