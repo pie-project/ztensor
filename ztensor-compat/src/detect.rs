@@ -9,7 +9,7 @@ use std::fs::File;
 use std::io::Read;
 use std::path::Path;
 
-use ztensor::{Error, Result, Source};
+use ztensor::{Composite, CompositeSource, Error, Result, Source};
 
 /// Sniffs the format of a tensor file. Returns a stable label:
 /// `"zt"`, `"safetensors"`, `"gguf"`, `"npz"`, `"pt"`, `"hdf5"`, `"onnx"`.
@@ -118,4 +118,27 @@ pub fn open_any(path: impl AsRef<Path>) -> Result<Box<dyn Source>> {
         }
         other => Err(Error::Unsupported(format!("unhandled format {other:?}"))),
     }
+}
+
+/// Opens several files as one [`Composite`].
+///
+/// What a sharded snapshot is: `model-00001-of-00003.safetensors` and its
+/// siblings are each a whole file that describes itself, and the index beside
+/// them is a naming convention outside the format. So this is a list of paths
+/// and nothing more — the caller decides which files belong together, because
+/// the files themselves never said.
+///
+/// Every path is opened with [`open_any`], so a set may mix formats. Nothing
+/// here requires them to match: what makes the set a model is that the names
+/// do not collide, which [`Composite::new`] checks.
+pub fn open_all<P: AsRef<Path>>(paths: &[P]) -> Result<Composite> {
+    let mut parts = Vec::with_capacity(paths.len());
+    for path in paths {
+        let path = path.as_ref();
+        parts.push(CompositeSource {
+            label: path.display().to_string(),
+            source: open_any(path)?,
+        });
+    }
+    Composite::new(parts)
 }

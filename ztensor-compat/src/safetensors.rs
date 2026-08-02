@@ -60,6 +60,13 @@ fn map_dtype(st: &str) -> Result<(DType, Option<&'static str>)> {
         "BOOL" => (DType::U8, Some("bool")),
         "F8_E4M3" => (DType::U8, Some("f8_e4m3fn")),
         "F8_E5M2" => (DType::U8, Some("f8_e5m2")),
+        // Sub-byte and exponent-only tags. Both ride on `U8` storage, and the
+        // logical type is what keeps them readable: `f4_e2m1` is what makes the
+        // header's byte range half the element count rather than equal to it,
+        // and `f8_e8m0` is the difference between a scale a consumer can apply
+        // and a byte it would have to guess about.
+        "F4_E2M1" => (DType::U8, Some("f4_e2m1")),
+        "F8_E8M0" => (DType::U8, Some("f8_e8m0")),
         other => {
             return Err(Error::Unsupported(format!(
                 "safetensors dtype {other:?} has no registered projection"

@@ -262,3 +262,130 @@ impl Source for Model {
         Model::caps(self, object, part)
     }
 }
+
+/// Several self-describing sources, read as one.
+///
+/// Distinct from [`Model`], and the difference is what binds the set. A
+/// `Model` is the spec's multi-file form (§7): one root manifest names every
+/// shard by size and digest, so opening one *checks* that the files on disk
+/// are the files the manifest meant, and the shards themselves carry no
+/// metadata — they are byte stores the root addresses into.
+///
+/// A `Composite` is the other shape, and it is the one every foreign format
+/// arrives in: N files that each describe themselves completely, with nothing
+/// binding them together except the caller's list. A sharded safetensors
+/// snapshot is exactly this — each shard is a whole safetensors file, and
+/// `model.safetensors.index.json` is a naming convention outside the format,
+/// not an identity claim inside it.
+///
+/// So nothing here verifies the set, because there is nothing to verify it
+/// against: no digests, no sizes anyone promised, no root. What a composite
+/// adds over the sources it holds is a single name space and the record of
+/// which file each name came from. It deliberately does not implement
+/// [`Source`]: a `Source` has one [`Manifest`], and merging N manifests into
+/// one would mean rewriting every blob reference against a shard table no
+/// file wrote — a claim of identity where none was made.
+pub struct Composite {
+    parts: Vec<CompositeSource>,
+    /// Object name to the index of the source that holds it.
+    owner: BTreeMap<String, usize>,
+}
+
+/// One member of a [`Composite`], and where it came from.
+pub struct CompositeSource {
+    /// How the caller names this file. Never interpreted here.
+    pub label: String,
+    pub source: Box<dyn Source>,
+}
+
+impl std::fmt::Debug for Composite {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Composite")
+            .field("sources", &self.parts.len())
+            .field("objects", &self.owner.len())
+            .finish()
+    }
+}
+
+impl Composite {
+    /// Builds a composite over `parts`, in the order given.
+    ///
+    /// A name held by two sources is an error rather than a precedence rule.
+    /// The formats this exists for do not define one — a tensor appearing in
+    /// two shards of a snapshot is a broken snapshot, and picking a winner
+    /// would load half a model and say nothing.
+    pub fn new(parts: Vec<CompositeSource>) -> Result<Self> {
+        let mut owner: BTreeMap<String, usize> = BTreeMap::new();
+        for (index, part) in parts.iter().enumerate() {
+            for name in part.source.manifest().objects.keys() {
+                if let Some(&first) = owner.get(name) {
+                    return Err(Error::reject(
+                        Rule::Schema,
+                        format!(
+                            "object {name:?} is in both {:?} and {:?}",
+                            parts[first].label, part.label
+                        ),
+                    ));
+                }
+                owner.insert(name.clone(), index);
+            }
+        }
+        Ok(Self { parts, owner })
+    }
+
+    /// The sources, in the order they were given.
+    pub fn sources(&self) -> &[CompositeSource] {
+        &self.parts
+    }
+
+    /// Every object, with the index of the source holding it.
+    ///
+    /// Sorted by name across the whole composite, so the order does not
+    /// depend on how the caller happened to list the files.
+    pub fn objects(&self) -> impl Iterator<Item = (usize, &str, &Object)> {
+        self.owner.iter().map(|(name, &index)| {
+            let object = self.parts[index]
+                .source
+                .manifest()
+                .objects
+                .get(name)
+                .expect("owner index built from this manifest");
+            (index, name.as_str(), object)
+        })
+    }
+
+    /// The index of the source holding `name`.
+    pub fn source_of(&self, name: &str) -> Option<usize> {
+        self.owner.get(name).copied()
+    }
+
+    pub fn get(&self, name: &str) -> Option<&Object> {
+        let index = self.source_of(name)?;
+        self.parts[index].source.manifest().objects.get(name)
+    }
+
+    fn holder(&self, name: &str) -> Result<&dyn Source> {
+        let index = self
+            .owner
+            .get(name)
+            .ok_or_else(|| Error::NotFound(format!("object {name:?}")))?;
+        Ok(self.parts[*index].source.as_ref())
+    }
+
+    /// Tier 1: owned decoded bytes, from whichever source holds the object.
+    pub fn read(&self, name: &str, part: &str) -> Result<Vec<u8>> {
+        self.holder(name)?.read(name, part)
+    }
+
+    /// Tier 2: zero-copy view, if the holding source can serve one.
+    pub fn view(&self, name: &str, part: &str) -> Result<&[u8]> {
+        self.holder(name)?.view(name, part)
+    }
+
+    /// Capability report, as the holding source reports it. A composite adds
+    /// no capability and takes none away: each file is read exactly as it
+    /// would be alone.
+    pub fn caps(&self, name: &str, part: &str) -> Result<Caps> {
+        self.holder(name)?.caps(name, part)
+    }
+}

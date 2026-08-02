@@ -41,6 +41,8 @@ pub use models::{
 };
 pub use profiles::{encoding_profile, layout_profile, EncodingProfile, LayoutProfile};
 pub use reader::{read_csr, validate_bytes, Csr, Reader};
-pub use shard::{CasResolver, Model, PositionalResolver, ShardResolver};
+pub use shard::{
+    CasResolver, Composite, CompositeSource, Model, PositionalResolver, ShardResolver,
+};
 pub use source::{page_size, Caps, Source};
 pub use writer::{DataShardWriter, ObjectWriter, PartDef, StreamPart, Writer};
