@@ -52,19 +52,25 @@ canonical files, a vocabulary of versioned profiles instead of built-in
 quantization, no code execution anywhere, and an XXH3 digest per tensor
 plus one over the manifest.
 
-![Canonical .zt places every tensor on a page boundary; safetensors packs them back to back](../static/diagrams/alignment.svg)
+![In canonical .zt every page holds one tensor; packed back to back, two pages end up holding two tensors each](../static/diagrams/alignment.svg)
 
-Placement is what the rest rests on. A tensor that owns its pages can be
-mapped, registered with a driver, and dropped from the page cache on its
-own; one that shares them cannot be touched without touching its
-neighbours.
+The page is the unit the operating system deals in, so it is also the unit
+of ownership. A tensor whose pages are its own can be mapped, registered
+with a driver, and dropped from the cache without touching anything else.
 
 ## The three layers
 
 The format is organized so that the mortal parts can die without taking
 the rest with them:
 
-![L0 container, frozen; L1 manifest, version-gated; L2 vocabulary, deliberately mortal](../static/diagrams/layers.svg)
+![What each layer stores: vocabulary identifiers, manifest records, and the bytes of the container](../static/diagrams/layers.svg)
+
+They meet in one place. A manifest entry says what a tensor *means* by
+naming a profile from L2, and says where it *is* by naming a byte range in
+L0 — so the layer that is allowed to change never touches the layer that
+is not.
+
+![A manifest entry whose layout field points up at a profile and whose blob field points down at bytes](../static/diagrams/references.svg)
 
 Refusing unknown L2 vocabulary is not a limitation, it is the point:
 silently reinterpreting it is how a format produces wrong tensors instead
