@@ -6,7 +6,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use conformance::{all_cases, Expect, Op};
-use ztensor::{validate_bytes, Error, Reader};
+use ztensor::{csr, validate_bytes, Error, Source, Vocabulary};
 
 fn tmp(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name)
@@ -23,7 +23,7 @@ fn run(case: &conformance::Case) {
     let name = case.name;
     match case.op {
         Op::Open => {
-            let result = validate_bytes(&case.bytes);
+            let result = validate_bytes(&case.bytes, &Vocabulary::standard());
             match (&case.expect, result) {
                 (Expect::Valid, Ok(Some(_))) => {}
                 (Expect::DataShard, Ok(None)) => {}
@@ -36,13 +36,24 @@ fn run(case: &conformance::Case) {
         Op::View(..) | Op::Verify(..) | Op::ReadCsr(..) => {
             let path = tmp(&format!("case-{name}.zt"));
             fs::write(&path, &case.bytes).unwrap();
-            let reader = Reader::open(&path).unwrap_or_else(|e| {
-                panic!("{name}: tiered case must open cleanly, got {e}")
+            let source = Source::open(&path).unwrap_or_else(|e| {
+                panic!("{name}: this case must open cleanly, got {e}")
             });
             let result = match case.op {
-                Op::View(obj, part) => reader.view(obj, part).map(|_| ()),
-                Op::Verify(obj, part) => reader.verify(obj, part).map(|_| ()),
-                Op::ReadCsr(obj) => reader.read_csr(obj).map(|_| ()),
+                Op::View(obj, part) => source
+                    .tensor(obj)
+                    .and_then(|t| t.part(part))
+                    .and_then(|p| p.map())
+                    .map(|_| ()),
+                Op::Verify(obj, part) => source
+                    .tensor(obj)
+                    .and_then(|t| t.part(part))
+                    .and_then(|p| p.verify())
+                    .map(|_| ()),
+                Op::ReadCsr(obj) => source
+                    .tensor(obj)
+                    .and_then(|t| csr::read(&t))
+                    .map(|_| ()),
                 Op::Open => unreachable!(),
             };
             match (&case.expect, result) {
@@ -134,7 +145,7 @@ fn mutation_smoke() {
             }
         }
         // Must return, never panic. Result content is irrelevant here.
-        let _ = validate_bytes(&bytes);
+        let _ = validate_bytes(&bytes, &Vocabulary::standard());
         let _ = round;
     }
 }

@@ -141,6 +141,16 @@ pub fn image(buf: &[u8], vocab: &Vocabulary) -> Result<Option<Manifest>> {
     Ok(Some(manifest))
 }
 
+/// Reads and validates one container's manifest, resolving nothing.
+///
+/// What an inspector wants: a sharded root can be listed without its shards
+/// present, because listing is a question about this file. `None` is a data
+/// shard, which has no manifest to read.
+pub fn manifest_of(path: impl AsRef<std::path::Path>) -> Result<Option<Manifest>> {
+    let store = Store::index(path.as_ref(), "zt")?;
+    Ok(read(&store, &Vocabulary::standard())?.manifest)
+}
+
 /// Opens a `.zt` store: reads the footer and the manifest blob, validates
 /// both, and reports every occupied range.
 pub(crate) fn read(store: &Store, vocab: &Vocabulary) -> Result<Parsed> {

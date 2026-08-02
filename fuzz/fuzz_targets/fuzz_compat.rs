@@ -1,8 +1,9 @@
-//! Every foreign-format parser, on arbitrary bytes: open must never panic.
+//! Every foreign-format parser, on arbitrary bytes: opening must never panic.
 //!
-//! The first byte selects the projection so one corpus exercises all of
-//! them; the rest is the file. Opening writes nothing, so a temp file per
-//! iteration is the only way to reach the mmap-based readers.
+//! One corpus reaches all of them because detection is by magic, and the
+//! projections are no longer separate types to call — so this drives the same
+//! door every caller uses, then reads everything behind it. Opening writes
+//! nothing, so a temp file per iteration is the only way in.
 
 #![no_main]
 use libfuzzer_sys::fuzz_target;
@@ -21,31 +22,39 @@ fuzz_target!(|data: &[u8]| {
     }
     let path = file.path();
 
-    match selector % 7 {
-        0 => drop(ztensor_compat::Safetensors::open(path)),
-        1 => drop(ztensor_compat::Gguf::open(path)),
-        2 => drop(ztensor_compat::Npz::open(path)),
-        3 => drop(ztensor_compat::Pt::open(path)),
-        4 => drop(ztensor_compat::Hdf5::open(path)),
-        5 => drop(ztensor_compat::Onnx::open(path)),
-        _ => {
-            // Detection plus a full read of everything it finds.
-            if let Ok(src) = ztensor_compat::open_any(path) {
-                use ztensor::Source;
-                let names: Vec<(String, Vec<String>)> = src
-                    .manifest()
-                    .objects
-                    .iter()
-                    .map(|(n, o)| (n.clone(), o.parts.keys().cloned().collect()))
-                    .collect();
-                for (name, parts) in names {
-                    for part in parts {
-                        let _ = src.read(&name, &part);
-                        let _ = src.view(&name, &part);
-                        let _ = src.caps(&name, &part);
-                    }
-                }
-            }
+    // Half the iterations map the file and half only index it: the two take
+    // different paths through every projection, and only one of them can hand
+    // back a borrow.
+    let opened = if selector % 2 == 0 {
+        ztensor_compat::open(path)
+    } else {
+        ztensor_compat::index(path)
+    };
+    let Ok(src) = opened else {
+        return;
+    };
+    let names: Vec<(String, Vec<String>)> = src
+        .tensors()
+        .map(|t| {
+            (
+                t.name().to_string(),
+                t.parts().map(str::to_string).collect(),
+            )
+        })
+        .collect();
+    for (name, parts) in names {
+        let Ok(tensor) = src.tensor(&name) else {
+            continue;
+        };
+        for part in parts {
+            let Ok(part) = tensor.part(&part) else {
+                continue;
+            };
+            let _ = part.bytes();
+            let _ = part.map();
+            let _ = part.locate();
+            let _ = part.caps();
+            let _ = part.verify();
         }
     }
 });

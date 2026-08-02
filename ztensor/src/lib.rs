@@ -62,6 +62,6 @@ pub use source::{
     Tensor, Verified,
 };
 pub use store::{page_size, Opaque, Store, StoreId};
-pub use validate::image as validate_bytes;
+pub use validate::{image as validate_bytes, manifest_of};
 pub use vocab::Vocabulary;
 pub use writer::{DataShardWriter, ObjectBuilder, Sink, Writer};

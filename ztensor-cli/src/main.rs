@@ -1,20 +1,20 @@
 //! `zt` — inspect, verify, convert, and diff tensor files.
 //!
-//! Reads every format the compat crate knows (safetensors, gguf, npz,
-//! torch .pt, hdf5, onnx) and writes exactly one: canonical `.zt`.
+//! Reads every format the compat crate knows (safetensors, gguf, npz, torch
+//! .pt, hdf5, onnx) and writes exactly one: canonical `.zt`.
 
 use std::path::Path;
 use std::process::ExitCode;
 
 use xxhash_rust::xxh3::xxh3_64;
-use ztensor::{Error, Reader, Writer};
-use ztensor_compat::{detect, open_any};
+use ztensor::{Error, Verified, Writer};
+use ztensor_compat::{detect, open};
 
 const USAGE: &str = "\
 zt — tensor file tool (zTensor v2)
 
 USAGE:
-    zt ls <file>                  list objects, shapes, and layouts
+    zt ls <file>                  list tensors, shapes, and layouts
     zt verify <file> [--deep]     validate; check digests (--deep: shard digests too)
     zt convert <in> <out.zt>      convert any supported format to canonical .zt
                [--align <bytes>]  non-canonical placement (power of two >= 4096)
@@ -82,101 +82,110 @@ fn shape_str(shape: &[u64]) -> String {
 fn ls(path: &Path) -> Result<ExitCode, Error> {
     let format = detect(path)?;
 
-    // .zt roots are opened alone (no shard resolution) so `ls` also works
-    // when the shard files are not present.
+    // A `.zt` root is listed from its own manifest, with nothing resolved, so
+    // `ls` still answers when the shard files are not here — listing is a
+    // question about this file.
     if format == "zt" {
-        let reader = Reader::open(path)?;
-        if reader.is_data_shard() {
+        let Some(manifest) = ztensor::manifest_of(path)? else {
             println!("{}: zt data shard (no manifest)", path.display());
             return Ok(ExitCode::SUCCESS);
+        };
+        println!(
+            "{}: zt, {} tensor(s)",
+            path.display(),
+            manifest.objects.len()
+        );
+        for (name, obj) in &manifest.objects {
+            let total: u64 = obj.parts.values().map(|p| p.decoded_size()).sum();
+            let part = obj.parts.values().next();
+            let dtype = part.map(|p| p.dtype.as_str()).unwrap_or("?");
+            let logical = part
+                .and_then(|p| p.logical.as_deref())
+                .map(|t| format!(" ({t})"))
+                .unwrap_or_default();
+            println!(
+                "  {name}  {} {dtype}{logical} {}  {}",
+                obj.layout,
+                shape_str(&obj.shape),
+                human(total),
+            );
         }
-        print_objects(path, format, reader.manifest());
-        let shards = &reader.manifest().shards;
-        if !shards.is_empty() {
-            println!("\nshards ({} expected alongside the root):", shards.len());
+        if manifest.attributes.is_some() {
+            println!("  + file attributes");
+        }
+        if !manifest.shards.is_empty() {
+            println!(
+                "\nshards ({} expected alongside the root):",
+                manifest.shards.len()
+            );
             let resolver = ztensor::PositionalResolver::for_root(path);
-            for (&idx, shard) in shards {
+            for (&idx, shard) in &manifest.shards {
                 let expected = ztensor::ShardResolver::resolve(&resolver, idx, shard)
                     .map(|p| p.display().to_string())
                     .unwrap_or_default();
-                println!(
-                    "  {idx}: {}  {}  {}",
-                    expected,
-                    human(shard.size),
-                    shard.digest
-                );
+                println!("  {idx}: {expected}  {}  {}", human(shard.size), shard.digest);
             }
         }
         return Ok(ExitCode::SUCCESS);
     }
 
-    let src = open_any(path)?;
-    print_objects(path, format, src.manifest());
-    Ok(ExitCode::SUCCESS)
-}
-
-fn print_objects(path: &Path, format: &str, manifest: &ztensor::Manifest) {
-    println!(
-        "{}: {format}, {} object(s)",
-        path.display(),
-        manifest.objects.len()
-    );
-    for (name, obj) in &manifest.objects {
-        let total: u64 = obj.parts.values().map(|p| p.decoded_size()).sum();
-        let part = obj.parts.values().next();
-        let dtype = part.map(|p| p.dtype.as_str()).unwrap_or("?");
-        let ltype = part
-            .and_then(|p| p.ltype.as_deref())
+    let src = open(path)?;
+    println!("{}: {format}, {} tensor(s)", path.display(), src.len());
+    for tensor in src.tensors() {
+        let total: u64 = tensor
+            .parts()
+            .filter_map(|p| tensor.part(p).ok())
+            .map(|p| p.nbytes())
+            .sum();
+        let first = tensor.parts().next().and_then(|p| tensor.part(p).ok());
+        let dtype = first.map(|p| p.dtype().as_str()).unwrap_or("?");
+        let logical = first
+            .and_then(|p| p.logical())
             .map(|t| format!(" ({t})"))
             .unwrap_or_default();
         println!(
-            "  {name}  {} {dtype}{ltype} {}  {}",
-            obj.layout.as_str(),
-            shape_str(&obj.shape),
+            "  {}  {} {dtype}{logical} {}  {}",
+            tensor.name(),
+            tensor.layout(),
+            shape_str(tensor.shape()),
             human(total),
         );
     }
-    if manifest.attributes.is_some() {
+    if src.attributes().is_some() {
         println!("  + file attributes");
     }
+    Ok(ExitCode::SUCCESS)
 }
 
 // ---- verify -----------------------------------------------------------
 
 fn verify(path: &Path, deep: bool) -> Result<ExitCode, Error> {
     let format = detect(path)?;
+    let src = open(path)?;
     if format != "zt" {
-        // Opening runs each projection's structural validation.
-        let src = open_any(path)?;
+        // Opening ran the projection's structural validation.
         println!(
-            "{}: {format} opened cleanly, {} object(s); no digests to check \
+            "{}: {format} opened cleanly, {} tensor(s); no digests to check \
              (convert to .zt for verifiable files)",
             path.display(),
-            src.manifest().objects.len()
+            src.len()
         );
         return Ok(ExitCode::SUCCESS);
     }
 
-    let model = ztensor::Model::open(path)?;
-    // Names are collected first so the borrow ends before verify() runs.
-    let parts: Vec<(String, String)> = model
-        .manifest()
-        .objects
-        .iter()
-        .flat_map(|(name, obj)| obj.parts.keys().map(move |p| (name.clone(), p.clone())))
-        .collect();
     let (mut verified, mut undigested) = (0u64, 0u64);
-    for (name, part) in &parts {
-        if model.verify(name, part)? {
-            verified += 1;
-        } else {
-            undigested += 1;
+    for tensor in src.tensors() {
+        for name in tensor.parts() {
+            match tensor.part(name)?.verify()? {
+                Verified::Digest => verified += 1,
+                Verified::NoDigest => undigested += 1,
+            }
         }
     }
     if deep {
-        model.verify_shards()?;
+        src.verify_shards()?;
     }
-    let shard_count = model.manifest().shards.len();
+    let shard_count = src.manifest().map(|m| m.shards.len()).unwrap_or(0);
     println!(
         "{}: ok — {verified} part(s) digest-verified, {undigested} without digests{}{}",
         path.display(),
@@ -193,18 +202,18 @@ fn verify(path: &Path, deep: bool) -> Result<ExitCode, Error> {
 // ---- convert ----------------------------------------------------------
 
 fn convert(input: &Path, output: &Path, align: Option<u64>) -> Result<ExitCode, Error> {
-    let src = open_any(input)?;
+    let src = open(input)?;
     let mut writer = match align {
         None => Writer::create(output)?,
-        Some(a) => Writer::create_with_alignment(output, a)?,
+        Some(a) => Writer::options().canonical(false).align(a).create(output)?,
     };
-    writer.ingest(src.as_ref())?;
+    writer.ingest(&src)?;
     let out_size = writer.finish()?;
-    let objects = src.manifest().objects.len();
     println!(
-        "{} -> {}: {objects} object(s), {} written{}",
+        "{} -> {}: {} tensor(s), {} written{}",
         input.display(),
         output.display(),
+        src.len(),
         human(out_size),
         if align.is_none() { " (canonical)" } else { "" },
     );
@@ -214,62 +223,55 @@ fn convert(input: &Path, output: &Path, align: Option<u64>) -> Result<ExitCode, 
 // ---- diff -------------------------------------------------------------
 
 fn diff(a_path: &Path, b_path: &Path) -> Result<ExitCode, Error> {
-    let a = open_any(a_path)?;
-    let b = open_any(b_path)?;
-    let (ma, mb) = (a.manifest(), b.manifest());
+    let a = open(a_path)?;
+    let b = open(b_path)?;
 
     let mut added = 0u64;
     let mut removed = 0u64;
     let mut changed = 0u64;
 
-    for name in mb.objects.keys() {
-        if !ma.objects.contains_key(name) {
+    for name in b.names() {
+        if !a.contains(name) {
             println!("+ {name}");
             added += 1;
         }
     }
-    for (name, oa) in &ma.objects {
-        let Some(ob) = mb.objects.get(name) else {
-            println!("- {name}");
+    for ta in a.tensors() {
+        let Some(tb) = b.get(ta.name()) else {
+            println!("- {}", ta.name());
             removed += 1;
             continue;
         };
         let mut reasons = Vec::new();
-        if oa.shape != ob.shape {
+        if ta.shape() != tb.shape() {
             reasons.push(format!(
                 "shape {} -> {}",
-                shape_str(&oa.shape),
-                shape_str(&ob.shape)
+                shape_str(ta.shape()),
+                shape_str(tb.shape())
             ));
         }
-        if oa.layout != ob.layout {
-            reasons.push(format!(
-                "layout {} -> {}",
-                oa.layout.as_str(),
-                ob.layout.as_str()
-            ));
+        if ta.layout() != tb.layout() {
+            reasons.push(format!("layout {} -> {}", ta.layout(), tb.layout()));
         }
         if reasons.is_empty() {
-            for part in oa.parts.keys() {
-                if !ob.parts.contains_key(part) {
+            for part in ta.parts() {
+                let Ok(pb) = tb.part(part) else {
                     reasons.push(format!("part {part:?} removed"));
                     continue;
-                }
-                let ha = xxh3_64(&a.read(name, part)?);
-                let hb = xxh3_64(&b.read(name, part)?);
-                if ha != hb {
+                };
+                if xxh3_64(&ta.part(part)?.bytes()?) != xxh3_64(&pb.bytes()?) {
                     reasons.push(format!("content of {part:?}"));
                 }
             }
         }
         if !reasons.is_empty() {
-            println!("~ {name}: {}", reasons.join(", "));
+            println!("~ {}: {}", ta.name(), reasons.join(", "));
             changed += 1;
         }
     }
 
     if added + removed + changed == 0 {
-        println!("identical: {} object(s)", ma.objects.len());
+        println!("identical: {} tensor(s)", a.len());
         Ok(ExitCode::SUCCESS)
     } else {
         println!("{changed} changed, {added} added, {removed} removed");

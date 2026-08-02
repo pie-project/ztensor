@@ -14,7 +14,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use ztensor::{DType, Source, Writer};
+use ztensor::{DType, Writer};
 
 /// A synthetic checkpoint: `n` tensors totalling roughly `total_mb`.
 struct Model {
@@ -82,11 +82,11 @@ impl Model {
     fn write_zt(&self, path: &Path, align: Option<u64>) -> std::io::Result<u64> {
         let mut w = match align {
             None => Writer::create(path),
-            Some(a) => Writer::create_with_alignment(path, a),
+            Some(a) => Writer::options().canonical(false).align(a).create(path),
         }
         .expect("create");
         for (name, shape, data) in &self.tensors {
-            w.add_dense(name, shape, DType::BF16, data).expect("add");
+            w.add(name, shape.to_vec(), DType::BF16, data).expect("add");
         }
         Ok(w.finish().expect("finish"))
     }
@@ -213,8 +213,8 @@ fn main() {
         let mut times = Vec::new();
         for _ in 0..runs {
             let t = Instant::now();
-            let r = ztensor::Reader::open(&zt).expect("open");
-            std::hint::black_box(r.manifest().objects.len());
+            let r = ztensor::Source::open(&zt).expect("open");
+            std::hint::black_box(r.len());
             times.push(t.elapsed());
         }
         median(times)
@@ -223,8 +223,8 @@ fn main() {
         let mut times = Vec::new();
         for _ in 0..runs {
             let t = Instant::now();
-            let s = ztensor_compat::Safetensors::open(&st).expect("open");
-            std::hint::black_box(s.manifest().objects.len());
+            let s = ztensor_compat::open(&st).expect("open");
+            std::hint::black_box(s.len());
             times.push(t.elapsed());
         }
         median(times)
@@ -233,8 +233,8 @@ fn main() {
     // ---- warm zero-copy view -------------------------------------------
     // Touch every byte so the mmap actually faults; a view that is never
     // read measures nothing.
-    let reader = ztensor::Reader::open(&zt).expect("open");
-    let names: Vec<String> = reader.manifest().objects.keys().cloned().collect();
+    let reader = ztensor::Source::open(&zt).expect("open");
+    let names: Vec<String> = reader.names().map(str::to_string).collect();
     rows.push(bench(
         "read .zt zero-copy, full traversal (warm)",
         runs,
@@ -242,14 +242,14 @@ fn main() {
         || {
             let mut sum = 0u64;
             for n in &names {
-                sum += checksum(reader.view(n, "data").expect("view"));
+                sum += checksum(reader.tensor(n).expect("tensor").map().expect("view"));
             }
             std::hint::black_box(sum);
         },
     ));
 
-    let stf = ztensor_compat::Safetensors::open(&st).expect("open");
-    let st_names: Vec<String> = stf.manifest().objects.keys().cloned().collect();
+    let stf = ztensor_compat::open(&st).expect("open");
+    let st_names: Vec<String> = stf.names().map(str::to_string).collect();
     rows.push(bench(
         "read .safetensors zero-copy, full traversal (warm)",
         runs,
@@ -257,7 +257,7 @@ fn main() {
         || {
             let mut sum = 0u64;
             for n in &st_names {
-                sum += checksum(Source::view(&stf, n, "data").expect("view"));
+                sum += checksum(stf.tensor(n).expect("tensor").map().expect("view"));
             }
             std::hint::black_box(sum);
         },
@@ -272,7 +272,7 @@ fn main() {
         || {
             let mut total = 0usize;
             for n in &names {
-                total += reader.read(n, "data").expect("read").len();
+                total += reader.tensor(n).expect("tensor").bytes().expect("read").len();
             }
             std::hint::black_box(total);
         },
@@ -288,10 +288,10 @@ fn main() {
             fs::copy(&zt, &cold_path).expect("copy");
             drop_cache(&cold_path);
             let t = Instant::now();
-            let r = ztensor::Reader::open(&cold_path).expect("open");
+            let r = ztensor::Source::open(&cold_path).expect("open");
             let mut sum = 0u64;
             for n in &names {
-                sum += checksum(r.view(n, "data").expect("view"));
+                sum += checksum(r.tensor(n).expect("tensor").map().expect("view"));
             }
             std::hint::black_box(sum);
             drop(r);
@@ -327,7 +327,7 @@ fn main() {
     // ---- verification ---------------------------------------------------
     rows.push(bench("verify every digest (xxh3)", runs, payload, || {
         for n in &names {
-            reader.verify(n, "data").expect("verify");
+            reader.tensor(n).expect("tensor").verify().expect("verify");
         }
     }));
 
@@ -338,7 +338,7 @@ fn main() {
         runs,
         payload,
         || {
-            let src = ztensor_compat::Safetensors::open(&st).expect("open");
+            let src = ztensor_compat::open(&st).expect("open");
             let mut w = Writer::create(&conv).expect("create");
             w.ingest(&src).expect("ingest");
             w.finish().expect("finish");

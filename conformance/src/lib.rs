@@ -194,9 +194,9 @@ pub fn all_cases() -> Vec<Case> {
     cases.push(Case::open(
         "canonical-basic",
         written(|w| {
-            w.add_dense("a.bias", &[4], DType::F32, &[1u8; 16]).unwrap();
-            w.add_dense("a.weight", &[2, 4], DType::BF16, &[2u8; 16]).unwrap();
-            w.add_dense("tied", &[2, 4], DType::BF16, &[2u8; 16]).unwrap();
+            w.add("a.bias", [4u64], DType::F32, &[1u8; 16]).unwrap();
+            w.add("a.weight", [2u64, 4], DType::BF16, &[2u8; 16]).unwrap();
+            w.add("tied", [2u64, 4], DType::BF16, &[2u8; 16]).unwrap();
         }),
         Expect::Valid,
     ));
@@ -413,7 +413,7 @@ pub fn all_cases() -> Vec<Case> {
         expect: Expect::Unsupported,
     });
     cases.push(Case {
-        name: "view-foreign-shard-refused",
+        name: "shard-reference-is-a-valid-image",
         bytes: assemble(
             8,
             &Value::Map(vec![
@@ -436,8 +436,11 @@ pub fn all_cases() -> Vec<Case> {
                 ),
             ]),
         ),
-        op: Op::View("t", "data"),
-        expect: Expect::Unsupported,
+        // A blob in another file is a valid *image*: whether that file is
+        // there, and whether it is the file the root meant, are questions for
+        // resolution — a different rung, and a different test.
+        op: Op::Open,
+        expect: Expect::Valid,
     });
 
     // ---- reject: container -------------------------------------------
