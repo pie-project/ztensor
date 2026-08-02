@@ -54,6 +54,10 @@ pub struct Writer {
     /// *byte-identical* sharing, and hashes can collide).
     dedup: HashMap<(u128, u64), u64>,
     last_name: Option<String>,
+    /// Whether an [`ObjectWriter`] is open. Every other object-adding method
+    /// refuses while one is: their bytes would land in the middle of the
+    /// part being streamed.
+    streaming: bool,
 }
 
 /// Writer-side violations of reader rules surface as `InvalidInput`
@@ -102,6 +106,7 @@ impl Writer {
             manifest: Manifest::default(),
             dedup: HashMap::new(),
             last_name: None,
+            streaming: false,
         })
     }
 
@@ -119,6 +124,11 @@ impl Writer {
     /// Shared preamble of every object-adding method: name rules, duplicate
     /// check, shape rules, canonical insertion order.
     fn check_new_object(&self, name: &str, shape: &[u64]) -> Result<()> {
+        if self.streaming {
+            return Err(Error::InvalidInput(format!(
+                "object {name:?} cannot be added while a streamed object is open"
+            )));
+        }
         check_name(name).map_err(invalid)?;
         self.check_canonical_name(name)?;
         if self.manifest.objects.contains_key(name) {
@@ -295,14 +305,20 @@ impl Writer {
     /// (an encoding profile needs the whole payload) and are not deduplicated
     /// against earlier blobs, since dedup requires knowing the bytes before
     /// placing them.
-    pub fn stream_object<'a>(
-        &'a mut self,
+    ///
+    /// The [`ObjectWriter`] is a token, not a borrow: it is passed back to
+    /// [`write_chunk`](Self::write_chunk) and consumed by
+    /// [`end_object`](Self::end_object). That lets a caller hold an open
+    /// object beside the writer in one structure — which is what a producer
+    /// driven from the outside, a chunk per call, has to do.
+    pub fn stream_object(
+        &mut self,
         name: &str,
         shape: &[u64],
         layout: &str,
         parts: &[StreamPart<'_>],
         attributes: Option<cbor::Value>,
-    ) -> Result<ObjectWriter<'a>> {
+    ) -> Result<ObjectWriter> {
         self.check_new_object(name, shape)?;
         if parts.is_empty() {
             return Err(Error::InvalidInput(format!("object {name:?} has no parts")));
@@ -357,8 +373,8 @@ impl Writer {
             profile.validate(name, &object).map_err(invalid)?;
         }
 
+        self.streaming = true;
         Ok(ObjectWriter {
-            writer: self,
             name: name.to_string(),
             object: Some(object),
             order: ordered.iter().map(|p| p.name.to_string()).collect(),
@@ -615,6 +631,11 @@ impl Writer {
     /// Writes the manifest blob and footer, then flushes. Returns the total
     /// file size in bytes.
     pub fn finish(mut self) -> Result<u64> {
+        if self.streaming {
+            return Err(Error::InvalidInput(
+                "a streamed object is still open; end_object it before finishing".into(),
+            ));
+        }
         let manifest_bytes = cbor::encode(&self.manifest.to_value())?;
         if manifest_bytes.len() as u64 > MAX_MANIFEST_LEN {
             return Err(Error::InvalidInput("manifest exceeds 1 GiB".into()));
@@ -651,12 +672,11 @@ impl Writer {
 /// short. The digest of each part is computed from the bytes as they pass
 /// through, so streaming costs no extra read.
 ///
-/// Dropping without calling `finish` leaves the object out of the manifest.
-/// The bytes already written stay in the file as unreferenced blobs, which
-/// the format allows (§2.5) but canonical form does not — so a canonical
-/// writer that abandons a stream will not produce a canonical file.
-pub struct ObjectWriter<'a> {
-    writer: &'a mut Writer,
+/// Dropping without calling `end_object` leaves the object out of the
+/// manifest and the writer refusing further objects: the bytes already
+/// written stay in the file as unreferenced blobs, which the format allows
+/// (§2.5) but canonical form does not, so there is no honest way to carry on.
+pub struct ObjectWriter {
     name: String,
     object: Option<Object>,
     /// Part names, in the order they must be written.
@@ -669,32 +689,41 @@ pub struct ObjectWriter<'a> {
     started: bool,
 }
 
-impl ObjectWriter<'_> {
+impl ObjectWriter {
     /// The part currently being written, or `None` when every part is done.
     pub fn current(&self) -> Option<&str> {
         self.order.get(self.at).map(String::as_str)
     }
+}
 
-    /// Appends bytes to the current part.
+impl Writer {
+    /// Appends bytes to the current part of an open streamed object.
     ///
-    /// The first call places the part at the next aligned offset. Writing
-    /// past a part's declared length is an error rather than a rollover into
-    /// the next one: a producer that has miscounted should hear about it
-    /// where it happened.
-    pub fn write(&mut self, chunk: &[u8]) -> Result<()> {
-        let Some(part_name) = self.order.get(self.at).cloned() else {
+    /// The first call for a part places it at the next aligned offset.
+    /// Writing past a part's declared length is an error rather than a
+    /// rollover into the next one: a producer that has miscounted should
+    /// hear about it where it happened.
+    pub fn write_chunk(&mut self, object: &mut ObjectWriter, chunk: &[u8]) -> Result<()> {
+        if !self.streaming {
+            return Err(Error::InvalidInput(format!(
+                "object {:?} is not open on this writer",
+                object.name
+            )));
+        }
+        let Some(part_name) = object.order.get(object.at).cloned() else {
             return Err(Error::InvalidInput(format!(
                 "object {:?}: every part is already written",
-                self.name
+                object.name
             )));
         };
-        let declared = self.object.as_ref().expect("object present").parts[&part_name]
+        let declared = object.object.as_ref().expect("object present").parts[&part_name]
             .blob
             .length;
 
-        if !self.started {
-            let offset = self.writer.reserve_blob()?;
-            self.object
+        if !object.started {
+            let offset = self.reserve_blob()?;
+            object
+                .object
                 .as_mut()
                 .expect("object present")
                 .parts
@@ -702,12 +731,12 @@ impl ObjectWriter<'_> {
                 .expect("part present")
                 .blob
                 .offset = offset;
-            self.started = true;
-            self.hasher = xxhash_rust::xxh3::Xxh3::new();
-            self.written = 0;
+            object.started = true;
+            object.hasher = xxhash_rust::xxh3::Xxh3::new();
+            object.written = 0;
         }
 
-        let end = self
+        let end = object
             .written
             .checked_add(chunk.len() as u64)
             .filter(|&e| e <= declared)
@@ -715,48 +744,47 @@ impl ObjectWriter<'_> {
                 Error::InvalidInput(format!(
                     "object {:?} part {part_name:?}: {} bytes written into a part \
                      declared as {declared}",
-                    self.name,
-                    self.written + chunk.len() as u64
+                    object.name,
+                    object.written + chunk.len() as u64
                 ))
             })?;
 
-        self.writer.write_bytes(chunk)?;
-        self.hasher.update(chunk);
-        self.written = end;
+        self.write_bytes(chunk)?;
+        object.hasher.update(chunk);
+        object.written = end;
 
-        if self.written == declared {
-            let digest = format!("xxh3:{:016x}", self.hasher.digest());
-            self.object
+        if object.written == declared {
+            let digest = format!("xxh3:{:016x}", object.hasher.digest());
+            object
+                .object
                 .as_mut()
                 .expect("object present")
                 .parts
                 .get_mut(&part_name)
                 .expect("part present")
                 .digest = Some(digest);
-            self.at += 1;
-            self.started = false;
+            object.at += 1;
+            object.started = false;
         }
         Ok(())
     }
 
-    /// Completes the object and adds it to the manifest.
-    pub fn finish(mut self) -> Result<()> {
-        if self.at < self.order.len() {
-            let part = &self.order[self.at];
-            let declared = self.object.as_ref().expect("object present").parts[part]
+    /// Completes a streamed object and adds it to the manifest.
+    pub fn end_object(&mut self, mut object: ObjectWriter) -> Result<()> {
+        if object.at < object.order.len() {
+            let part = &object.order[object.at];
+            let declared = object.object.as_ref().expect("object present").parts[part]
                 .blob
                 .length;
             return Err(Error::InvalidInput(format!(
                 "object {:?} part {part:?}: {} of {declared} bytes written",
-                self.name, self.written
+                object.name, object.written
             )));
         }
-        let object = self.object.take().expect("object present");
-        self.writer
-            .manifest
-            .objects
-            .insert(self.name.clone(), object);
-        self.writer.last_name = Some(self.name.clone());
+        let built = object.object.take().expect("object present");
+        self.manifest.objects.insert(object.name.clone(), built);
+        self.last_name = Some(object.name);
+        self.streaming = false;
         Ok(())
     }
 }

@@ -59,9 +59,9 @@ fn a_streamed_object_matches_a_slice_written_one() {
             // Deliberately uneven chunks: the file must not depend on how the
             // producer happened to slice its copies.
             for chunk in bytes.chunks(7919) {
-                object.write(chunk).unwrap();
+                w.write_chunk(&mut object, chunk).unwrap();
             }
-            object.finish().unwrap();
+            w.end_object(object).unwrap();
         }
         w.finish().unwrap();
     }
@@ -110,11 +110,11 @@ fn a_multi_part_object_streams_in_name_order() {
         .unwrap();
 
     assert_eq!(object.current(), Some("data"));
-    object.write(&data).unwrap();
+    w.write_chunk(&mut object, &data).unwrap();
     assert_eq!(object.current(), Some("scales"));
-    object.write(&scales).unwrap();
+    w.write_chunk(&mut object, &scales).unwrap();
     assert_eq!(object.current(), None);
-    object.finish().unwrap();
+    w.end_object(object).unwrap();
     w.finish().unwrap();
 
     let r = Reader::open(&path).unwrap();
@@ -141,8 +141,8 @@ fn writing_past_a_declared_length_is_an_error() {
             None,
         )
         .unwrap();
-    object.write(&[0u8; 8]).unwrap();
-    let err = object.write(&[0u8; 9]).unwrap_err();
+    w.write_chunk(&mut object, &[0u8; 8]).unwrap();
+    let err = w.write_chunk(&mut object, &[0u8; 9]).unwrap_err();
     assert!(matches!(err, Error::InvalidInput(_)), "{err:?}");
 }
 
@@ -164,12 +164,43 @@ fn finishing_a_short_part_is_an_error() {
             None,
         )
         .unwrap();
-    object.write(&[0u8; 8]).unwrap();
-    let err = object.finish().unwrap_err();
+    w.write_chunk(&mut object, &[0u8; 8]).unwrap();
+    let err = w.end_object(object).unwrap_err();
     assert!(
         format!("{err}").contains("8 of 16 bytes"),
         "expected a short-part error, got {err}"
     );
+}
+
+/// The writer has one blob cursor, so bytes from a second object written while
+/// a stream is open would land inside the part being streamed.
+#[test]
+fn nothing_else_may_be_written_while_a_stream_is_open() {
+    let path = tmp("interleaved.zt");
+    let mut w = Writer::create(&path).unwrap();
+    let mut object = w
+        .stream_object(
+            "a",
+            &[16],
+            "dense",
+            &[StreamPart {
+                name: "data",
+                dtype: DType::U8,
+                ltype: None,
+                length: 16,
+            }],
+            None,
+        )
+        .unwrap();
+
+    let err = w.add_dense("b", &[4], DType::U8, &[0u8; 4]).unwrap_err();
+    assert!(matches!(err, Error::InvalidInput(_)), "{err:?}");
+
+    w.write_chunk(&mut object, &[0u8; 16]).unwrap();
+
+    // Nor may the file be closed around an object that is still open.
+    let err = w.finish().unwrap_err();
+    assert!(matches!(err, Error::InvalidInput(_)), "{err:?}");
 }
 
 /// A layout's metadata rules are checked when the object is declared, before
