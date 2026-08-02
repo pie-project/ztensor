@@ -15,10 +15,11 @@ use xxhash_rust::xxh3::xxh3_64;
 
 use crate::error::{Error, Result, Rule};
 use crate::models::{
-    check_name, registered_dtype, logical_size, Layout, Manifest, Object, Part, ALIGN_FLOOR,
-    FOOTER_LEN, MAGIC, MAX_MANIFEST_LEN, MAX_RANK, VERSION,
+    check_name, registered_dtype, DType, Manifest, Object, Part, ALIGN_FLOOR, FOOTER_LEN, MAGIC,
+    MAX_MANIFEST_LEN, MAX_RANK, VERSION,
 };
 use crate::cbor;
+use crate::profiles::{encoding_profile, layout_profile};
 use crate::source::{page_size, Caps, Source};
 
 pub struct Reader {
@@ -113,9 +114,27 @@ impl Reader {
         Ok(&self.mmap[start..end])
     }
 
-    /// Tier 1: owned decoded bytes of a part.
+    /// Tier 1: owned decoded bytes of a part. Decodes known encoding
+    /// profiles; refuses unknown ones (never returns stored bytes as if
+    /// they were decoded).
     pub fn read(&self, name: &str, part: &str) -> Result<Vec<u8>> {
-        self.view(name, part).map(<[u8]>::to_vec)
+        let p = self.part(name, part)?;
+        let Some(enc) = p.encoding.clone() else {
+            return self.view(name, part).map(<[u8]>::to_vec);
+        };
+        if p.blob.shard != 0 {
+            return Err(Error::Unsupported(
+                "reading from foreign shards lands in M5".into(),
+            ));
+        }
+        let profile = encoding_profile(&enc).ok_or_else(|| {
+            Error::Unsupported(format!("unknown encoding profile {enc:?}"))
+        })?;
+        let start = p.blob.offset as usize;
+        let stored = &self.mmap[start..start + p.blob.length as usize];
+        let decoded = profile.decode(stored, p.decoded_size())?;
+        debug_assert_eq!(decoded.len() as u64, p.decoded_size());
+        Ok(decoded)
     }
 
     /// Capability report for one part (spec: capability ladder).
@@ -194,7 +213,15 @@ impl Reader {
         let Some(digest) = p.digest.clone() else {
             return Ok(false);
         };
-        let bytes = self.view(name, part)?;
+        // Digests cover decoded bytes (§3.4): zero-copy for raw parts,
+        // decode for encoded ones.
+        let owned;
+        let bytes: &[u8] = if p.encoding.is_none() {
+            self.view(name, part)?
+        } else {
+            owned = self.read(name, part)?;
+            &owned
+        };
         let Some(hex) = digest.strip_prefix("xxh3:") else {
             return Err(Error::Unsupported(format!(
                 "digest algorithm in {digest:?} (only xxh3 in M1)"
@@ -209,6 +236,89 @@ impl Reader {
             ));
         }
         Ok(true)
+    }
+}
+
+/// An assembled `zt.sparse_csr/1` object with its data-level rules checked.
+#[derive(Debug, Clone)]
+pub struct Csr {
+    pub rows: u64,
+    pub cols: u64,
+    /// Decoded value bytes, `nnz` elements of `dtype`/`ltype`.
+    pub values: Vec<u8>,
+    pub dtype: DType,
+    pub ltype: Option<String>,
+    /// Column index per value, widened to u64.
+    pub indices: Vec<u64>,
+    /// Row pointers, `rows + 1` entries.
+    pub indptr: Vec<u64>,
+}
+
+impl Reader {
+    /// Reads and assembles a `zt.sparse_csr/1` object, enforcing the
+    /// profile's data-level MUSTs: `indptr[0] == 0`, non-decreasing,
+    /// `indptr[rows] == nnz`, per-row strictly increasing indices, and
+    /// every index `< cols`.
+    pub fn read_csr(&self, name: &str) -> Result<Csr> {
+        let obj = self
+            .get(name)
+            .ok_or_else(|| Error::NotFound(format!("object {name:?}")))?;
+        if obj.layout.as_str() != "zt.sparse_csr/1" {
+            return Err(Error::Unsupported(format!(
+                "{name:?} has layout {:?}, not zt.sparse_csr/1",
+                obj.layout.as_str()
+            )));
+        }
+        let (rows, cols) = (obj.shape[0], obj.shape[1]); // rank validated at open
+        let idx_dtype = obj.parts["indices"].dtype;
+        let indices = widen_indices(&self.read(name, "indices")?, idx_dtype);
+        let indptr = widen_indices(&self.read(name, "indptr")?, idx_dtype);
+        let values = self.read(name, "values")?;
+        let nnz = indices.len() as u64;
+
+        let bad = |detail: String| Err(Error::reject(Rule::LayoutData, detail));
+        if indptr.first() != Some(&0) {
+            return bad(format!("{name:?}: indptr must start at 0"));
+        }
+        if indptr.windows(2).any(|w| w[0] > w[1]) {
+            return bad(format!("{name:?}: indptr must be non-decreasing"));
+        }
+        if indptr.last() != Some(&nnz) {
+            return bad(format!("{name:?}: indptr must end at nnz ({nnz})"));
+        }
+        for r in 0..rows as usize {
+            let row = &indices[indptr[r] as usize..indptr[r + 1] as usize];
+            if row.windows(2).any(|w| w[0] >= w[1]) {
+                return bad(format!("{name:?}: row {r} indices not strictly increasing"));
+            }
+            if row.last().is_some_and(|&c| c >= cols) {
+                return bad(format!("{name:?}: row {r} has an index >= cols ({cols})"));
+            }
+        }
+
+        let vpart = &obj.parts["values"];
+        Ok(Csr {
+            rows,
+            cols,
+            values,
+            dtype: vpart.dtype,
+            ltype: vpart.ltype.clone(),
+            indices,
+            indptr,
+        })
+    }
+}
+
+fn widen_indices(bytes: &[u8], dtype: DType) -> Vec<u64> {
+    match dtype {
+        DType::U32 => bytes
+            .chunks_exact(4)
+            .map(|c| u32::from_le_bytes(c.try_into().unwrap()) as u64)
+            .collect(),
+        _ => bytes
+            .chunks_exact(8)
+            .map(|c| u64::from_le_bytes(c.try_into().unwrap()))
+            .collect(),
     }
 }
 
@@ -353,7 +463,7 @@ fn validate_manifest(
                 format!("{name:?}: rank exceeds {MAX_RANK}"),
             ));
         }
-        let elems = obj.num_elements()?;
+        obj.num_elements()?; // shape-product overflow check (Rule::Shape)
 
         for (pname, part) in &obj.parts {
             check_name(pname)?;
@@ -404,30 +514,10 @@ fn validate_manifest(
             }
         }
 
-        match &obj.layout {
-            Layout::Dense => {
-                if obj.parts.len() != 1 || !obj.parts.contains_key("data") {
-                    return Err(Error::reject(
-                        Rule::LayoutRule,
-                        format!("{name:?}: dense requires exactly one part named 'data'"),
-                    ));
-                }
-                let part = &obj.parts["data"];
-                // Size equation is checkable only when the size function is
-                // known; unknown logical types stay structural (§4.2).
-                if let Some(expected) = logical_size(part.ltype.as_deref(), part.dtype, elems) {
-                    if part.decoded_size() != expected {
-                        return Err(Error::reject(
-                            Rule::DenseSize,
-                            format!(
-                                "{name:?}: decoded size {} != expected {expected}",
-                                part.decoded_size()
-                            ),
-                        ));
-                    }
-                }
-            }
-            Layout::Other(_) => {} // structural access only; profiles land in M4
+        // Known layout profiles validate their metadata rules; unknown
+        // layouts stay structural (§5.2).
+        if let Some(profile) = layout_profile(obj.layout.as_str()) {
+            profile.validate(name, obj)?;
         }
     }
 

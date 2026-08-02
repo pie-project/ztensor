@@ -25,7 +25,11 @@ pub enum Rule {
     BlobOverlap,
     ShardIndex,
     LayoutRule,
+    /// Data-level violation of a layout profile (e.g., CSR indptr rules).
+    LayoutData,
     DenseSize,
+    /// Stored bytes violate their declared encoding profile.
+    Encoding,
     Digest,
 }
 

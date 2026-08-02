@@ -7,9 +7,14 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+# zt.zstd-seekable/1 encoding profile
+zstd = ["dep:zstd"]
+
 [dependencies]
 memmap2 = "0.9"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
+zstd = { version = "0.13", optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

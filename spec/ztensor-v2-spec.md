@@ -591,8 +591,10 @@ Included as the normative model of what a layout profile must specify.
     no `type`.
   - `indptr` — row pointers; same `dtype` as `indices`; decoded element
     count MUST be `R + 1`.
-- **Derived quantities:** `nnz` = decoded element count of `values`;
-  decoded element count of `indices` MUST equal `nnz`.
+- **Derived quantities:** `nnz` = decoded element count of `indices` (whose
+  size function is exact); the decoded size of `values` MUST equal the
+  values type's size function at `nnz`. (Deriving `nnz` from `values` would
+  be ill-defined for packed sub-byte value types.)
 - **Validation (MUST):** `indptr[0] == 0`; `indptr` non-decreasing;
   `indptr[R] == nnz`; within each row, `indices` strictly increasing;
   every index `< C`.

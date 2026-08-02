@@ -27,6 +27,7 @@
 pub mod cbor;
 mod error;
 mod models;
+mod profiles;
 mod reader;
 mod source;
 mod writer;
@@ -37,6 +38,7 @@ pub use models::{
     ALIGN_CANONICAL, ALIGN_FLOOR, FOOTER_LEN, MAGIC, MAX_MANIFEST_LEN, MAX_NAME_LEN, MAX_RANK,
     VERSION,
 };
-pub use reader::{validate_bytes, Reader};
+pub use profiles::{encoding_profile, layout_profile, EncodingProfile, LayoutProfile};
+pub use reader::{validate_bytes, Csr, Reader};
 pub use source::{page_size, Caps, Source};
-pub use writer::Writer;
+pub use writer::{PartDef, Writer};

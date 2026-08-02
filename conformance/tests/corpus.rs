@@ -33,15 +33,16 @@ fn run(case: &conformance::Case) {
                 (expect, got) => panic!("{name}: expected {expect:?}, got {got:?}"),
             }
         }
-        Op::View(obj, part) | Op::Verify(obj, part) => {
+        Op::View(..) | Op::Verify(..) | Op::ReadCsr(..) => {
             let path = tmp(&format!("case-{name}.zt"));
             fs::write(&path, &case.bytes).unwrap();
             let reader = Reader::open(&path).unwrap_or_else(|e| {
                 panic!("{name}: tiered case must open cleanly, got {e}")
             });
             let result = match case.op {
-                Op::View(..) => reader.view(obj, part).map(|_| ()),
-                Op::Verify(..) => reader.verify(obj, part).map(|_| ()),
+                Op::View(obj, part) => reader.view(obj, part).map(|_| ()),
+                Op::Verify(obj, part) => reader.verify(obj, part).map(|_| ()),
+                Op::ReadCsr(obj) => reader.read_csr(obj).map(|_| ()),
                 Op::Open => unreachable!(),
             };
             match (&case.expect, result) {

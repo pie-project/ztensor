@@ -5,7 +5,6 @@
 //! (spec §6.3): 64 KiB placement, sorted insertion, per-part xxh3 digests,
 //! and blob sharing for byte-identical parts.
 
-use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -19,6 +18,17 @@ use crate::models::{
     check_name, BlobRef, DType, Layout, Manifest, Object, Part, ALIGN_CANONICAL, ALIGN_FLOOR,
     FOOTER_LEN, MAGIC, MAX_MANIFEST_LEN, MAX_RANK, VERSION,
 };
+use crate::profiles::{encoding_profile, layout_profile};
+
+/// One part of an object handed to [`Writer::add_object`]. `data` is the
+/// decoded bytes; `encoding` (if any) names the profile the writer applies.
+#[derive(Debug, Clone, Copy)]
+pub struct PartDef<'a> {
+    pub dtype: DType,
+    pub ltype: Option<&'a str>,
+    pub encoding: Option<&'a str>,
+    pub data: &'a [u8],
+}
 
 pub struct Writer {
     out: BufWriter<File>,
@@ -78,6 +88,38 @@ impl Writer {
         dtype: DType,
         data: &[u8],
     ) -> Result<()> {
+        self.add_object(
+            name,
+            shape,
+            "dense",
+            &[(
+                "data",
+                PartDef {
+                    dtype,
+                    ltype: None,
+                    encoding: None,
+                    data,
+                },
+            )],
+            None,
+        )
+    }
+
+    /// Adds an object with arbitrary layout and parts. `data` in each
+    /// [`PartDef`] is the *decoded* bytes; when `encoding` names a known
+    /// profile the writer encodes them (non-canonical files only —
+    /// canonical form is raw, spec §6.3).
+    ///
+    /// Known layouts are validated before anything is written; unknown
+    /// layout ids are accepted as-is (the caller owns their profile spec).
+    pub fn add_object(
+        &mut self,
+        name: &str,
+        shape: &[u64],
+        layout: &str,
+        parts: &[(&str, PartDef)],
+        attributes: Option<cbor::Value>,
+    ) -> Result<()> {
         check_name(name).map_err(|_| Error::InvalidInput(format!("invalid name {name:?}")))?;
         if self.manifest.objects.contains_key(name) {
             return Err(Error::InvalidInput(format!("duplicate object {name:?}")));
@@ -87,19 +129,6 @@ impl Writer {
                 "rank {} exceeds {MAX_RANK}",
                 shape.len()
             )));
-        }
-        let elems = shape.iter().try_fold(1u64, |acc, &d| acc.checked_mul(d));
-        let expected = elems.and_then(|n| n.checked_mul(dtype.width()));
-        match expected {
-            Some(n) if n == data.len() as u64 => {}
-            _ => {
-                return Err(Error::InvalidInput(format!(
-                    "data length {} does not match shape {:?} x {}",
-                    data.len(),
-                    shape,
-                    dtype.as_str()
-                )))
-            }
         }
         if self.canonical {
             if let Some(last) = &self.last_name {
@@ -111,30 +140,85 @@ impl Writer {
             }
         }
 
-        let offset = self.write_or_share_blob(data)?;
-        let part = Part {
-            dtype,
-            ltype: None,
-            blob: BlobRef {
-                shard: 0,
-                offset,
-                length: data.len() as u64,
-            },
-            encoding: None,
-            decoded_length: None,
-            digest: Some(format!("xxh3:{:016x}", xxh3_64(data))),
+        // Canonical blob order is (object, part) name order: process parts
+        // sorted by name.
+        let mut order: Vec<usize> = (0..parts.len()).collect();
+        order.sort_by_key(|&i| parts[i].0);
+        for w in order.windows(2) {
+            if parts[w[0]].0 == parts[w[1]].0 {
+                return Err(Error::InvalidInput(format!(
+                    "duplicate part {:?}",
+                    parts[w[0]].0
+                )));
+            }
+        }
+
+        // Encode payloads and build part metadata (dummy offsets), so known
+        // layouts can be validated before any byte is written.
+        let mut built: Vec<(String, Part, Vec<u8>, bool)> = Vec::with_capacity(parts.len());
+        for &i in &order {
+            let (pname, def) = &parts[i];
+            check_name(pname)
+                .map_err(|_| Error::InvalidInput(format!("invalid part name {pname:?}")))?;
+            let (stored, encoding, decoded_length) = match def.encoding {
+                None => (def.data.to_vec(), None, None),
+                Some(enc) => {
+                    if self.canonical {
+                        return Err(Error::InvalidInput(
+                            "canonical form forbids encoded parts; use create_with_alignment"
+                                .into(),
+                        ));
+                    }
+                    let profile = encoding_profile(enc).ok_or_else(|| {
+                        Error::Unsupported(format!("unknown encoding profile {enc:?}"))
+                    })?;
+                    (
+                        profile.encode(def.data)?,
+                        Some(enc.to_string()),
+                        Some(def.data.len() as u64),
+                    )
+                }
+            };
+            let raw = encoding.is_none();
+            let part = Part {
+                dtype: def.dtype,
+                ltype: def.ltype.map(str::to_string),
+                blob: BlobRef {
+                    shard: 0,
+                    offset: 0, // patched after writing
+                    length: stored.len() as u64,
+                },
+                encoding,
+                decoded_length,
+                digest: Some(format!("xxh3:{:016x}", xxh3_64(def.data))),
+            };
+            built.push((pname.to_string(), part, stored, raw));
+        }
+
+        let mut obj = Object {
+            shape: shape.to_vec(),
+            layout: Layout::from_name(layout),
+            attributes,
+            parts: built
+                .iter()
+                .map(|(n, p, _, _)| (n.clone(), p.clone()))
+                .collect(),
         };
-        let mut parts = BTreeMap::new();
-        parts.insert("data".to_string(), part);
-        self.manifest.objects.insert(
-            name.to_string(),
-            Object {
-                shape: shape.to_vec(),
-                layout: Layout::Dense,
-                attributes: None,
-                parts,
-            },
-        );
+        if let Some(profile) = layout_profile(layout) {
+            profile
+                .validate(name, &obj)
+                .map_err(|e| Error::InvalidInput(e.to_string()))?;
+        }
+
+        for (pname, _, stored, raw) in built {
+            let offset = if raw {
+                self.write_or_share_blob(&stored)?
+            } else {
+                self.write_blob(&stored)?
+            };
+            obj.parts.get_mut(&pname).unwrap().blob.offset = offset;
+        }
+        self.manifest.objects.insert(name.to_string(), obj);
         self.last_name = Some(name.to_string());
         Ok(())
     }
@@ -149,11 +233,16 @@ impl Writer {
         if let Some(&offset) = self.dedup.get(&key) {
             return Ok(offset);
         }
+        let target = self.write_blob(data)?;
+        self.dedup.insert(key, target);
+        Ok(target)
+    }
+
+    fn write_blob(&mut self, data: &[u8]) -> Result<u64> {
         let target = align_up(self.offset, self.align)?;
         self.pad_to(target)?;
         self.out.write_all(data)?;
         self.offset = target + data.len() as u64;
-        self.dedup.insert(key, target);
         Ok(target)
     }
 

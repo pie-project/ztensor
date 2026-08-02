@@ -20,6 +20,8 @@ pub enum Op {
     View(&'static str, &'static str),
     /// Open, then verify the digest of `(object, part)`.
     Verify(&'static str, &'static str),
+    /// Open, then assemble a `zt.sparse_csr/1` object (data-level rules).
+    ReadCsr(&'static str),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -109,6 +111,43 @@ pub fn assemble_raw(data_end: u64, manifest_bytes: &[u8]) -> Vec<u8> {
 
 pub fn assemble(data_end: u64, m: &Value) -> Vec<u8> {
     assemble_raw(data_end, &cbor::encode(m).unwrap())
+}
+
+/// `assemble`, then overwrite data-region bytes at the given offsets —
+/// for cases whose *data* (not metadata) must be hostile.
+pub fn assemble_with_data(data_end: u64, m: &Value, writes: &[(u64, Vec<u8>)]) -> Vec<u8> {
+    let mut bytes = assemble(data_end, m);
+    for (offset, data) in writes {
+        bytes[*offset as usize..*offset as usize + data.len()].copy_from_slice(data);
+    }
+    bytes
+}
+
+fn le_u64s(vals: &[u64]) -> Vec<u8> {
+    vals.iter().flat_map(|v| v.to_le_bytes()).collect()
+}
+
+/// A metadata-valid `zt.sparse_csr/1` file: shape [2, 3], nnz 3, u64
+/// indices at 4096, indptr at 8192, f32 values at 12288 — with the given
+/// index data planted.
+fn csr_file(indices: &[u64], indptr: &[u64]) -> Vec<u8> {
+    let m = manifest(vec![(
+        "m",
+        object(
+            &[2, 3],
+            "zt.sparse_csr/1",
+            vec![
+                ("indices", part("u64", [0, 4096, 24], vec![])),
+                ("indptr", part("u64", [0, 8192, 24], vec![])),
+                ("values", part("f32", [0, 12288, 12], vec![])),
+            ],
+        ),
+    )]);
+    assemble_with_data(
+        12300,
+        &m,
+        &[(4096, le_u64s(indices)), (8192, le_u64s(indptr))],
+    )
 }
 
 /// The digest of the `0xab` filler that `assemble` puts in blob positions.
@@ -673,6 +712,112 @@ pub fn all_cases() -> Vec<Case> {
             ]),
         ),
         Expect::Reject(Rule::BlobOverlap),
+    ));
+
+    // ---- zt.sparse_csr/1 ---------------------------------------------
+    cases.push(Case::open(
+        "csr-metadata-valid",
+        csr_file(&[0, 2, 1], &[0, 2, 3]),
+        Expect::Valid,
+    ));
+    cases.push(Case {
+        name: "csr-data-valid",
+        bytes: csr_file(&[0, 2, 1], &[0, 2, 3]),
+        op: Op::ReadCsr("m"),
+        expect: Expect::Valid,
+    });
+    cases.push(Case {
+        name: "csr-indptr-not-zero-based",
+        bytes: csr_file(&[0, 2, 1], &[1, 2, 3]),
+        op: Op::ReadCsr("m"),
+        expect: Expect::Reject(Rule::LayoutData),
+    });
+    cases.push(Case {
+        name: "csr-index-out-of-cols",
+        bytes: csr_file(&[0, 5, 1], &[0, 2, 3]),
+        op: Op::ReadCsr("m"),
+        expect: Expect::Reject(Rule::LayoutData),
+    });
+    cases.push(Case {
+        name: "csr-row-not-increasing",
+        bytes: csr_file(&[2, 0, 1], &[0, 2, 3]),
+        op: Op::ReadCsr("m"),
+        expect: Expect::Reject(Rule::LayoutData),
+    });
+    cases.push(Case::open(
+        "csr-missing-part",
+        assemble(
+            8300,
+            &manifest(vec![(
+                "m",
+                object(
+                    &[2, 3],
+                    "zt.sparse_csr/1",
+                    vec![
+                        ("indices", part("u64", [0, 4096, 24], vec![])),
+                        ("values", part("f32", [0, 8192, 12], vec![])),
+                    ],
+                ),
+            )]),
+        ),
+        Expect::Reject(Rule::LayoutRule),
+    ));
+    cases.push(Case::open(
+        "csr-signed-indices",
+        assemble(
+            12300,
+            &manifest(vec![(
+                "m",
+                object(
+                    &[2, 3],
+                    "zt.sparse_csr/1",
+                    vec![
+                        ("indices", part("i64", [0, 4096, 24], vec![])),
+                        ("indptr", part("i64", [0, 8192, 24], vec![])),
+                        ("values", part("f32", [0, 12288, 12], vec![])),
+                    ],
+                ),
+            )]),
+        ),
+        Expect::Reject(Rule::LayoutRule),
+    ));
+    cases.push(Case::open(
+        "csr-indptr-count",
+        assemble(
+            12300,
+            &manifest(vec![(
+                "m",
+                object(
+                    &[2, 3],
+                    "zt.sparse_csr/1",
+                    vec![
+                        ("indices", part("u64", [0, 4096, 24], vec![])),
+                        ("indptr", part("u64", [0, 8192, 16], vec![])),
+                        ("values", part("f32", [0, 12288, 12], vec![])),
+                    ],
+                ),
+            )]),
+        ),
+        Expect::Reject(Rule::LayoutRule),
+    ));
+    cases.push(Case::open(
+        "csr-values-size",
+        assemble(
+            12300,
+            &manifest(vec![(
+                "m",
+                object(
+                    &[2, 3],
+                    "zt.sparse_csr/1",
+                    vec![
+                        ("indices", part("u64", [0, 4096, 24], vec![])),
+                        ("indptr", part("u64", [0, 8192, 24], vec![])),
+                        ("values", part("f32", [0, 12288, 8], vec![])),
+                    ],
+                ),
+            )]),
+        ),
+        Expect::Reject(Rule::LayoutRule),
     ));
 
     // ---- reject: layouts ---------------------------------------------
