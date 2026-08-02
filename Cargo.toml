@@ -3,9 +3,20 @@ members = ["ztensor", "ztensor-compat", "ztensor-cli", "ztensor-py", "conformanc
 resolver = "2"
 
 [workspace.package]
+version = "1.3.0"
 edition = "2021"
+# `u64::is_multiple_of`, which clippy asks for and the writer uses.
+rust-version = "1.87"
+authors = ["In Gim <in.gim@icloud.com>"]
 license = "MIT"
 repository = "https://github.com/pie-project/ztensor"
+
+# Members reference each other through here, so a version bump is one edit
+# and no path dependency can go out without a version requirement — which
+# is what `cargo package` refuses to do.
+[workspace.dependencies]
+ztensor = { version = "1.3.0", path = "ztensor" }
+ztensor-compat = { version = "1.3.0", path = "ztensor-compat" }
 
 [profile.release]
 lto = "fat"

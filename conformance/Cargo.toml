@@ -10,7 +10,7 @@ license.workspace = true
 # ztensor with it (feature unification) and runs the encoding tests. The
 # corpus itself contains no zstd files: compressed bytes are not stable
 # across zstd library versions, and corpus files must be byte-exact.
-ztensor = { path = "../ztensor", features = ["zstd"] }
+ztensor = { workspace = true, features = ["zstd"] }
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
 [[bin]]

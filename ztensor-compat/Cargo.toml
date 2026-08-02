@@ -1,11 +1,18 @@
 [package]
 name = "ztensor-compat"
-version = "1.3.0"
+version.workspace = true
 description = "Foreign tensor formats projected into the zTensor object model"
-authors = ["In Gim <in.gim@icloud.com>"]
+authors.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+readme = "README.md"
+keywords = ["tensor", "safetensors", "gguf", "onnx", "hdf5"]
+categories = ["encoding", "parser-implementations", "science"]
+
+[package.metadata.docs.rs]
+all-features = true
 
 [features]
 # Defaults are the pure, dependency-light, parse-only formats. `pickle`
@@ -20,7 +27,7 @@ hdf5 = ["dep:flate2"]
 onnx = []
 
 [dependencies]
-ztensor = { path = "../ztensor" }
+ztensor = { workspace = true }
 memmap2 = "0.9"
 serde_json = { version = "1", optional = true }
 zip = { version = "2", optional = true, default-features = false, features = ["deflate"] }

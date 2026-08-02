@@ -1,11 +1,15 @@
 [package]
 name = "ztensor-py"
-version = "1.3.0"
+version.workspace = true
 description = "Python bindings for zTensor: read any tensor format, write canonical .zt"
-authors = ["In Gim <in.gim@icloud.com>"]
+authors.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+# This crate ships to PyPI as a wheel; there is nothing on crates.io that
+# could use a cdylib.
+publish = false
 
 [lib]
 name = "_ztensor"
@@ -15,8 +19,8 @@ crate-type = ["cdylib"]
 # Not abi3: the buffer protocol (zero-copy views into the mapping) is not
 # part of the limited API, and zero-copy is the point of this binding.
 pyo3 = { version = "0.26", features = ["extension-module"] }
-ztensor = { path = "../ztensor", features = ["zstd"] }
-ztensor-compat = { path = "../ztensor-compat", features = [
+ztensor = { workspace = true, features = ["zstd"] }
+ztensor-compat = { workspace = true, features = [
     "safetensors",
     "gguf",
     "npz",

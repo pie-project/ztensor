@@ -6,9 +6,9 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-ztensor = { path = "../ztensor", features = ["zstd"] }
+ztensor = { workspace = true, features = ["zstd"] }
 libc = "0.2"
-ztensor-compat = { path = "../ztensor-compat", features = [
+ztensor-compat = { workspace = true, features = [
     "safetensors",
     "gguf",
     "npz",
