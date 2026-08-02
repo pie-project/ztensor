@@ -1,4 +1,16 @@
-//! Object model and manifest schema (spec L1/L2), plus container constants.
+//! What a `.zt` file literally says: the L1 manifest and its CBOR mapping.
+//!
+//! Everything here is the on-disk structure, unresolved. A [`BlobRef`]'s
+//! `shard` indexes *this file's* shard table, and an offset means an offset
+//! into whichever file that index names — the manifest is a claim about one
+//! container, not an address a consumer can use directly.
+//!
+//! Turning those claims into addresses is [`Catalog`](crate::Catalog)'s job,
+//! and it is the reason the two are different types: a catalog can span files
+//! that never heard of each other, which no single manifest could honestly
+//! describe.
+//!
+//! Foreign formats never build a `Manifest`. They never had one.
 
 use std::collections::BTreeMap;
 
@@ -25,6 +37,10 @@ pub const MAX_RANK: usize = 64;
 pub const MIN_FILE_LEN: u64 = MAGIC.len() as u64 + FOOTER_LEN;
 
 /// Storage types: the closed set of 12 primitives (spec §4.1).
+///
+/// Closed by design — a new *interpretation* of bytes is a logical type in the
+/// vocabulary, not a new storage type. So this one enum is not
+/// `#[non_exhaustive]`: matching all twelve arms stays correct.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DType {
     F64,
@@ -67,9 +83,13 @@ impl DType {
             DType::U8 => "u8",
         }
     }
+}
 
-    pub fn from_name(s: &str) -> Option<Self> {
-        Some(match s {
+impl std::str::FromStr for DType {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        Ok(match s {
             "f64" => DType::F64,
             "f32" => DType::F32,
             "f16" => DType::F16,
@@ -82,63 +102,27 @@ impl DType {
             "u32" => DType::U32,
             "u16" => DType::U16,
             "u8" => DType::U8,
-            _ => return None,
+            other => {
+                return Err(Error::reject(
+                    Rule::Schema,
+                    format!("unknown dtype {other:?}"),
+                ))
+            }
         })
     }
 }
 
-/// Registered logical types (spec Appendix A): required storage type.
-/// Returns `None` for unknown logical types (structural access only).
-pub fn registered_dtype(ltype: &str) -> Option<DType> {
-    Some(match ltype {
-        "bool" | "f8_e4m3fn" | "f8_e5m2" | "f8_e4m3fnuz" | "f8_e5m2fnuz" | "f8_e8m0"
-        | "f4_e2m1" => DType::U8,
-        "complex64" => DType::F32,
-        "complex128" => DType::F64,
-        _ => return None,
-    })
-}
-
-/// Size function of a registered logical type: decoded byte size for `n`
-/// logical elements. `None` when the logical type is unknown.
-pub fn logical_size(ltype: Option<&str>, dtype: DType, n: u64) -> Option<u64> {
-    match ltype {
-        None => n.checked_mul(dtype.width()),
-        Some("bool" | "f8_e4m3fn" | "f8_e5m2" | "f8_e4m3fnuz" | "f8_e5m2fnuz" | "f8_e8m0") => {
-            Some(n)
-        }
-        Some("f4_e2m1") => Some(n.div_ceil(2)),
-        Some("complex64") => n.checked_mul(8),
-        Some("complex128") => n.checked_mul(16),
-        Some(_) => None,
-    }
-}
-
-/// Object layout (spec §5). Only `dense` is core; everything else is a
-/// namespaced profile identifier.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Layout {
-    Dense,
-    Other(String),
-}
-
-impl Layout {
-    pub fn as_str(&self) -> &str {
-        match self {
-            Layout::Dense => "dense",
-            Layout::Other(s) => s,
-        }
-    }
-
-    pub fn from_name(s: &str) -> Self {
-        match s {
-            "dense" => Layout::Dense,
-            other => Layout::Other(other.to_string()),
-        }
+impl std::fmt::Display for DType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
 /// Blob reference: `[shard_index, offset, length]` (spec §3.4).
+///
+/// `shard` is an index into the containing manifest's shard table, where 0 is
+/// the containing file itself. It is not a [`StoreId`](crate::StoreId) — the
+/// two are related only after resolution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BlobRef {
     pub shard: u64,
@@ -150,8 +134,9 @@ pub struct BlobRef {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Part {
     pub dtype: DType,
-    /// Logical type; `None` means the logical type equals `dtype`.
-    pub ltype: Option<String>,
+    /// Logical type id; `None` means the logical type equals `dtype`.
+    /// (Written as the manifest key `"type"`.)
+    pub logical: Option<String>,
     pub blob: BlobRef,
     /// Encoding profile id; `None` means raw.
     pub encoding: Option<String>,
@@ -175,7 +160,9 @@ impl Part {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Object {
     pub shape: Vec<u64>,
-    pub layout: Layout,
+    /// Layout profile id. `"dense"` is a profile like any other; the
+    /// container core has no layout special cases.
+    pub layout: String,
     pub attributes: Option<Value>,
     pub parts: BTreeMap<String, Part>,
 }
@@ -187,6 +174,13 @@ impl Object {
             acc.checked_mul(d)
                 .ok_or_else(|| Error::reject(Rule::Shape, "shape product overflows u64"))
         })
+    }
+
+    /// Looks up a part by name.
+    pub fn part(&self, name: &str) -> Result<&Part> {
+        self.parts
+            .get(name)
+            .ok_or_else(|| Error::NotFound(format!("part {name:?}")))
     }
 }
 
@@ -258,46 +252,17 @@ pub(crate) fn parse_xxh3(digest: &str) -> Result<u64> {
         .map_err(|_| Error::reject(Rule::Digest, format!("malformed digest {digest:?}")))
 }
 
-/// Content rules of registered logical types (spec Appendix A): applied
-/// wherever bytes are decoded or verified; raw structural access is exempt.
-pub(crate) fn check_logical_values(
-    ltype: &str,
-    bytes: &[u8],
-    elems: Option<u64>,
-) -> Result<()> {
-    match ltype {
-        "bool" => {
-            if bytes.iter().any(|&b| b > 1) {
-                return Err(Error::reject(
-                    Rule::LayoutData,
-                    "bool bytes must be 0x00 or 0x01",
-                ));
-            }
-        }
-        "f4_e2m1" => {
-            // Packed two per byte, low nibble first: an odd element count
-            // leaves the final high nibble unused, and it must be zero.
-            if let Some(n) = elems {
-                if n % 2 == 1 && bytes.last().is_some_and(|&b| b & 0xf0 != 0) {
-                    return Err(Error::reject(
-                        Rule::LayoutData,
-                        "final odd f4 nibble must be zero",
-                    ));
-                }
-            }
-        }
-        _ => {}
-    }
-    Ok(())
-}
-
 /// Digest format (spec §3.4): `"<algorithm>:<lowercase hex>"`.
 pub(crate) fn check_digest(d: &str) -> Result<()> {
     let ok = d.split_once(':').is_some_and(|(algo, hex)| {
         !algo.is_empty()
             && !hex.is_empty()
-            && algo.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
-            && hex.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            && algo
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+            && hex
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
     });
     if !ok {
         return Err(Error::reject(
@@ -311,8 +276,6 @@ pub(crate) fn check_digest(d: &str) -> Result<()> {
 // =======================================================================
 // Manifest <-> CBOR
 // =======================================================================
-
-// ---- schema decoding helpers ------------------------------------------
 
 /// A required field that turned out to be absent.
 fn missing<T>(what: &str, field: &str) -> Result<T> {
@@ -352,7 +315,6 @@ impl Value {
             .collect()
     }
 }
-
 
 fn text(s: &str) -> Value {
     Value::Text(s.to_string())
@@ -466,12 +428,13 @@ fn parse_objects(v: Value) -> Result<BTreeMap<String, Object>> {
 
 impl Object {
     fn to_value(&self) -> Value {
-        let mut m = Vec::new();
-        m.push((
-            text("shape"),
-            Value::Array(self.shape.iter().map(|&d| Value::Uint(d)).collect()),
-        ));
-        m.push((text("layout"), text(self.layout.as_str())));
+        let mut m = vec![
+            (
+                text("shape"),
+                Value::Array(self.shape.iter().map(|&d| Value::Uint(d)).collect()),
+            ),
+            (text("layout"), text(&self.layout)),
+        ];
         if let Some(attrs) = &self.attributes {
             m.push((text("attributes"), attrs.clone()));
         }
@@ -493,7 +456,7 @@ impl Object {
         for (k, val) in entries {
             match k.as_text() {
                 Some("shape") => shape = Some(val.uints_or("shape")?),
-                Some("layout") => layout = Some(Layout::from_name(val.text_or("layout")?)),
+                Some("layout") => layout = Some(val.text_or("layout")?.to_string()),
                 Some("attributes") => {
                     check_attributes(val)?;
                     attributes = Some(val.clone());
@@ -530,9 +493,8 @@ fn parse_parts(v: &Value) -> Result<BTreeMap<String, Part>> {
 
 impl Part {
     fn to_value(&self) -> Value {
-        let mut m = Vec::new();
-        m.push((text("dtype"), text(self.dtype.as_str())));
-        if let Some(lt) = &self.ltype {
+        let mut m = vec![(text("dtype"), text(self.dtype.as_str()))];
+        if let Some(lt) = &self.logical {
             m.push((text("type"), text(lt)));
         }
         m.push((
@@ -558,20 +520,15 @@ impl Part {
     fn from_value(v: &Value) -> Result<Part> {
         let entries = v.map_or("part")?;
         let mut dtype = None;
-        let mut ltype = None;
+        let mut logical = None;
         let mut blob = None;
         let mut encoding = None;
         let mut decoded_length = None;
         let mut digest = None;
         for (k, val) in entries {
             match k.as_text() {
-                Some("dtype") => {
-                    let s = val.text_or("dtype")?;
-                    dtype = Some(DType::from_name(s).ok_or_else(|| {
-                        Error::reject(Rule::Schema, format!("unknown dtype {s:?}"))
-                    })?);
-                }
-                Some("type") => ltype = Some(val.text_or("type")?.to_string()),
+                Some("dtype") => dtype = Some(val.text_or("dtype")?.parse::<DType>()?),
+                Some("type") => logical = Some(val.text_or("type")?.to_string()),
                 Some("blob") => {
                     let nums = val.uints_or("blob")?;
                     let [shard, offset, length] = nums[..] else {
@@ -584,9 +541,7 @@ impl Part {
                     });
                 }
                 Some("encoding") => encoding = Some(val.text_or("encoding")?.to_string()),
-                Some("decoded_length") => {
-                    decoded_length = Some(val.u64_or("decoded_length")?)
-                }
+                Some("decoded_length") => decoded_length = Some(val.u64_or("decoded_length")?),
                 Some("digest") => {
                     let d = val.text_or("digest")?;
                     check_digest(d)?;
@@ -606,7 +561,7 @@ impl Part {
         }
         Ok(Part {
             dtype,
-            ltype,
+            logical,
             blob,
             encoding,
             decoded_length,

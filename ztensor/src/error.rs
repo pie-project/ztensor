@@ -3,8 +3,11 @@ use std::fmt;
 /// The spec rule a rejected file violated.
 ///
 /// Tags correspond to sections of `spec/ztensor-v2-spec.md` so the
-/// conformance corpus can assert exact rejection reasons.
+/// conformance corpus can assert exact rejection reasons. The set grows with
+/// the spec, so it is `#[non_exhaustive]`: matching on one rule stays
+/// source-compatible when the next is added.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Rule {
     FileTooSmall,
     HeaderMagic,
@@ -33,17 +36,21 @@ pub enum Rule {
     Digest,
     /// A resolved shard does not match the identity in the root's table.
     ShardIdentity,
+    /// Two sources of one composite claim the same tensor name.
+    NameCollision,
 }
 
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum Error {
     /// The file violates a MUST of the spec and was rejected.
     Reject { rule: Rule, detail: String },
-    /// The named object or part does not exist.
+    /// The named tensor or part does not exist.
     NotFound(String),
     /// The file is valid, but uses vocabulary or requires a capability this
-    /// implementation does not support (unknown layout/encoding, foreign
-    /// shard reads before M5, ...). Refusal, never reinterpretation.
+    /// implementation does not support (an unregistered layout or encoding,
+    /// a payload that cannot be addressed, ...). Refusal, never
+    /// reinterpretation.
     Unsupported(String),
     /// Caller error on the write path.
     InvalidInput(String),
@@ -51,10 +58,24 @@ pub enum Error {
 }
 
 impl Error {
-    pub(crate) fn reject(rule: Rule, detail: impl Into<String>) -> Self {
+    /// Rejects a file under a spec rule.
+    ///
+    /// Public because a profile registered from another crate has to be able
+    /// to refuse a file exactly as a built-in one does — a validator that can
+    /// only say `InvalidInput` is a second-class validator.
+    pub fn reject(rule: Rule, detail: impl Into<String>) -> Self {
         Error::Reject {
             rule,
             detail: detail.into(),
+        }
+    }
+
+    /// The rule this error rejected under, if it is a rejection. Lets a
+    /// consumer ask the question without matching the struct variant.
+    pub fn rule(&self) -> Option<Rule> {
+        match self {
+            Error::Reject { rule, .. } => Some(*rule),
+            _ => None,
         }
     }
 }

@@ -56,6 +56,87 @@ impl Value {
             _ => None,
         }
     }
+
+    /// Looks up a key in a map value.
+    pub fn get(&self, key: &str) -> Option<&Value> {
+        self.as_map()?
+            .iter()
+            .find(|(k, _)| k.as_text() == Some(key))
+            .map(|(_, v)| v)
+    }
+}
+
+/// Builds an attributes map: `cbor::map([("group", 32u64), ("who", "me")])`.
+///
+/// Attributes are always a map of text keys (spec §3.1/§3.5), so this is the
+/// shape every caller needs and the one they should not have to spell out.
+pub fn map<K: Into<String>, V: Into<Value>>(
+    entries: impl IntoIterator<Item = (K, V)>,
+) -> Value {
+    Value::Map(
+        entries
+            .into_iter()
+            .map(|(k, v)| (Value::Text(k.into()), v.into()))
+            .collect(),
+    )
+}
+
+impl From<u64> for Value {
+    fn from(n: u64) -> Value {
+        Value::Uint(n)
+    }
+}
+
+impl From<u32> for Value {
+    fn from(n: u32) -> Value {
+        Value::Uint(n as u64)
+    }
+}
+
+impl From<i64> for Value {
+    fn from(n: i64) -> Value {
+        if n < 0 {
+            Value::Nint((-1 - n) as u64)
+        } else {
+            Value::Uint(n as u64)
+        }
+    }
+}
+
+impl From<f64> for Value {
+    fn from(x: f64) -> Value {
+        Value::Float(x)
+    }
+}
+
+impl From<bool> for Value {
+    fn from(b: bool) -> Value {
+        Value::Bool(b)
+    }
+}
+
+impl From<&str> for Value {
+    fn from(s: &str) -> Value {
+        Value::Text(s.to_string())
+    }
+}
+
+impl From<String> for Value {
+    fn from(s: String) -> Value {
+        Value::Text(s)
+    }
+}
+
+impl From<Vec<u8>> for Value {
+    fn from(b: Vec<u8>) -> Value {
+        Value::Bytes(b)
+    }
+}
+
+impl<T: Into<Value>> From<Vec<T>> for Value {
+    fn from(items: Vec<T>) -> Value {
+        Value::Array(items.into_iter().map(Into::into).collect())
+    }
 }
 
 // =======================================================================

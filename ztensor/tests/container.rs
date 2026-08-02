@@ -1,12 +1,12 @@
-//! M1 exit criteria: round-trip, canonical determinism, tied-weight dedup,
-//! and a first slice of must-reject cases.
+//! The container: round-trip, canonical determinism, blob sharing, and the
+//! files that must be rejected.
 
 use std::fs;
 use std::path::PathBuf;
 
 use xxhash_rust::xxh3::xxh3_64;
 use ztensor::cbor::Value;
-use ztensor::{cbor, DType, Error, Reader, Rule, Writer, ALIGN_CANONICAL, MAGIC};
+use ztensor::{cbor, DType, Error, Rule, Source, Verified, Writer, ALIGN_CANONICAL, MAGIC};
 
 fn tmp(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name)
@@ -24,35 +24,70 @@ fn roundtrip_dense() {
     let c: Vec<u8> = vec![7; 7];
 
     let mut w = Writer::create(&path).unwrap();
-    w.add_dense("a.weight", &[2, 3], DType::F32, &a).unwrap();
-    w.add_dense("b.bias", &[5], DType::BF16, &b).unwrap();
-    w.add_dense("c.mask", &[7], DType::U8, &c).unwrap();
+    w.add("a.weight", [2u64, 3], DType::F32, &a).unwrap();
+    w.add("b.bias", [5u64], DType::BF16, &b).unwrap();
+    w.add("c.mask", [7u64], DType::U8, &c).unwrap();
     w.finish().unwrap();
 
-    let r = Reader::open(&path).unwrap();
-    assert!(!r.is_data_shard());
-    assert_eq!(r.objects().count(), 3);
-    assert_eq!(r.get("a.weight").unwrap().shape, vec![2, 3]);
-    assert_eq!(r.view("a.weight", "data").unwrap(), &a[..]);
-    assert_eq!(r.view("b.bias", "data").unwrap(), &b[..]);
-    assert_eq!(r.read("c.mask", "data").unwrap(), c);
-    assert!(r.verify("a.weight", "data").unwrap());
+    let src = Source::open(&path).unwrap();
+    assert!(!src.is_data_shard());
+    assert_eq!(src.len(), 3);
+    assert_eq!(src.tensor("a.weight").unwrap().shape(), &[2, 3]);
+    assert_eq!(src.tensor("a.weight").unwrap().map().unwrap(), &a[..]);
+    assert_eq!(src.tensor("b.bias").unwrap().map().unwrap(), &b[..]);
+    assert_eq!(&*src.tensor("c.mask").unwrap().bytes().unwrap(), &c[..]);
+    assert_eq!(
+        src.tensor("a.weight").unwrap().verify().unwrap(),
+        Verified::Digest
+    );
 
     // Canonical placement: every blob at a 64 KiB boundary.
-    for (_, obj) in r.objects() {
-        for part in obj.parts.values() {
-            assert_eq!(part.blob.offset % ALIGN_CANONICAL, 0);
+    for tensor in src.tensors() {
+        for part in tensor.parts() {
+            let at = tensor.part(part).unwrap().locate().unwrap();
+            assert_eq!(at.offset % ALIGN_CANONICAL, 0);
         }
     }
+}
+
+/// A source is one type whichever way it was opened, and `bytes()` is honest
+/// about which half of the bargain it kept.
+#[test]
+fn an_indexed_source_locates_without_mapping() {
+    let path = tmp("indexed.zt");
+    let data = f32_bytes(&[1.0, 2.0, 3.0, 4.0]);
+    let mut w = Writer::create(&path).unwrap();
+    w.add("x", [4u64], DType::F32, &data).unwrap();
+    w.finish().unwrap();
+
+    let mapped = Source::open(&path).unwrap();
+    let indexed = Source::index(&path).unwrap();
+
+    // The same address either way — that is what makes it an address.
+    let here = mapped.tensor("x").unwrap().locate().unwrap();
+    let there = indexed.tensor("x").unwrap().locate().unwrap();
+    assert_eq!(here.offset, there.offset);
+    assert_eq!(here.len, there.len);
+
+    let caps = indexed.tensor("x").unwrap().caps().unwrap();
+    assert!(caps.locate, "an indexed file still knows where things are");
+    assert!(!caps.map, "nothing is mapped, so nothing can be borrowed");
+    assert!(!caps.evict);
+
+    assert!(indexed.tensor("x").unwrap().map().is_err());
+    let bytes = indexed.tensor("x").unwrap().bytes().unwrap();
+    assert!(!bytes.is_mapped(), "an unmapped file has to copy");
+    assert_eq!(&*bytes, &data[..]);
+    assert!(mapped.tensor("x").unwrap().bytes().unwrap().is_mapped());
 }
 
 #[test]
 fn canonical_is_deterministic() {
     let write = |path: &PathBuf| {
         let mut w = Writer::create(path).unwrap();
-        w.add_dense("x", &[4], DType::F32, &f32_bytes(&[1.0, 2.0, 3.0, 4.0]))
+        w.add("x", [4u64], DType::F32, &f32_bytes(&[1.0, 2.0, 3.0, 4.0]))
             .unwrap();
-        w.add_dense("y", &[2], DType::U8, &[9, 9]).unwrap();
+        w.add("y", [2u64], DType::U8, &[9, 9]).unwrap();
         w.finish().unwrap();
     };
     let p1 = tmp("det1.zt");
@@ -67,50 +102,77 @@ fn tied_weights_share_one_blob() {
     let path = tmp("tied.zt");
     let data = f32_bytes(&[42.0; 256]);
     let mut w = Writer::create(&path).unwrap();
-    w.add_dense("embed", &[16, 16], DType::F32, &data).unwrap();
-    w.add_dense("lm_head", &[16, 16], DType::F32, &data).unwrap();
+    w.add("embed", [16u64, 16], DType::F32, &data).unwrap();
+    w.add("lm_head", [16u64, 16], DType::F32, &data).unwrap();
     w.finish().unwrap();
 
-    let r = Reader::open(&path).unwrap();
-    let e = r.get("embed").unwrap().parts["data"].blob;
-    let l = r.get("lm_head").unwrap().parts["data"].blob;
+    let src = Source::open(&path).unwrap();
+    let e = src.tensor("embed").unwrap().locate().unwrap();
+    let l = src.tensor("lm_head").unwrap().locate().unwrap();
     assert_eq!(e.offset, l.offset, "identical parts must share one blob");
-    assert_eq!(r.view("embed", "data").unwrap(), &data[..]);
+    assert_eq!(src.tensor("embed").unwrap().map().unwrap(), &data[..]);
 }
 
 #[test]
 fn zero_length_tensor() {
     let path = tmp("zero.zt");
     let mut w = Writer::create(&path).unwrap();
-    w.add_dense("empty", &[0, 8], DType::F32, &[]).unwrap();
+    w.add("empty", [0u64, 8], DType::F32, &[]).unwrap();
     w.finish().unwrap();
-    let r = Reader::open(&path).unwrap();
-    assert_eq!(r.view("empty", "data").unwrap().len(), 0);
+    let src = Source::open(&path).unwrap();
+    assert_eq!(src.tensor("empty").unwrap().map().unwrap().len(), 0);
 }
 
 #[test]
 fn canonical_requires_sorted_insertion() {
     let path = tmp("unsorted.zt");
     let mut w = Writer::create(&path).unwrap();
-    w.add_dense("b", &[1], DType::U8, &[0]).unwrap();
-    let err = w.add_dense("a", &[1], DType::U8, &[0]).unwrap_err();
+    w.add("b", [1u64], DType::U8, &[0]).unwrap();
+    let err = w.add("a", [1u64], DType::U8, &[0]).unwrap_err();
     assert!(matches!(err, Error::InvalidInput(_)));
 }
 
+/// The alignment knob and the canonical-form switch are different questions,
+/// and asking one while meaning the other is refused rather than obeyed.
+#[test]
+fn alignment_is_not_the_canonical_switch() {
+    let err = Writer::options()
+        .align(4096)
+        .create(tmp("confused.zt"))
+        .unwrap_err();
+    let message = format!("{err}");
+    assert!(
+        message.contains("canonical(false)"),
+        "the error should say how to mean it: {message}"
+    );
+
+    // Said properly, insertion order is free.
+    let path = tmp("unsorted-ok.zt");
+    let mut w = Writer::options()
+        .canonical(false)
+        .align(4096)
+        .create(&path)
+        .unwrap();
+    w.add("b", [1u64], DType::U8, &[0]).unwrap();
+    w.add("a", [1u64], DType::U8, &[0]).unwrap();
+    w.finish().unwrap();
+    assert_eq!(Source::open(&path).unwrap().len(), 2);
+}
+
 // =======================================================================
-// Must-reject cases (M2 grows these into the conformance corpus)
+// Must-reject cases
 // =======================================================================
 
 fn write_small(path: &PathBuf) {
     let mut w = Writer::create(path).unwrap();
-    w.add_dense("t", &[2], DType::U8, &[1, 2]).unwrap();
+    w.add("t", [2u64], DType::U8, &[1, 2]).unwrap();
     w.finish().unwrap();
 }
 
 fn expect_reject(path: &PathBuf, rule: Rule) {
-    match Reader::open(path) {
-        Err(Error::Reject { rule: got, .. }) => assert_eq!(got, rule),
-        other => panic!("expected Reject({rule:?}), got {other:?}"),
+    match Source::open(path) {
+        Err(e) => assert_eq!(e.rule(), Some(rule), "{e}"),
+        Ok(_) => panic!("expected Reject({rule:?}), got a source"),
     }
 }
 
@@ -142,8 +204,7 @@ fn reject_truncated() {
     write_small(&path);
     let bytes = fs::read(&path).unwrap();
     fs::write(&path, &bytes[..bytes.len() - 10]).unwrap();
-    let err = Reader::open(&path).unwrap_err();
-    assert!(matches!(err, Error::Reject { .. }));
+    assert!(Source::open(&path).unwrap_err().rule().is_some());
 }
 
 /// Assembles a file by hand: magic, blobs, a caller-supplied manifest value,
@@ -155,7 +216,7 @@ fn assemble(path: &PathBuf, data_len: u64, manifest: &Value) {
     let mut bytes = Vec::new();
     bytes.extend_from_slice(&MAGIC);
     bytes.resize(m_off as usize, 0);
-    // fill "data" region with a marker so blobs have content
+    // fill the data region with a marker so blobs have content
     for b in bytes.iter_mut().take(m_off as usize).skip(8) {
         *b = 0xab;
     }
@@ -228,8 +289,11 @@ fn identical_refs_are_legal() {
         ("b", dense_obj("f32", &[2], 4096, 8)),
     ]);
     assemble(&path, 4096 + 8 - 8, &m);
-    let r = Reader::open(&path).unwrap();
-    assert_eq!(r.view("a", "data").unwrap(), r.view("b", "data").unwrap());
+    let src = Source::open(&path).unwrap();
+    assert_eq!(
+        src.tensor("a").unwrap().map().unwrap(),
+        src.tensor("b").unwrap().map().unwrap()
+    );
 }
 
 #[test]
@@ -243,7 +307,7 @@ fn reject_misaligned_blob() {
 #[test]
 fn reject_dense_size_mismatch() {
     let path = tmp("badsize.zt");
-    // f32 x [3] = 12 bytes, but blob claims 8.
+    // f32 x [3] = 12 bytes, but the blob claims 8.
     let m = manifest_of(vec![("a", dense_obj("f32", &[3], 4096, 8))]);
     assemble(&path, 8192, &m);
     expect_reject(&path, Rule::DenseSize);
