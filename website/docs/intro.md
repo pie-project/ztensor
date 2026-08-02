@@ -36,6 +36,7 @@ w.finish()?;
 Read the last 40 bytes and you know where the manifest is; read the
 manifest and you know where every tensor is.
 
+
 ## Why another format
 
 The formats in use today each gave up something that matters for serving
