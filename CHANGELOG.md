@@ -57,7 +57,12 @@ See [MIGRATING.md](MIGRATING.md) for the rename table.
   built-ins. `Error::reject` is public so those profiles can refuse a file.
 - **DLPack and the buffer protocol** in Python, so numpy, torch and jax read
   tensors zero-copy without this package knowing they exist — and DLPack
-  carries `bfloat16`, which the numpy dtype table cannot.
+  carries `bfloat16`, which the numpy dtype table cannot. The versioned
+  protocol is supported, which is what lets these tensors be marked
+  **read-only**: legacy DLPack cannot say it, and a framework that believes
+  it may write into a read-only mapping will fault. `copy=True` hands over a
+  buffer the consumer owns; `copy=False` on bytes that must be decoded is a
+  `BufferError`, as is a request for any device but the host.
 - **Sources are `Send + Sync`**, so a loader can read a checkpoint from
   several threads.
 - `Source::merge`, `shard_identity`, `manifest_of`, `cbor::map`, and `From`

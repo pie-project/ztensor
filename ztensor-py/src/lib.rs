@@ -450,11 +450,19 @@ impl Tensor {
     ///
     /// Zero-copy, and typed — DLPack can say `bfloat16`, which is the dtype
     /// most of these files are actually in.
-    #[pyo3(signature = (stream = None, **_kwargs))]
+    ///
+    /// A consumer that asks for the versioned protocol (`max_version`) gets
+    /// it, which matters here for one reason: only the versioned struct can
+    /// say **read-only**, and these bytes are a read-only mapping. Handing a
+    /// framework a tensor it believes it may write into is how a loader earns
+    /// a segfault in someone else's code.
+    #[pyo3(signature = (stream = None, *, max_version = None, dl_device = None, copy = None))]
     fn __dlpack__<'py>(
         slf: Bound<'py, Self>,
         stream: Option<Bound<'py, PyAny>>,
-        _kwargs: Option<Bound<'py, PyDict>>,
+        max_version: Option<(u32, u32)>,
+        dl_device: Option<(c_int, c_int)>,
+        copy: Option<bool>,
     ) -> PyResult<Bound<'py, PyCapsule>> {
         let py = slf.py();
         if let Some(stream) = &stream {
@@ -464,81 +472,136 @@ impl Tensor {
                 ));
             }
         }
+        // The only device this can serve. Saying so is the protocol's way of
+        // letting a consumer ask for CUDA and be told no, rather than being
+        // handed host memory that looks like device memory.
+        if let Some(device) = dl_device {
+            if device != (DL_CPU, 0) {
+                return Err(PyBufferError::new_err(format!(
+                    "this tensor is host memory (device {:?}); it cannot be produced on \
+                     device {device:?}",
+                    (DL_CPU, 0)
+                )));
+            }
+        }
+
         let this = slf.borrow();
         let owner = this.source.bind(py).borrow().shared()?;
-        let (ptr, len, dtype, shape) = with_part(py, &this, |p| {
-            let bytes = p.map().map_err(|_| {
-                PyValueError::new_err(
-                    "this tensor cannot be exported through DLPack: its bytes are not a \
-                     mapped range (use .tobytes())",
-                )
-            })?;
-            let dtype = dl_dtype(p.dtype(), p.logical())?;
-            Ok((bytes.as_ptr(), bytes.len(), dtype, ()))
-        })?;
-        let _ = (len, shape);
-
-        // The logical shape, in elements of the exported dtype.
         let dims = this.shape(py)?;
+
+        // `copy=True` means the consumer intends to own (and may write) the
+        // result; `copy=False` means it must not pay for one. Neither is the
+        // default, which leaves the choice here — and the choice is a borrow
+        // whenever the file allows it.
+        let (data, held, dtype) = with_part(py, &this, |p| {
+            let dtype = dl_dtype(p.dtype(), p.logical())?;
+            if copy != Some(true) {
+                if let Ok(mapped) = p.map() {
+                    return Ok((mapped.as_ptr(), Held::Mapped(owner), dtype));
+                }
+            }
+            if copy == Some(false) {
+                return Err(PyBufferError::new_err(
+                    "copy=False, but these bytes are not a mapped range: they have to be \
+                     decoded before anything can point at them",
+                ));
+            }
+            let bytes = p.bytes().map_err(err)?.into_owned();
+            Ok((bytes.as_ptr(), Held::Owned(bytes), dtype))
+        })?;
+
+        // An owned copy is the consumer's to write into; a mapping is not.
+        let read_only = matches!(held, Held::Mapped(_));
         let shape: Vec<i64> = if dims.is_empty() {
             vec![1]
         } else {
             dims.iter().map(|&d| d as i64).collect()
         };
-
-        let managed = Box::new(Managed {
-            tensor: DlManagedTensor {
-                dl_tensor: DlTensor {
-                    data: ptr as *mut c_void,
-                    device: DlDevice {
-                        device_type: 1, // kDLCPU
-                        device_id: 0,
-                    },
-                    ndim: shape.len() as c_int,
-                    dtype,
-                    shape: std::ptr::null_mut(),
-                    strides: std::ptr::null_mut(),
-                    byte_offset: 0,
-                },
-                manager_ctx: std::ptr::null_mut(),
-                deleter: Some(dlpack_deleter),
+        let tensor = DlTensor {
+            data: data as *mut c_void,
+            device: DlDevice {
+                device_type: DL_CPU,
+                device_id: 0,
             },
-            shape,
-            // Keeps the mapping alive for as long as the consumer holds the
-            // tensor — even if the source it came from was closed meanwhile.
-            owner,
-        });
-        let raw = Box::into_raw(managed);
-        // SAFETY: `raw` is a live, uniquely-owned allocation; the pointers
-        // written into it point into that same allocation.
-        //
-        // The capsule carries the address of the `DLManagedTensor` *field*,
-        // not of this wrapper: that struct is the ABI the consumer casts to,
-        // and `Managed` is ordinary Rust with no layout guarantee. Handing
-        // over the wrapper would work only by accident of field order.
-        let tensor = unsafe {
-            (*raw).tensor.dl_tensor.shape = (*raw).shape.as_mut_ptr();
-            (*raw).tensor.manager_ctx = raw as *mut c_void;
-            std::ptr::addr_of_mut!((*raw).tensor)
+            ndim: shape.len() as c_int,
+            dtype,
+            shape: std::ptr::null_mut(),
+            strides: std::ptr::null_mut(),
+            byte_offset: 0,
+        };
+
+        // A consumer that understands DLPack 1.0 gets the struct that can
+        // carry the read-only flag; anything older gets the legacy one.
+        let versioned = max_version.is_some_and(|(major, _)| major >= 1);
+        let (ptr, name) = if versioned {
+            let managed = Box::new(ManagedVersioned {
+                tensor: DlManagedTensorVersioned {
+                    version: DlPackVersion { major: 1, minor: 0 },
+                    manager_ctx: std::ptr::null_mut(),
+                    deleter: Some(versioned_deleter),
+                    flags: if read_only { DLPACK_READ_ONLY } else { 0 },
+                    dl_tensor: tensor,
+                },
+                held: Held::Owned(Vec::new()),
+                shape,
+            });
+            let raw = Box::into_raw(managed);
+            // SAFETY: `raw` is live and uniquely owned; every pointer written
+            // into it points into that same allocation. The capsule carries
+            // the address of the ABI *field*, since that is the struct the
+            // consumer casts to — this wrapper has no layout guarantee.
+            unsafe {
+                (*raw).held = held;
+                (*raw).tensor.dl_tensor.shape = (*raw).shape.as_mut_ptr();
+                (*raw).tensor.manager_ctx = raw as *mut c_void;
+                (
+                    std::ptr::addr_of_mut!((*raw).tensor) as *mut c_void,
+                    DLTENSOR_VERSIONED,
+                )
+            }
+        } else {
+            let managed = Box::new(Managed {
+                tensor: DlManagedTensor {
+                    dl_tensor: tensor,
+                    manager_ctx: std::ptr::null_mut(),
+                    deleter: Some(legacy_deleter),
+                },
+                held,
+                shape,
+            });
+            let raw = Box::into_raw(managed);
+            // SAFETY: as above.
+            unsafe {
+                (*raw).tensor.dl_tensor.shape = (*raw).shape.as_mut_ptr();
+                (*raw).tensor.manager_ctx = raw as *mut c_void;
+                (
+                    std::ptr::addr_of_mut!((*raw).tensor) as *mut c_void,
+                    DLTENSOR_NAME,
+                )
+            }
         };
 
         let capsule = unsafe {
             // SAFETY: the capsule takes the pointer with a destructor that
             // frees it exactly once, and only if the consumer did not rename
             // the capsule to claim ownership.
-            let ptr = ffi::PyCapsule_New(
-                tensor as *mut c_void,
-                DLTENSOR_NAME.as_ptr() as *const c_char,
-                Some(capsule_destructor),
+            let object = ffi::PyCapsule_New(
+                ptr,
+                name.as_ptr() as *const c_char,
+                Some(if versioned {
+                    versioned_capsule_destructor
+                } else {
+                    capsule_destructor
+                }),
             );
-            Bound::from_owned_ptr_or_err(py, ptr)?
+            Bound::from_owned_ptr_or_err(py, object)?
         };
         capsule.downcast_into::<PyCapsule>().map_err(Into::into)
     }
 
     /// `(device_type, device_id)` — always CPU here.
     fn __dlpack_device__(&self) -> (c_int, c_int) {
-        (1, 0)
+        (DL_CPU, 0)
     }
 }
 
@@ -546,6 +609,13 @@ impl Tensor {
 
 const DLTENSOR_NAME: &std::ffi::CStr = c"dltensor";
 const DLTENSOR_USED: &std::ffi::CStr = c"used_dltensor";
+const DLTENSOR_VERSIONED: &std::ffi::CStr = c"dltensor_versioned";
+const DLTENSOR_VERSIONED_USED: &std::ffi::CStr = c"used_dltensor_versioned";
+
+/// `kDLCPU`.
+const DL_CPU: c_int = 1;
+/// `DLPACK_FLAG_BITMASK_READ_ONLY`.
+const DLPACK_READ_ONLY: u64 = 1;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -560,6 +630,13 @@ struct DlDataType {
     code: u8,
     bits: u8,
     lanes: u16,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct DlPackVersion {
+    major: u32,
+    minor: u32,
 }
 
 #[repr(C)]
@@ -580,21 +657,42 @@ struct DlManagedTensor {
     deleter: Option<unsafe extern "C" fn(*mut DlManagedTensor)>,
 }
 
-/// What the capsule owns: the ABI struct, the shape it points at, and a
-/// reference that keeps the mapping alive.
-///
-/// The reference is to the *mapping*, not to the Python object that produced
-/// it. That is what lets an exported array outlive the source handle — and it
-/// means the deleter drops an `Arc`, which needs no interpreter at all.
+#[repr(C)]
+struct DlManagedTensorVersioned {
+    version: DlPackVersion,
+    manager_ctx: *mut c_void,
+    deleter: Option<unsafe extern "C" fn(*mut DlManagedTensorVersioned)>,
+    flags: u64,
+    dl_tensor: DlTensor,
+}
+
+/// What keeps the exported bytes alive: either the mapping they belong to, or
+/// the buffer they were decoded into. Both are plain Rust, so a deleter needs
+/// no interpreter and can run on any thread at any time.
+// Held for its `Drop` and nothing else: what these own is the right to keep
+// the bytes where they are.
+#[allow(dead_code)]
+enum Held {
+    Mapped(Arc<ztensor::Source>),
+    Owned(Vec<u8>),
+}
+
 struct Managed {
     tensor: DlManagedTensor,
-    shape: Vec<i64>,
     #[allow(dead_code)]
-    owner: Arc<ztensor::Source>,
+    held: Held,
+    shape: Vec<i64>,
+}
+
+struct ManagedVersioned {
+    tensor: DlManagedTensorVersioned,
+    #[allow(dead_code)]
+    held: Held,
+    shape: Vec<i64>,
 }
 
 /// Called by the consumer once it is done with the tensor.
-unsafe extern "C" fn dlpack_deleter(tensor: *mut DlManagedTensor) {
+unsafe extern "C" fn legacy_deleter(tensor: *mut DlManagedTensor) {
     if tensor.is_null() {
         return;
     }
@@ -602,12 +700,22 @@ unsafe extern "C" fn dlpack_deleter(tensor: *mut DlManagedTensor) {
     // and the deleter runs exactly once.
     unsafe {
         let ctx = (*tensor).manager_ctx as *mut Managed;
-        if ctx.is_null() {
-            return;
+        if !ctx.is_null() {
+            drop(Box::from_raw(ctx));
         }
-        // Plain Rust: no GIL, so this is safe from any thread and at any
-        // point in the interpreter's life, including after it has gone.
-        drop(Box::from_raw(ctx));
+    }
+}
+
+unsafe extern "C" fn versioned_deleter(tensor: *mut DlManagedTensorVersioned) {
+    if tensor.is_null() {
+        return;
+    }
+    // SAFETY: as above, for the versioned allocation.
+    unsafe {
+        let ctx = (*tensor).manager_ctx as *mut ManagedVersioned;
+        if !ctx.is_null() {
+            drop(Box::from_raw(ctx));
+        }
     }
 }
 
@@ -619,9 +727,26 @@ unsafe extern "C" fn capsule_destructor(capsule: *mut ffi::PyObject) {
         if ffi::PyCapsule_IsValid(capsule, DLTENSOR_NAME.as_ptr() as *const c_char) == 0 {
             return; // renamed to used_dltensor: the consumer owns it now
         }
+        let ptr = ffi::PyCapsule_GetPointer(capsule, DLTENSOR_NAME.as_ptr() as *const c_char)
+            as *mut DlManagedTensor;
+        if ptr.is_null() {
+            return;
+        }
+        if let Some(deleter) = (*ptr).deleter {
+            deleter(ptr);
+        }
+    }
+}
+
+unsafe extern "C" fn versioned_capsule_destructor(capsule: *mut ffi::PyObject) {
+    // SAFETY: called by CPython with a valid capsule.
+    unsafe {
+        if ffi::PyCapsule_IsValid(capsule, DLTENSOR_VERSIONED.as_ptr() as *const c_char) == 0 {
+            return;
+        }
         let ptr =
-            ffi::PyCapsule_GetPointer(capsule, DLTENSOR_NAME.as_ptr() as *const c_char)
-                as *mut DlManagedTensor;
+            ffi::PyCapsule_GetPointer(capsule, DLTENSOR_VERSIONED.as_ptr() as *const c_char)
+                as *mut DlManagedTensorVersioned;
         if ptr.is_null() {
             return;
         }
@@ -1019,6 +1144,8 @@ fn _ztensor(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(convert, m)?)?;
     m.add_function(wrap_pyfunction!(verify, m)?)?;
     m.add_function(wrap_pyfunction!(page_size, m)?)?;
-    let _ = DLTENSOR_USED;
+    // Named for the reader: these are the names a consumer renames a capsule
+    // to once it has taken ownership, and the destructors check for them.
+    let _ = (DLTENSOR_USED, DLTENSOR_VERSIONED_USED);
     Ok(())
 }

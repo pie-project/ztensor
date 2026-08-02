@@ -279,6 +279,7 @@ fn read_exact_at(file: &File, buf: &mut [u8], offset: u64) -> std::io::Result<()
 /// platform that needs it is a fallback whose first test is someone else's
 /// build, so this one is compiled everywhere and exercised by the test below
 /// on the platform that does not use it.
+#[cfg_attr(unix, allow(dead_code))]
 fn read_exact_at_portable(file: &File, buf: &mut [u8], offset: u64) -> std::io::Result<()> {
     use std::io::{Read, Seek, SeekFrom};
     let mut handle = file.try_clone()?;
