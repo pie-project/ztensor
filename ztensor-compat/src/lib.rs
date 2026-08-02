@@ -17,3 +17,18 @@
 mod safetensors;
 #[cfg(feature = "safetensors")]
 pub use safetensors::Safetensors;
+
+#[cfg(feature = "gguf")]
+mod gguf;
+#[cfg(feature = "gguf")]
+pub use gguf::Gguf;
+
+#[cfg(feature = "npz")]
+mod npz;
+#[cfg(feature = "npz")]
+pub use npz::Npz;
+
+#[cfg(feature = "pickle")]
+mod pt;
+#[cfg(feature = "pickle")]
+pub use pt::Pt;

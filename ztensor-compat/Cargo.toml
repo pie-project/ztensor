@@ -8,10 +8,20 @@ license.workspace = true
 repository.workspace = true
 
 [features]
-default = ["safetensors"]
+# Defaults are the pure, dependency-light, parse-only formats. `pickle`
+# (torch .pt) is an explicit opt-in: parsing pickle is a larger attack
+# surface than any other format here, even through a restricted VM.
+default = ["safetensors", "gguf"]
 safetensors = ["dep:serde_json"]
+gguf = []
+npz = ["dep:zip"]
+pickle = ["dep:zip"]
 
 [dependencies]
 ztensor = { path = "../ztensor" }
 memmap2 = "0.9"
 serde_json = { version = "1", optional = true }
+zip = { version = "2", optional = true, default-features = false, features = ["deflate"] }
+
+[dev-dependencies]
+zip = { version = "2", default-features = false, features = ["deflate"] }
