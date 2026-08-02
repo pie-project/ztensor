@@ -136,6 +136,12 @@ at the 4 KiB floor gives 1.32 GB/s into 1.21× — see
 ² Partial support (requires specific alignment or uncompressed data).
 ³ Zip append support (not standard API).
 
+## Upgrading from 1.x
+
+The container did not change: a `.zt` written by any 1.x release opens in 2.0
+unchanged. The crate surface did — see [MIGRATING.md](MIGRATING.md) for the
+rename table and [CHANGELOG.md](CHANGELOG.md) for what moved and why.
+
 ## Layout of this repository
 
 | Path | What it is |
