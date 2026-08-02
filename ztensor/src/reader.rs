@@ -119,22 +119,19 @@ impl Reader {
     /// they were decoded).
     pub fn read(&self, name: &str, part: &str) -> Result<Vec<u8>> {
         let p = self.part(name, part)?;
-        let Some(enc) = p.encoding.clone() else {
-            return self.view(name, part).map(<[u8]>::to_vec);
-        };
         if p.blob.shard != 0 {
             return Err(Error::Unsupported(
-                "reading from foreign shards lands in M5".into(),
+                "this part lives in another shard; open the model with Model::open".into(),
             ));
         }
-        let profile = encoding_profile(&enc).ok_or_else(|| {
-            Error::Unsupported(format!("unknown encoding profile {enc:?}"))
-        })?;
-        let start = p.blob.offset as usize;
-        let stored = &self.mmap[start..start + p.blob.length as usize];
-        let decoded = profile.decode(stored, p.decoded_size())?;
-        debug_assert_eq!(decoded.len() as u64, p.decoded_size());
-        Ok(decoded)
+        decode_part(p, self.stored_slice(p))
+    }
+
+    /// The stored (possibly encoded) bytes of a local part. Bounds were
+    /// validated at open.
+    pub(crate) fn stored_slice(&self, part: &Part) -> &[u8] {
+        let start = part.blob.offset as usize;
+        &self.mmap[start..start + part.blob.length as usize]
     }
 
     /// Capability report for one part (spec: capability ladder).
@@ -222,20 +219,7 @@ impl Reader {
             owned = self.read(name, part)?;
             &owned
         };
-        let Some(hex) = digest.strip_prefix("xxh3:") else {
-            return Err(Error::Unsupported(format!(
-                "digest algorithm in {digest:?} (only xxh3 in M1)"
-            )));
-        };
-        let expected = u64::from_str_radix(hex, 16)
-            .map_err(|_| Error::reject(Rule::Digest, format!("malformed digest {digest:?}")))?;
-        if xxh3_64(bytes) != expected {
-            return Err(Error::reject(
-                Rule::Digest,
-                format!("digest mismatch for {name:?}/{part:?}"),
-            ));
-        }
-        Ok(true)
+        check_xxh3_digest(&digest, bytes, name, part)
     }
 }
 
@@ -255,12 +239,21 @@ pub struct Csr {
 }
 
 impl Reader {
-    /// Reads and assembles a `zt.sparse_csr/1` object, enforcing the
-    /// profile's data-level MUSTs: `indptr[0] == 0`, non-decreasing,
-    /// `indptr[rows] == nnz`, per-row strictly increasing indices, and
-    /// every index `< cols`.
+    /// Reads and assembles a `zt.sparse_csr/1` object. See [`read_csr`].
     pub fn read_csr(&self, name: &str) -> Result<Csr> {
-        let obj = self
+        read_csr(self, name)
+    }
+}
+
+/// Reads and assembles a `zt.sparse_csr/1` object from any [`Source`],
+/// enforcing the profile's data-level MUSTs: `indptr[0] == 0`,
+/// non-decreasing, `indptr[rows] == nnz`, per-row strictly increasing
+/// indices, and every index `< cols`.
+pub fn read_csr(src: &dyn Source, name: &str) -> Result<Csr> {
+    let (rows, cols, idx_dtype, vpart) = {
+        let obj = src
+            .manifest()
+            .objects
             .get(name)
             .ok_or_else(|| Error::NotFound(format!("object {name:?}")))?;
         if obj.layout.as_str() != "zt.sparse_csr/1" {
@@ -269,11 +262,18 @@ impl Reader {
                 obj.layout.as_str()
             )));
         }
-        let (rows, cols) = (obj.shape[0], obj.shape[1]); // rank validated at open
-        let idx_dtype = obj.parts["indices"].dtype;
-        let indices = widen_indices(&self.read(name, "indices")?, idx_dtype);
-        let indptr = widen_indices(&self.read(name, "indptr")?, idx_dtype);
-        let values = self.read(name, "values")?;
+        // rank and part presence were validated at open
+        (
+            obj.shape[0],
+            obj.shape[1],
+            obj.parts["indices"].dtype,
+            obj.parts["values"].clone(),
+        )
+    };
+    {
+        let indices = widen_indices(&src.read(name, "indices")?, idx_dtype);
+        let indptr = widen_indices(&src.read(name, "indptr")?, idx_dtype);
+        let values = src.read(name, "values")?;
         let nnz = indices.len() as u64;
 
         let bad = |detail: String| Err(Error::reject(Rule::LayoutData, detail));
@@ -296,17 +296,52 @@ impl Reader {
             }
         }
 
-        let vpart = &obj.parts["values"];
         Ok(Csr {
             rows,
             cols,
             values,
             dtype: vpart.dtype,
-            ltype: vpart.ltype.clone(),
+            ltype: vpart.ltype,
             indices,
             indptr,
         })
     }
+}
+
+/// Decodes a part's stored bytes per its encoding profile (identity for
+/// raw). Refuses unknown profiles.
+pub(crate) fn decode_part(part: &Part, stored: &[u8]) -> Result<Vec<u8>> {
+    match &part.encoding {
+        None => Ok(stored.to_vec()),
+        Some(enc) => {
+            let profile = encoding_profile(enc)
+                .ok_or_else(|| Error::Unsupported(format!("unknown encoding profile {enc:?}")))?;
+            profile.decode(stored, part.decoded_size())
+        }
+    }
+}
+
+/// Verifies an `xxh3:` digest string over decoded bytes.
+pub(crate) fn check_xxh3_digest(
+    digest: &str,
+    bytes: &[u8],
+    name: &str,
+    part: &str,
+) -> Result<bool> {
+    let Some(hex) = digest.strip_prefix("xxh3:") else {
+        return Err(Error::Unsupported(format!(
+            "digest algorithm in {digest:?} (only xxh3 supported)"
+        )));
+    };
+    let expected = u64::from_str_radix(hex, 16)
+        .map_err(|_| Error::reject(Rule::Digest, format!("malformed digest {digest:?}")))?;
+    if xxh3_64(bytes) != expected {
+        return Err(Error::reject(
+            Rule::Digest,
+            format!("digest mismatch for {name:?}/{part:?}"),
+        ));
+    }
+    Ok(true)
 }
 
 fn widen_indices(bytes: &[u8], dtype: DType) -> Vec<u64> {

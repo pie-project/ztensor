@@ -15,8 +15,8 @@ use xxhash_rust::xxh3::{xxh3_128, xxh3_64};
 use crate::cbor;
 use crate::error::{Error, Result};
 use crate::models::{
-    check_name, BlobRef, DType, Layout, Manifest, Object, Part, ALIGN_CANONICAL, ALIGN_FLOOR,
-    FOOTER_LEN, MAGIC, MAX_MANIFEST_LEN, MAX_RANK, VERSION,
+    check_digest, check_name, BlobRef, DType, Layout, Manifest, Object, Part, Shard,
+    ALIGN_CANONICAL, ALIGN_FLOOR, FOOTER_LEN, MAGIC, MAX_MANIFEST_LEN, MAX_RANK, VERSION,
 };
 use crate::profiles::{encoding_profile, layout_profile};
 
@@ -228,6 +228,136 @@ impl Writer {
         self.manifest.attributes = Some(attributes);
     }
 
+    /// Registers an external shard identity and returns its index (≥ 1).
+    /// Canonical form is single-file (spec §6.3), so this requires a
+    /// [`Writer::create_with_alignment`] writer.
+    pub fn add_shard(&mut self, size: u64, digest: &str) -> Result<u64> {
+        if self.canonical {
+            return Err(Error::InvalidInput(
+                "canonical form is single-file; use create_with_alignment".into(),
+            ));
+        }
+        check_digest(digest)
+            .map_err(|_| Error::InvalidInput(format!("malformed digest {digest:?}")))?;
+        if size < 48 {
+            return Err(Error::InvalidInput(format!(
+                "shard size {size} below minimum file size"
+            )));
+        }
+        let index = self
+            .manifest
+            .shards
+            .last_key_value()
+            .map(|(&k, _)| k + 1)
+            .unwrap_or(1);
+        self.manifest.shards.insert(
+            index,
+            Shard {
+                size,
+                digest: digest.to_string(),
+            },
+        );
+        Ok(index)
+    }
+
+    /// Adds an object whose parts are pre-existing blob references into
+    /// registered shards — nothing is written to this file. This is the
+    /// overlay mechanism: a delta model references the base model's blobs.
+    pub fn add_external_object(
+        &mut self,
+        name: &str,
+        shape: &[u64],
+        layout: &str,
+        parts: &[(&str, Part)],
+        attributes: Option<cbor::Value>,
+    ) -> Result<()> {
+        check_name(name).map_err(|_| Error::InvalidInput(format!("invalid name {name:?}")))?;
+        if self.manifest.objects.contains_key(name) {
+            return Err(Error::InvalidInput(format!("duplicate object {name:?}")));
+        }
+        if shape.len() > MAX_RANK {
+            return Err(Error::InvalidInput(format!(
+                "rank {} exceeds {MAX_RANK}",
+                shape.len()
+            )));
+        }
+        let mut built = std::collections::BTreeMap::new();
+        for (pname, part) in parts {
+            check_name(pname)
+                .map_err(|_| Error::InvalidInput(format!("invalid part name {pname:?}")))?;
+            let b = part.blob;
+            let shard = self.manifest.shards.get(&b.shard).ok_or_else(|| {
+                Error::InvalidInput(format!(
+                    "part {pname:?} references unregistered shard {}",
+                    b.shard
+                ))
+            })?;
+            if b.offset % ALIGN_FLOOR != 0 || b.offset < ALIGN_FLOOR {
+                return Err(Error::InvalidInput(format!(
+                    "part {pname:?}: offset {} violates the 4096 floor",
+                    b.offset
+                )));
+            }
+            let region_end = shard.size - FOOTER_LEN;
+            if b.offset.checked_add(b.length).is_none_or(|e| e > region_end) {
+                return Err(Error::InvalidInput(format!(
+                    "part {pname:?}: blob outside shard {}'s data region",
+                    b.shard
+                )));
+            }
+            if let Some(d) = &part.digest {
+                check_digest(d).map_err(|_| {
+                    Error::InvalidInput(format!("part {pname:?}: malformed digest"))
+                })?;
+            }
+            if part.encoding.is_some() != part.decoded_length.is_some() {
+                return Err(Error::InvalidInput(format!(
+                    "part {pname:?}: decoded_length is required iff encoding is present"
+                )));
+            }
+            if built.insert(pname.to_string(), part.clone()).is_some() {
+                return Err(Error::InvalidInput(format!("duplicate part {pname:?}")));
+            }
+        }
+        let obj = Object {
+            shape: shape.to_vec(),
+            layout: Layout::from_name(layout),
+            attributes,
+            parts: built,
+        };
+        if let Some(profile) = layout_profile(layout) {
+            profile
+                .validate(name, &obj)
+                .map_err(|e| Error::InvalidInput(e.to_string()))?;
+        }
+        self.manifest.objects.insert(name.to_string(), obj);
+        Ok(())
+    }
+
+    /// Overlay convenience: references every part of `obj` (an object from
+    /// another file's manifest) through registered shard `shard`. Parts
+    /// must be local (`shard 0`) in the source manifest.
+    pub fn link_object(&mut self, name: &str, obj: &Object, shard: u64) -> Result<()> {
+        let mut remapped: Vec<(&str, Part)> = Vec::with_capacity(obj.parts.len());
+        for (pname, part) in &obj.parts {
+            if part.blob.shard != 0 {
+                return Err(Error::InvalidInput(format!(
+                    "part {pname:?} is itself a foreign reference; only local parts can be linked"
+                )));
+            }
+            let mut p = part.clone();
+            p.blob.shard = shard;
+            remapped.push((pname.as_str(), p));
+        }
+        self.add_external_object(
+            name,
+            &obj.shape,
+            obj.layout.as_str(),
+            &remapped,
+            obj.attributes.clone(),
+        )
+    }
+
     fn write_or_share_blob(&mut self, data: &[u8]) -> Result<u64> {
         let key = (xxh3_128(data), data.len() as u64);
         if let Some(&offset) = self.dedup.get(&key) {
@@ -291,4 +421,75 @@ fn align_up(offset: u64, align: u64) -> Result<u64> {
         .checked_add(align - 1)
         .map(|v| v & !(align - 1))
         .ok_or_else(|| Error::InvalidInput("file offset overflow".into()))
+}
+
+/// Writes a data shard (spec §7.2): magic, aligned blobs, and a footer
+/// with no manifest. `finish` returns the shard's identity — exactly what
+/// [`Writer::add_shard`] wants.
+///
+/// The whole-file digest is computed streamingly while writing, so
+/// producing a shard costs one pass.
+pub struct DataShardWriter {
+    out: BufWriter<File>,
+    hasher: xxhash_rust::xxh3::Xxh3,
+    offset: u64,
+    align: u64,
+}
+
+impl DataShardWriter {
+    /// Creates a data shard with canonical (64 KiB) placement.
+    pub fn create(path: impl AsRef<Path>) -> Result<Self> {
+        Self::create_with_alignment(path, ALIGN_CANONICAL)
+    }
+
+    pub fn create_with_alignment(path: impl AsRef<Path>, align: u64) -> Result<Self> {
+        if !align.is_power_of_two() || align < ALIGN_FLOOR {
+            return Err(Error::InvalidInput(format!(
+                "alignment must be a power of two >= {ALIGN_FLOOR}, got {align}"
+            )));
+        }
+        let file = File::create(path)?;
+        let mut shard = Self {
+            out: BufWriter::with_capacity(1 << 20, file),
+            hasher: xxhash_rust::xxh3::Xxh3::new(),
+            offset: 0,
+            align,
+        };
+        shard.put(&MAGIC)?;
+        Ok(shard)
+    }
+
+    fn put(&mut self, bytes: &[u8]) -> Result<()> {
+        self.out.write_all(bytes)?;
+        self.hasher.update(bytes);
+        self.offset += bytes.len() as u64;
+        Ok(())
+    }
+
+    /// Writes one blob at the next aligned offset and returns that offset —
+    /// the caller records it for the root's blob references.
+    pub fn add_blob(&mut self, data: &[u8]) -> Result<u64> {
+        const ZEROS: [u8; 4096] = [0u8; 4096];
+        let target = align_up(self.offset, self.align)?;
+        let mut gap = target - self.offset;
+        while gap > 0 {
+            let n = gap.min(ZEROS.len() as u64) as usize;
+            self.put(&ZEROS[..n])?;
+            gap -= n as u64;
+        }
+        self.put(data)?;
+        Ok(target)
+    }
+
+    /// Writes the manifest-less footer and returns `(size, digest)` — the
+    /// shard's identity for the root's shard table.
+    pub fn finish(mut self) -> Result<(u64, String)> {
+        let mut footer = [0u8; FOOTER_LEN as usize];
+        footer[24..28].copy_from_slice(&VERSION.to_le_bytes());
+        footer[32..40].copy_from_slice(&MAGIC);
+        self.put(&footer)?;
+        self.out.flush()?;
+        self.out.get_ref().sync_all()?;
+        Ok((self.offset, format!("xxh3:{:016x}", self.hasher.digest())))
+    }
 }

@@ -29,6 +29,7 @@ mod error;
 mod models;
 mod profiles;
 mod reader;
+mod shard;
 mod source;
 mod writer;
 
@@ -39,6 +40,7 @@ pub use models::{
     VERSION,
 };
 pub use profiles::{encoding_profile, layout_profile, EncodingProfile, LayoutProfile};
-pub use reader::{validate_bytes, Csr, Reader};
+pub use reader::{read_csr, validate_bytes, Csr, Reader};
+pub use shard::{CasResolver, Model, PositionalResolver, ShardResolver};
 pub use source::{page_size, Caps, Source};
-pub use writer::{PartDef, Writer};
+pub use writer::{DataShardWriter, PartDef, Writer};

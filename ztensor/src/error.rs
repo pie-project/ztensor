@@ -31,6 +31,8 @@ pub enum Rule {
     /// Stored bytes violate their declared encoding profile.
     Encoding,
     Digest,
+    /// A resolved shard does not match the identity in the root's table.
+    ShardIdentity,
 }
 
 #[derive(Debug)]
