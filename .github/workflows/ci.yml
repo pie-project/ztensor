@@ -53,9 +53,13 @@ jobs:
         run: cargo install cargo-fuzz --locked
       # Short runs: enough to catch a regression that panics immediately,
       # not a substitute for a real fuzzing campaign.
+      # The first corpus directory is the one libFuzzer *writes* to; the
+      # conformance corpus is passed after it, read-only, as seeds.
       - name: Container and CBOR
         run: |
-          cargo fuzz run fuzz_validate conformance/corpus/valid -- -max_total_time=60
+          mkdir -p fuzz/corpus/fuzz_validate
+          cargo fuzz run fuzz_validate fuzz/corpus/fuzz_validate conformance/corpus/valid \
+            -- -max_total_time=60
           cargo fuzz run fuzz_cbor -- -max_total_time=60
       - name: Foreign-format parsers
         run: cargo fuzz run fuzz_compat -- -max_total_time=120 -rss_limit_mb=2048

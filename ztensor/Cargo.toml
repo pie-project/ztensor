@@ -1,6 +1,6 @@
 [package]
 name = "ztensor"
-version = "2.0.0-alpha.0"
+version = "1.3.0"
 description = "zTensor v2: an aligned, verifiable container format for tensor data"
 authors = ["In Gim <in.gim@icloud.com>"]
 edition.workspace = true

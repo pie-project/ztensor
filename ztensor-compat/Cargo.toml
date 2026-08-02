@@ -1,6 +1,6 @@
 [package]
 name = "ztensor-compat"
-version = "2.0.0-alpha.0"
+version = "1.3.0"
 description = "Foreign tensor formats projected into the zTensor object model"
 authors = ["In Gim <in.gim@icloud.com>"]
 edition.workspace = true

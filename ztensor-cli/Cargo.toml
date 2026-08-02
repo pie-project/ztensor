@@ -1,6 +1,6 @@
 [package]
 name = "ztensor-cli"
-version = "2.0.0-alpha.0"
+version = "1.3.0"
 description = "zt: inspect, verify, convert, and diff tensor files"
 authors = ["In Gim <in.gim@icloud.com>"]
 edition.workspace = true

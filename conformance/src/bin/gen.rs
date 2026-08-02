@@ -14,6 +14,10 @@ fn main() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("corpus");
     let valid = root.join("valid");
     let reject = root.join("reject");
+    // The corpus directory is generated output, so it is rebuilt from
+    // scratch: a file left behind by a renamed case — or written into it
+    // by another tool — would otherwise ship as if it were a golden file.
+    let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(&valid).unwrap();
     fs::create_dir_all(&reject).unwrap();
 
