@@ -28,6 +28,7 @@ pub mod cbor;
 mod error;
 mod models;
 mod reader;
+mod source;
 mod writer;
 
 pub use error::{Error, Result, Rule};
@@ -37,4 +38,5 @@ pub use models::{
     VERSION,
 };
 pub use reader::{validate_bytes, Reader};
+pub use source::{page_size, Caps, Source};
 pub use writer::Writer;

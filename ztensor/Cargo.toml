@@ -10,3 +10,6 @@ repository.workspace = true
 [dependencies]
 memmap2 = "0.9"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

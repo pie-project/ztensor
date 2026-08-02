@@ -19,11 +19,16 @@ use crate::models::{
     FOOTER_LEN, MAGIC, MAX_MANIFEST_LEN, MAX_RANK, VERSION,
 };
 use crate::cbor;
+use crate::source::{page_size, Caps, Source};
 
 pub struct Reader {
     mmap: Mmap,
     manifest: Manifest,
     data_shard: bool,
+    /// Every occupied byte range in this file — header magic, blobs,
+    /// manifest blob, footer — sorted and deduplicated. Basis for the
+    /// page-exclusivity capability.
+    ranges: Vec<(u64, u64)>,
 }
 
 impl std::fmt::Debug for Reader {
@@ -43,11 +48,16 @@ impl Reader {
         // SAFETY: read-only shared map; we treat the contents as untrusted
         // bytes and never assume stability beyond the validation snapshot.
         let mmap = unsafe { Mmap::map(&file)? };
-        let (manifest, data_shard) = parse_and_validate(&mmap)?;
+        let (manifest, data_shard, mut ranges) = parse_and_validate(&mmap)?;
+        ranges.push((0, MAGIC.len() as u64));
+        ranges.push((mmap.len() as u64 - FOOTER_LEN, FOOTER_LEN));
+        ranges.sort_unstable();
+        ranges.dedup();
         Ok(Self {
             mmap,
             manifest,
             data_shard,
+            ranges,
         })
     }
 
@@ -108,6 +118,75 @@ impl Reader {
         self.view(name, part).map(<[u8]>::to_vec)
     }
 
+    /// Capability report for one part (spec: capability ladder).
+    pub fn caps(&self, name: &str, part: &str) -> Result<Caps> {
+        let p = self.part(name, part)?;
+        let raw_local = p.blob.shard == 0 && p.encoding.is_none();
+        let page_exclusive = raw_local
+            && is_page_exclusive(&self.ranges, p.blob.offset, p.blob.length, page_size());
+        Ok(Caps {
+            zero_copy: raw_local,
+            alignment: 1u64 << p.blob.offset.trailing_zeros().min(63),
+            verifiable: p.digest.is_some(),
+            page_exclusive,
+        })
+    }
+
+    /// Drops the OS page cache for a part's exact page range (weight
+    /// streaming eviction). Requires page exclusivity — this call never
+    /// touches a page that another blob occupies.
+    #[cfg(unix)]
+    pub fn evict(&self, name: &str, part: &str) -> Result<()> {
+        let p = self.part(name, part)?;
+        if p.blob.length == 0 {
+            return Ok(());
+        }
+        let caps = self.caps(name, part)?;
+        if !caps.zero_copy {
+            return Err(Error::Unsupported(
+                "evict applies to raw local parts only".into(),
+            ));
+        }
+        if !caps.page_exclusive {
+            return Err(Error::Unsupported(format!(
+                "{name:?}/{part:?} shares an OS page with another blob; \
+                 eviction would drop a neighbor's cache"
+            )));
+        }
+        let page = page_size();
+        let start = p.blob.offset & !(page - 1);
+        let end = (p.blob.offset + p.blob.length)
+            .div_ceil(page)
+            .saturating_mul(page)
+            .min(self.mmap.len() as u64);
+        // SAFETY: the map is a read-only shared file mapping — DontNeed
+        // only drops clean page-cache pages; later accesses re-fault from
+        // the file. It cannot discard writes because none exist.
+        unsafe {
+            self.mmap.unchecked_advise_range(
+                memmap2::UncheckedAdvice::DontNeed,
+                start as usize,
+                (end - start) as usize,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Hints the OS to prefetch a part's pages.
+    #[cfg(unix)]
+    pub fn prefetch(&self, name: &str, part: &str) -> Result<()> {
+        let p = self.part(name, part)?;
+        if p.blob.shard != 0 || p.blob.length == 0 {
+            return Ok(());
+        }
+        self.mmap.advise_range(
+            memmap2::Advice::WillNeed,
+            p.blob.offset as usize,
+            p.blob.length as usize,
+        )?;
+        Ok(())
+    }
+
     /// Verifies a part's stored digest against its decoded bytes.
     /// Returns `Ok(false)` when the part carries no digest.
     pub fn verify(&self, name: &str, part: &str) -> Result<bool> {
@@ -133,11 +212,53 @@ impl Reader {
     }
 }
 
+impl Source for Reader {
+    fn manifest(&self) -> &Manifest {
+        &self.manifest
+    }
+
+    fn read(&self, object: &str, part: &str) -> Result<Vec<u8>> {
+        Reader::read(self, object, part)
+    }
+
+    fn view(&self, object: &str, part: &str) -> Result<&[u8]> {
+        Reader::view(self, object, part)
+    }
+
+    fn caps(&self, object: &str, part: &str) -> Result<Caps> {
+        Reader::caps(self, object, part)
+    }
+}
+
+/// True iff the page-aligned envelope of `[offset, offset + length)`
+/// intersects no *other* occupied range. `ranges` must be sorted, deduped,
+/// and pairwise disjoint (guaranteed by validation); zero-length parts are
+/// vacuously exclusive.
+fn is_page_exclusive(ranges: &[(u64, u64)], offset: u64, length: u64, page: u64) -> bool {
+    if length == 0 {
+        return true;
+    }
+    let env_start = offset & !(page - 1);
+    let env_end = (offset + length).div_ceil(page).saturating_mul(page);
+    let Ok(i) = ranges.binary_search(&(offset, length)) else {
+        return false; // not an occupied range we know about
+    };
+    let prev_clear = i == 0 || {
+        let (o, l) = ranges[i - 1];
+        o + l <= env_start
+    };
+    let next_clear = i + 1 >= ranges.len() || ranges[i + 1].0 >= env_end;
+    prev_clear && next_clear
+}
+
 // =======================================================================
 // Validation (spec §8 reading algorithm + §3.6 validation summary)
 // =======================================================================
 
-fn parse_and_validate(buf: &[u8]) -> Result<(Manifest, bool)> {
+/// (manifest, is_data_shard, sorted local blob ranges incl. the manifest).
+type ParsedFile = (Manifest, bool, Vec<(u64, u64)>);
+
+fn parse_and_validate(buf: &[u8]) -> Result<ParsedFile> {
     let file_len = buf.len() as u64;
     if file_len < 48 {
         return Err(Error::reject(Rule::FileTooSmall, "file shorter than 48 B"));
@@ -169,7 +290,7 @@ fn parse_and_validate(buf: &[u8]) -> Result<(Manifest, bool)> {
                 "data shard footer must zero manifest offset and hash",
             ));
         }
-        return Ok((Manifest::default(), true));
+        return Ok((Manifest::default(), true, Vec::new()));
     }
     if manifest_length > MAX_MANIFEST_LEN {
         return Err(Error::reject(Rule::ManifestTooLarge, "manifest over 1 GiB"));
@@ -192,8 +313,8 @@ fn parse_and_validate(buf: &[u8]) -> Result<(Manifest, bool)> {
     }
 
     let manifest = Manifest::from_value(cbor::decode(manifest_bytes)?)?;
-    validate_manifest(&manifest, data_end, (manifest_offset, manifest_length))?;
-    Ok((manifest, false))
+    let ranges = validate_manifest(&manifest, data_end, (manifest_offset, manifest_length))?;
+    Ok((manifest, false, ranges))
 }
 
 /// Validates a complete in-memory `.zt` file image and returns its manifest
@@ -203,14 +324,15 @@ fn parse_and_validate(buf: &[u8]) -> Result<(Manifest, bool)> {
 /// algorithm and §3.6 validation, driven directly by the conformance corpus
 /// and the fuzz targets.
 pub fn validate_bytes(buf: &[u8]) -> Result<Option<Manifest>> {
-    parse_and_validate(buf).map(|(m, data_shard)| if data_shard { None } else { Some(m) })
+    parse_and_validate(buf).map(|(m, data_shard, _)| if data_shard { None } else { Some(m) })
 }
 
+/// Returns the sorted, deduplicated local blob ranges (manifest included).
 fn validate_manifest(
     manifest: &Manifest,
     data_end: u64,
     manifest_blob: (u64, u64),
-) -> Result<()> {
+) -> Result<Vec<(u64, u64)>> {
     for (&idx, shard) in &manifest.shards {
         if shard.size < 48 {
             return Err(Error::reject(
@@ -323,5 +445,34 @@ fn validate_manifest(
             ));
         }
     }
-    Ok(())
+    Ok(local_refs)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_page_exclusive;
+
+    #[test]
+    fn page_exclusivity() {
+        // header, two blobs, manifest, footer — a typical 4 KiB-aligned file
+        let ranges = [(0u64, 8u64), (4096, 8), (8192, 100), (12288, 340), (12628, 40)];
+        // 4 KiB pages: each aligned blob owns its pages
+        assert!(is_page_exclusive(&ranges, 4096, 8, 4096));
+        assert!(is_page_exclusive(&ranges, 8192, 100, 4096));
+        // 64 KiB pages: everything shares page 0
+        assert!(!is_page_exclusive(&ranges, 4096, 8, 65536));
+        assert!(!is_page_exclusive(&ranges, 8192, 100, 65536));
+        // 64 KiB-aligned blobs are exclusive even on 64 KiB pages
+        let canonical = [(0u64, 8u64), (65536, 8), (131072, 100), (196608, 380)];
+        assert!(is_page_exclusive(&canonical, 65536, 8, 65536));
+        assert!(is_page_exclusive(&canonical, 131072, 100, 65536));
+        // two ranges inside one page: neither is exclusive
+        let packed = [(4096u64, 100u64), (4200, 50)];
+        assert!(!is_page_exclusive(&packed, 4096, 100, 4096));
+        assert!(!is_page_exclusive(&packed, 4200, 50, 4096));
+        // zero-length: vacuously exclusive
+        assert!(is_page_exclusive(&ranges, 4096, 0, 65536));
+        // unknown range: not exclusive
+        assert!(!is_page_exclusive(&ranges, 20480, 8, 4096));
+    }
 }
