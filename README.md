@@ -152,8 +152,8 @@ else — reading, writing, mapping, addressing, verification — is portable.
 ## Upgrading from 1.x
 
 The container did not change: a `.zt` written by any 1.x release opens in 2.0
-unchanged. The crate surface did — see [MIGRATING.md](MIGRATING.md) for the
-rename table and [CHANGELOG.md](CHANGELOG.md) for what moved and why.
+unchanged. The crate surface did — [CHANGELOG.md](CHANGELOG.md) records what
+moved and why.
 
 ## Layout of this repository
 

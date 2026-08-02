@@ -12,8 +12,6 @@ A rewrite of the crate surface. No change to the format: every `.zt` file
 written by a 1.x release reads unchanged, and the conformance corpus and the
 canonical-determinism tests are the evidence.
 
-See [MIGRATING.md](MIGRATING.md) for the rename table.
-
 ### Changed
 
 - **One reader type.** `Reader`, `Model` and `Composite` — three types with
@@ -90,25 +88,21 @@ See [MIGRATING.md](MIGRATING.md) for the rename table.
 - `ztensor_compat::open_any` (now `open`), `layout_profile`,
   `encoding_profile`, `logical_size`, `registered_dtype`.
 
-### Not carried over from 1.2.x
+### Absent, from the 1.2.x lineage
 
-2.0 is a rewrite on a separate lineage, and some of what 1.2.3 shipped has no
-counterpart in it yet. Upgrading from 1.2.x means losing these until they are
-built again:
+2.0 is a rewrite on a separate lineage (the old tree is the `v1` branch), and
+it does not have everything 1.2.3 did. Recorded here as a gap list, not as
+advice — `Writer::append`, `remove_tensors`, the `merge` / `compress` /
+`decompress` / `migrate` / `download-hf` CLI commands, and Python's
+`read_into`.
 
-| 1.2.x | 2.0 |
-| --- | --- |
-| `Writer::append` — reopen a `.zt` and add to it | none; write a new file |
-| `remove_tensors` — rewrite a file without some tensors | none; `ingest` what you want into a new file |
-| `zt merge` | `Source::open_all(&paths)` + `Writer::ingest` |
-| `zt compress` / `zt decompress` | `Writer::options().canonical(false)` with `.encoding("zt.zstd-seekable/1")`, and `convert` back |
-| `zt migrate` | `zt convert` |
-| `zt download-hf` | none; this is a downloader, not a format concern |
-| Python `read_into(name, dst)` — read into a pre-allocated numpy/torch buffer | `t.location` gives `(path, offset, nbytes)` and you do the read; `t.__dlpack__(copy=True)` gives a buffer you own |
-
-`append` and `remove_tensors` are the two that need a decision rather than a
-port: canonical form is defined by sorted insertion and a byte-reproducible
-result, and reopening a finished file to add to it is in tension with both.
+Most have an obvious route back: `merge` is `Source::open_all` plus `ingest`,
+`compress` is an encoding profile on the writer, `migrate` is `convert`, and
+`read_into` is better served by `locate()` handing over the address so the
+caller reads into its own buffer. `append` and `remove_tensors` are the two
+that need a decision rather than a port: canonical form is defined by sorted
+insertion and a byte-reproducible result, and reopening a finished file to add
+to it is in tension with both.
 
 ## 1.2.3 and earlier
 

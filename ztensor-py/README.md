@@ -64,11 +64,11 @@ ztensor.verify("model.zt", deep=True)      # (digest_verified, without_digests)
 Conversion is the upgrade path: the foreign file has no digests and arbitrary
 alignment; the result has both.
 
-## Migrating
+## The numpy shim
 
-`ztensor.numpy.load_file` / `save_file` remain as a safetensors-shaped shim for
-existing code. Everything else changed in 2.0 — see
-[MIGRATING.md](https://github.com/pie-project/ztensor/blob/main/MIGRATING.md).
+`ztensor.numpy.load_file` / `save_file` are a safetensors-shaped convenience
+layer, kept for code written against that API. New code should use the tensor
+handles above, which can say things a dict of arrays cannot.
 
 Linux and macOS. MIT licensed. The format, the Rust crates and the
 specification live at
