@@ -74,6 +74,18 @@ See the [format specification](./spec.md) for the normative rules and
 [profiles](https://github.com/pie-project/ztensor/tree/main/spec/profiles)
 for the registry.
 
+## One model, several files
+
+A blob reference begins with a shard index, so a manifest can address bytes
+in files other than its own. That is all sharding is — and because the
+shard table records **size and digest rather than a name**, moving or
+renaming the files cannot break or silently change a model.
+
+![A root manifest naming shards by size and digest; the shards are containers with no manifest of their own](../static/diagrams/sharding.svg)
+
+The same mechanism is how an overlay works: a LoRA stores only its deltas
+and points at the base model's blobs, without copying them.
+
 ## The capability ladder
 
 Different files support different things, and the API says so rather than
