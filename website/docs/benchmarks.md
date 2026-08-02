@@ -99,9 +99,10 @@ pays for the padding too.
 **This is a known limitation of canonical form as specified.** Blanket
 alignment is the wrong default for small-tensor models, and the fix is to align
 *selectively* — only tensors large enough that a page of padding is noise
-against them. Until the spec says so, use `Writer::create_with_alignment(path,
-4096)` (`zt convert --align 4096`, `ztensor.numpy.save_file(..., align=4096)`)
-for checkpoints of that shape.
+against them. Until the spec says so, use
+`Writer::options().canonical(false).align(4096).create(path)`
+(`zt convert --align 4096`, `ztensor.numpy.save_file(..., align=4096)`) for
+checkpoints of that shape.
 
 ## What the alignment buys
 
@@ -110,9 +111,9 @@ for checkpoints of that shape.
   streaming loader can release weights it has finished with.
 - The offsets satisfy O_DIRECT and GPUDirect Storage block alignment.
 
-None of that is available at arbitrary alignment, which is why the capability
-ladder reports tier 3 only for files that have it. Files written at the 4 KiB
-floor, and every foreign format, report what they actually support instead.
+None of that is available at arbitrary alignment, which is why `caps().evict`
+is true only for files that have it. Files written at the 4 KiB floor, and
+every foreign format, report what they actually support instead.
 
 ## Reproducing
 

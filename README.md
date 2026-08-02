@@ -7,12 +7,13 @@ that reads every other tensor format into the same object model.
 
 ```rust
 // Read anything: .zt, .safetensors, .gguf, .npz, .pt, .h5, .onnx
-let src = ztensor_compat::open_any("model.safetensors")?;
-let bytes = src.read("layer.weight", "data")?;
+let src = ztensor_compat::open("model.safetensors")?;
+let t = src.tensor("layer.weight")?;
+let bytes = t.map()?;                  // borrowed, or an error — never a hidden copy
 
 // Write one thing: a canonical, digest-carrying .zt file
 let mut w = ztensor::Writer::create("model.zt")?;
-w.ingest(src.as_ref())?;
+w.ingest(&src)?;
 w.finish()?;
 ```
 
@@ -173,13 +174,16 @@ pretending otherwise:
 
 | Tier | Guarantee | Where |
 | --- | --- | --- |
-| 0 | Enumerate objects and metadata | every format |
-| 1 | Decoded read (owned bytes) | every format |
-| 2 | Zero-copy view | mapped sources, raw parts |
-| 3 | Tier 2 + page-exclusive + verifiable | canonical `.zt` |
+| `bytes()` | decoded bytes, and it says whether they were borrowed or copied | every format |
+| `map()` | a borrow, or an error — never a hidden copy | mapped raw parts |
+| `locate()` | the exact range of one file, for a caller doing its own I/O | raw parts |
+| `verify()` | a digest check | `.zt` |
+| `evict()` | drops these pages without touching a neighbour's | page-exclusive parts |
 
-`view()` errors rather than silently copying; `caps()` reports the truth
-per part. Converting a foreign checkpoint is how you move it to tier 3.
+`caps()` reports, per part, which of those will work — and every field is
+named after the method it gates, computed by that method's own precondition,
+so the report cannot drift from the behaviour. Converting a foreign checkpoint
+is how you get the ones it cannot offer.
 
 ## Supported formats
 

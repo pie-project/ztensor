@@ -18,14 +18,14 @@ zTensor is two things:
 use ztensor::{Source, Writer};
 
 // Read anything.
-let src = ztensor_compat::open_any("model.safetensors")?;
+let src = ztensor_compat::open("model.safetensors")?;
 for (name, obj) in src.manifest().objects.iter() {
     println!("{name}: {:?} {}", obj.shape, obj.layout.as_str());
 }
 
 // Write one thing: a canonical, digest-carrying .zt file.
 let mut w = Writer::create("model.zt")?;
-w.ingest(src.as_ref())?;
+w.ingest(&src)?;
 w.finish()?;
 ```
 
@@ -75,13 +75,15 @@ pretending otherwise:
 | Tier | Guarantee | Where you get it |
 | --- | --- | --- |
 | 0 | Enumerate objects and metadata | every format |
-| 1 | Decoded read (owned bytes) | every format |
-| 2 | Zero-copy view | mapped sources, raw parts |
-| 3 | Tier 2 + page-exclusive + verifiable | canonical `.zt` |
+| `bytes()` | decoded bytes, saying whether they were borrowed or copied | every format |
+| `map()` | a borrow, or an error | mapped raw parts |
+| `locate()` | the exact range of one file, for your own I/O | raw parts |
+| `verify()` | a digest check | `.zt` |
+| `evict()` | drops these pages without touching a neighbour's | page-exclusive parts |
 
-`caps()` reports the truth for each part, and `view()` returns an error
-rather than silently falling back to a copy. To move a foreign checkpoint
-up to tier 3, convert it — that is what `ingest` is for.
+`caps()` reports which of those will work, per part, and `map()` returns an
+error rather than silently falling back to a copy. To get what a foreign
+checkpoint cannot offer, convert it — that is what `ingest` is for.
 
 ## Getting started
 
