@@ -577,6 +577,43 @@ mod tests {
 
     /// Regression: fuzz_cbor crash — a map with two distinct NaN-payload
     /// float keys decoded fine but re-encoded into duplicate keys.
+    /// A declared length never drives an allocation.
+    ///
+    /// The bug this forecloses is the one every binary decoder gets caught by:
+    /// reading a length from the input and reserving that much before checking
+    /// that the bytes are actually there, so nine bytes ask for sixteen
+    /// exabytes. Every length here is bounded by what remains to be read.
+    #[test]
+    fn a_declared_length_is_checked_before_it_is_believed() {
+        for major in [2u8 /* bytes */, 3 /* text */, 4 /* array */, 5 /* map */] {
+            for declared in [u64::MAX, 1 << 40, 1 << 20, 300, 25] {
+                // The shortest head for this length, so the determinism rule
+                // cannot fire first and the length check is what is on trial.
+                let mut input = Vec::new();
+                head(major, declared, &mut input);
+                let err = decode(&input).expect_err("a lie about length must be refused");
+                assert_eq!(
+                    err.rule(),
+                    Some(Rule::CborSyntax),
+                    "major {major}, declared {declared}: {err}"
+                );
+            }
+        }
+    }
+
+    /// Nesting is bounded exactly at the documented depth, on both sides.
+    #[test]
+    fn nesting_stops_at_the_limit() {
+        let nest = |depth: usize| {
+            let mut v = vec![0x81u8; depth]; // array(1), repeated
+            v.push(0x00); // and a uint at the bottom
+            v
+        };
+        decode(&nest(MAX_DEPTH as usize)).expect("the limit itself is legal");
+        let err = decode(&nest(MAX_DEPTH as usize + 1)).expect_err("one past it is not");
+        assert_eq!(err.rule(), Some(Rule::CborDepth));
+    }
+
     #[test]
     fn fuzz_regression_nan_map_keys() {
         let input = [

@@ -71,14 +71,25 @@ jobs:
       # not a substitute for a real fuzzing campaign.
       # The first corpus directory is the one libFuzzer *writes* to; the
       # conformance corpus is passed after it, read-only, as seeds.
+      #
+      # The two limits are doing different jobs, and only one of them is
+      # about this code. `-malloc_limit_mb` catches the bug worth catching:
+      # a single allocation driven by a declared length. `-rss_limit_mb`
+      # watches the whole process, which in a long run means libFuzzer's own
+      # bookkeeping as much as ours — a 240s cbor run reaches 2 GB of RSS
+      # while the code under test holds a flat 3.5 MB across half a million
+      # executions, so the default 2048 would fail this job for a reason
+      # that has nothing to do with zTensor.
       - name: Container and CBOR
         run: |
           mkdir -p fuzz/corpus/fuzz_validate
           cargo fuzz run fuzz_validate fuzz/corpus/fuzz_validate conformance/corpus/valid \
-            -- -max_total_time=60
-          cargo fuzz run fuzz_cbor -- -max_total_time=60
+            -- -max_total_time=60 -rss_limit_mb=4096 -malloc_limit_mb=1024
+          cargo fuzz run fuzz_cbor -- -max_total_time=60 -rss_limit_mb=4096 -malloc_limit_mb=1024
       - name: Foreign-format parsers
-        run: cargo fuzz run fuzz_compat -- -max_total_time=120 -rss_limit_mb=2048
+        run: |
+          cargo fuzz run fuzz_compat \
+            -- -max_total_time=120 -rss_limit_mb=4096 -malloc_limit_mb=1024
 
   python:
     name: python (${{ matrix.python }})
