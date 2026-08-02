@@ -39,34 +39,96 @@ zt diff a.safetensors b.zt          # compare across formats
   byte-identical files, so a file hash is a stable model identity.
 - **No code execution** anywhere in the format.
 
-## Performance
+## Reading
 
-Measured by `cargo run --release -p benchmark` on an i9-13900K with a
-Samsung 980 PRO NVMe: 1 GiB of tensor data, 32 MiB layer weights, median
-of 9 runs. Full tables and methodology in
-[the benchmarks page](website/docs/benchmarks.md).
+zTensor reads `.safetensors`, `.pt`, `.gguf`, `.npz`, `.onnx`, `.h5`, and `.zt`
+through a single API. Format detection is automatic. In zero-copy mode it
+reaches ~2.3 GB/s across every format, because every format ends up as the same
+thing: a mapped byte range described by one object model. For `.pt` files it
+parses pickle with a restricted VM that only extracts tensor metadata, so no
+arbitrary code can execute.
 
-| Operation | `.zt` | `.safetensors` |
-| --- | --- | --- |
-| Write | 1.66 GB/s | 1.35 GB/s |
-| Read, full traversal (warm cache) | 6.62 GB/s | 6.72 GB/s |
-| Read, full traversal (cold cache) | 2.38 GB/s | — |
-| Verify every digest (XXH3) | 13.99 GB/s | not available |
-| Open (enumerate 50 tensors) | 0.04 ms | 0.03 ms |
+<p align="center">
+  <img src="website/static/charts/cross_format_read.svg" alt="Cross-format read throughput" width="700">
+</p>
 
-Reading is the same speed, and that is the honest answer: both are
-memory-mapped byte ranges, so a warm traversal is bounded by memory
-bandwidth. `.zt` opens marginally slower because opening also validates
-bounds, alignment, blob non-overlap, size equations, and the manifest
-hash.
+| Format | zTensor | zTensor (zc off) | Reference impl. |
+| :--- | :--- | :--- | :--- |
+| .zt | **2.27 GB/s** | 0.96 GB/s | n/a |
+| .safetensors | **2.47 GB/s** | 1.00 GB/s | 1.57 GB/s / 1.59 GB/s† ([safetensors](https://github.com/huggingface/safetensors)) |
+| .pt | **2.29 GB/s** | 0.83 GB/s | 1.60 GB/s ([torch](https://github.com/pytorch/pytorch)) |
+| .npz | **2.33 GB/s** | 0.94 GB/s | 0.80 GB/s ([numpy](https://github.com/numpy/numpy)) |
+| .gguf | 2.37 GB/s | 0.92 GB/s | 1.57 GB/s / **2.52 GB/s**† ([gguf](https://github.com/ggml-org/ggml)) |
+| .onnx | **2.30 GB/s** | 0.82 GB/s | 0.81 GB/s ([onnx](https://github.com/onnx/onnx)) |
+| .h5 | **2.36 GB/s** | 0.95 GB/s | 1.47 GB/s ([h5py](https://github.com/h5py/h5py)) |
 
-The 64 KiB placement costs padding — about 32 KiB per tensor, so how much
-depends entirely on tensor size:
+*Llama 3.2 1B shapes (~2.8 GB). Linux, i9-13900K, NVMe SSD, median of 5 runs,
+cold reads. ONNX at 1 GB (protobuf limit). †Native zero-copy where available
+(GGUF mmap, SafeTensors `safe_open`). See
+[Benchmarks](website/docs/benchmarks.md) for details.*
 
-| Model shape | `.zt` canonical | `.zt` 4 KiB floor | `.safetensors` |
-| --- | --- | --- | --- |
-| 50 × 32 MiB tensors (transformer-like) | +0.15% | +0.01% | +0.00% |
-| 1538 × 1 MiB tensors (worst case) | +4.68% | +0.27% | +0.01% |
+## Writing
+
+zTensor writes exclusively to `.zt`. Existing tensor formats each solve part of
+the problem, but none solve it cleanly:
+
+- **Pickle-based formats** (`.pt`, `.bin`) execute arbitrary code on load; a
+  model file can run anything on the reader's machine.
+- **SafeTensors** is safe but packs tensors back to back, so essentially none of
+  them begin on a page — a weight cannot be mapped, registered, or evicted
+  without dragging its neighbours along.
+- **GGUF** handles quantization but bakes each scheme into the dtype enum,
+  coupling the format to one ecosystem.
+- **NumPy `.npz`** has no alignment guarantees, no per-tensor compression, and
+  no structured metadata.
+- **None of them** carry a digest, so a corrupt byte surfaces as a wrong answer
+  rather than an error.
+
+`.zt` models each tensor as a composite object with typed parts, so dense,
+sparse and quantized data all fit without extending the format; it places every
+tensor on a page boundary, carries an XXH3 digest per tensor and one over the
+manifest, and is byte-reproducible. Read the full
+[specification](spec/ztensor-v2-spec.md).
+
+<p align="center">
+  <img src="website/static/charts/write_throughput.svg" alt="Write throughput by workload" width="700">
+</p>
+
+| Format | Large | Mixed | Small |
+| :--- | :--- | :--- | :--- |
+| **.zt** | 3.29 GB/s | 3.62 GB/s | 0.80 GB/s |
+| .safetensors | 5.18 GB/s | **6.27 GB/s** | 2.62 GB/s |
+| .pt (pickle) | 5.91 GB/s | 6.03 GB/s | **2.86 GB/s** |
+| .npz | 1.10 GB/s | 1.15 GB/s | 0.54 GB/s |
+| .gguf | 4.78 GB/s | 6.25 GB/s | 1.30 GB/s |
+| .onnx | 0.29 GB/s | 0.30 GB/s | 0.35 GB/s |
+| **.h5** | **6.13 GB/s** | 5.96 GB/s | 0.28 GB/s |
+
+*Three workloads at 512 MB: Large (few big matrices), Mixed (realistic model
+shapes), Small (many ~10 KB parameters). zTensor writes canonical form here —
+64 KiB placement, a digest per tensor, and a file that is byte-identical across
+runs. On `Small` that means 51k tiny tensors each rounded up to a page: the file
+is 6.4× the payload and the write pays for all of it. Writing the same workload
+at the 4 KiB floor gives 1.32 GB/s into 1.21× — see
+[Benchmarks](website/docs/benchmarks.md#alignment-is-a-tradeoff).*
+
+## Format comparison
+
+| Feature | .zt | .safetensors | .gguf | .pt (pickle) | .npz | .onnx | .h5 |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| Zero-copy read | ✓ | ✓ | ✓ | ~² | ~² | | |
+| Page-aligned tensors | ✓ | | | | | | |
+| Per-tensor digest | ✓ | | | | | | |
+| Safe (no code exec) | ✓ | ✓ | ✓ | | ✓ | ✓ | ✓ |
+| Streaming / append | ✓ | | | | ~³ | | ✓ |
+| Sparse tensors | ✓ | | | ✓ | | | |
+| Per-tensor compression | ✓ | | | | ✗¹ | | ✓ |
+| Extensible types | ✓ | | | N/A | | ✓ | ✓ |
+| Byte-reproducible | ✓ | | | | | | |
+
+¹ `.npz` uses archive-level zip/deflate, not per-tensor compression.
+² Partial support (requires specific alignment or uncompressed data).
+³ Zip append support (not standard API).
 
 ## Layout of this repository
 

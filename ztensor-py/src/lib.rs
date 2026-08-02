@@ -4,7 +4,10 @@
 //! Python side: `np.frombuffer(src.read(name), dtype=...)` — the bindings
 //! never link against numpy.
 
-use pyo3::exceptions::{PyIOError, PyKeyError, PyValueError};
+use std::os::raw::c_int;
+
+use pyo3::exceptions::{PyBufferError, PyIOError, PyKeyError, PyValueError};
+use pyo3::ffi;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict};
 
@@ -78,6 +81,25 @@ impl Source {
         Ok(PyBytes::new(py, &bytes))
     }
 
+    /// Zero-copy window onto a part's bytes (tier 2).
+    ///
+    /// Raises `ValueError` when the part cannot be viewed without a copy —
+    /// an encoded part, a compressed archive entry, a foreign shard —
+    /// rather than silently returning one.
+    #[pyo3(signature = (name, part = "data"))]
+    fn view(slf: Bound<'_, Self>, name: &str, part: &str) -> PyResult<TensorView> {
+        let (ptr, len) = {
+            let this = slf.borrow();
+            let bytes = this.inner.view(name, part).map_err(err)?;
+            (bytes.as_ptr(), bytes.len())
+        };
+        Ok(TensorView {
+            owner: slf.unbind(),
+            ptr,
+            len,
+        })
+    }
+
     /// Capability report for a part, including the ladder tier.
     #[pyo3(signature = (name, part = "data"))]
     fn caps<'py>(&self, py: Python<'py>, name: &str, part: &str) -> PyResult<Bound<'py, PyDict>> {
@@ -130,6 +152,74 @@ fn value_to_py<'py>(py: Python<'py>, v: &ztensor::cbor::Value) -> PyResult<Bound
     })
 }
 
+/// A read-only window onto a part's bytes, borrowed from the source's
+/// memory map. Exposes the buffer protocol, so `np.frombuffer(view, ...)`
+/// wraps the mapping without copying.
+///
+/// The view holds a reference to its `Source`, so the mapping cannot be
+/// unmapped while any buffer over it is alive.
+#[pyclass(unsendable)]
+struct TensorView {
+    #[allow(dead_code)]
+    owner: Py<Source>,
+    ptr: *const u8,
+    len: usize,
+}
+
+#[pymethods]
+impl TensorView {
+    fn __len__(&self) -> usize {
+        self.len
+    }
+
+    fn __repr__(&self) -> String {
+        format!("TensorView({} bytes, zero-copy)", self.len)
+    }
+
+    /// Copies the window out as `bytes`.
+    fn tobytes<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
+        // SAFETY: `owner` keeps the mapping alive for the life of `self`.
+        PyBytes::new(py, unsafe { std::slice::from_raw_parts(self.ptr, self.len) })
+    }
+
+    unsafe fn __getbuffer__(
+        slf: PyRefMut<'_, Self>,
+        view: *mut ffi::Py_buffer,
+        flags: c_int,
+    ) -> PyResult<()> {
+        if view.is_null() {
+            return Err(PyBufferError::new_err("view is null"));
+        }
+        if (flags & ffi::PyBUF_WRITABLE) == ffi::PyBUF_WRITABLE {
+            return Err(PyBufferError::new_err("tensor views are read-only"));
+        }
+        // SAFETY: caller provides a valid Py_buffer to fill in; the memory
+        // described is owned by the source's mapping, which `owner` pins.
+        unsafe {
+            (*view).buf = slf.ptr as *mut std::ffi::c_void;
+            (*view).len = slf.len as isize;
+            (*view).readonly = 1;
+            (*view).itemsize = 1;
+            (*view).format = if (flags & ffi::PyBUF_FORMAT) == ffi::PyBUF_FORMAT {
+                c"B".as_ptr() as *mut _
+            } else {
+                std::ptr::null_mut()
+            };
+            (*view).ndim = 1;
+            (*view).shape = std::ptr::null_mut();
+            (*view).strides = std::ptr::null_mut();
+            (*view).suboffsets = std::ptr::null_mut();
+            (*view).internal = std::ptr::null_mut();
+            // Keep the view object alive for as long as the buffer is.
+            let obj: Py<Self> = slf.into();
+            (*view).obj = obj.into_ptr();
+        }
+        Ok(())
+    }
+
+    unsafe fn __releasebuffer__(&self, _view: *mut ffi::Py_buffer) {}
+}
+
 /// Writes canonical `.zt` files.
 #[pyclass(unsendable)]
 struct Writer {
@@ -153,12 +243,50 @@ impl Writer {
 
     /// Adds a dense tensor. `data` is little-endian bytes of exactly
     /// `prod(shape) * itemsize(dtype)`.
-    fn add(&mut self, name: &str, shape: Vec<u64>, dtype: &str, data: &[u8]) -> PyResult<()> {
+    ///
+    /// With `compress=True` the part is stored through the
+    /// `zt.zstd-seekable/1` profile. Canonical form is raw by definition,
+    /// so a compressing writer must have been opened with an `align`.
+    #[pyo3(signature = (name, shape, dtype, data, compress = false))]
+    fn add(
+        &mut self,
+        name: &str,
+        shape: Vec<u64>,
+        dtype: &str,
+        // Any contiguous buffer — a numpy array goes in directly, with no
+        // `tobytes()` copy of the tensor on the way.
+        data: pyo3::buffer::PyBuffer<u8>,
+        compress: bool,
+    ) -> PyResult<()> {
+        if !data.is_c_contiguous() {
+            return Err(PyValueError::new_err("data must be C-contiguous"));
+        }
+        // SAFETY: the buffer is read-only for the duration of this call and
+        // the GIL is held, so the exporter cannot resize or free it.
+        let data: &[u8] =
+            unsafe { std::slice::from_raw_parts(data.buf_ptr() as *const u8, data.item_count()) };
         let dtype = ztensor::DType::from_name(dtype)
             .ok_or_else(|| PyValueError::new_err(format!("unknown dtype {dtype:?}")))?;
-        self.writer()?
-            .add_dense(name, &shape, dtype, data)
-            .map_err(err)
+        let w = self.writer()?;
+        if !compress {
+            return w.add_dense(name, &shape, dtype, data).map_err(err);
+        }
+        w.add_object(
+            name,
+            &shape,
+            "dense",
+            &[(
+                "data",
+                ztensor::PartDef {
+                    dtype,
+                    ltype: None,
+                    encoding: Some("zt.zstd-seekable/1"),
+                    data,
+                },
+            )],
+            None,
+        )
+        .map_err(err)
     }
 
     /// Writes the manifest and footer; returns the file size. The writer
@@ -249,6 +377,7 @@ fn verify(path: &str, deep: bool) -> PyResult<u64> {
 #[pymodule]
 fn _ztensor(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Source>()?;
+    m.add_class::<TensorView>()?;
     m.add_class::<Writer>()?;
     m.add_function(wrap_pyfunction!(open, m)?)?;
     m.add_function(wrap_pyfunction!(detect, m)?)?;

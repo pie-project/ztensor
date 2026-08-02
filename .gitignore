@@ -6,3 +6,5 @@ Cargo.lock
 /fuzz/coverage
 /target/bench
 /target/wheels
+/target/b12
+/benchmark/bench_out

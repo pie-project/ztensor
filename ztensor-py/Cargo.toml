@@ -12,7 +12,9 @@ name = "_ztensor"
 crate-type = ["cdylib"]
 
 [dependencies]
-pyo3 = { version = "0.26", features = ["extension-module", "abi3-py39"] }
+# Not abi3: the buffer protocol (zero-copy views into the mapping) is not
+# part of the limited API, and zero-copy is the point of this binding.
+pyo3 = { version = "0.26", features = ["extension-module"] }
 ztensor = { path = "../ztensor", features = ["zstd"] }
 ztensor-compat = { path = "../ztensor-compat", features = [
     "safetensors",

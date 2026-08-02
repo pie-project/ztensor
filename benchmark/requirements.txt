@@ -1,0 +1,11 @@
+torch
+numpy
+safetensors
+h5py
+gguf
+onnx
+psutil
+pandas
+tqdm
+memory_profiler
+matplotlib

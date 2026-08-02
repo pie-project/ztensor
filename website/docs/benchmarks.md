@@ -4,112 +4,125 @@ sidebar_position: 5
 
 # Benchmarks
 
-All numbers below come from `cargo run --release -p benchmark`, which is in
-the repository — re-run it and you should get the same shape of result on
-comparable hardware. Nothing here is hand-picked: the harness prints the
-table you see.
+*Linux, i9-13900K, 61 GiB RAM, Samsung 980 PRO NVMe, ext4. Median of 5 runs
+after 1 warmup; cold reads drop the page cache with
+`posix_fadvise(POSIX_FADV_DONTNEED)`. Both zero-copy and copy modes are shown
+where applicable. Reproduce with `benchmark/bench.py` — every number below is
+its output.*
 
-**What is measured.** A synthetic checkpoint whose layout mirrors a
-transformer (a couple of large embedding matrices, then per-layer weights
-and norms), written and read through the public API. Every read traverses
-**every byte** — a benchmark that only resolves pointers, or samples one
-byte per page, measures address arithmetic rather than I/O.
+## Cross-format reading
 
-**Machine.** Intel Core i9-13900K, 61 GiB RAM, Samsung 980 PRO NVMe, Linux,
-ext4. Median of 9 runs, 1 GiB of tensor data, 32 MiB layer weights
-(typical of a transformer's projection matrices).
+zTensor reads `.safetensors`, `.pt`, `.gguf`, `.npz`, `.onnx`, `.h5` and `.zt`
+through one mmap-backed API. The results below load a Llama 3.2 1B-shaped model
+(~2.8 GB) from each format, against each format's own library.
 
-## Throughput
+![Cross-format read throughput](../static/charts/cross_format_read.svg)
 
-| Operation | Throughput | Median time |
-| --- | --- | --- |
-| Write `.zt` (canonical, 64 KiB placement) | 1.66 GB/s | 646 ms |
-| Write `.zt` (4 KiB floor) | 1.58 GB/s | 680 ms |
-| Write `.safetensors` | 1.35 GB/s | 798 ms |
-| Read `.zt` zero-copy, full traversal (warm cache) | 6.62 GB/s | 162 ms |
-| Read `.safetensors` zero-copy, full traversal (warm cache) | 6.72 GB/s | 160 ms |
-| Copy `.zt` into owned buffers (warm cache, memcpy) | 9.61 GB/s | 112 ms |
-| Read `.zt` zero-copy, full traversal (cold cache) | 2.38 GB/s | 452 ms |
-| Verify every digest (XXH3) | 13.99 GB/s | 77 ms |
-| Convert `.safetensors` → canonical `.zt` | 0.88 GB/s | 1214 ms |
+| Source format | zTensor | zTensor (zc off) | Reference impl. |
+|---|---|---|---|
+| **.zt** | **2.27 GB/s** | 0.96 GB/s | n/a |
+| **.safetensors** | **2.47 GB/s** | 1.00 GB/s | 1.57 GB/s / 1.59 GB/s† ([`safetensors`](https://github.com/huggingface/safetensors)) |
+| **.pt** | **2.29 GB/s** | 0.83 GB/s | 1.60 GB/s ([`torch`](https://github.com/pytorch/pytorch)) |
+| **.npz** | **2.33 GB/s** | 0.94 GB/s | 0.80 GB/s ([`numpy`](https://github.com/numpy/numpy)) |
+| **.gguf** | 2.37 GB/s | 0.92 GB/s | 1.57 GB/s / **2.52 GB/s**† ([`gguf`](https://github.com/ggml-org/ggml)) |
+| **.onnx** | **2.30 GB/s** | 0.82 GB/s | 0.81 GB/s ([`onnx`](https://github.com/onnx/onnx)) |
+| **.h5** | **2.36 GB/s** | 0.95 GB/s | 1.47 GB/s ([`h5py`](https://github.com/h5py/h5py)) |
 
-Reading is where the honest answer is *"the same"*: `.zt` and
-`.safetensors` are both memory-mapped byte ranges, so a warm traversal is
-bounded by memory bandwidth and the two land within noise of each other
-(6.6 vs 6.7 GB/s). Any claim that one format reads dramatically faster than
-the other, at equal alignment and equal work, should be treated with
-suspicion — there is no mechanism for it.
+*ONNX measured at 1 GB (protobuf caps a message at 2 GB). †Native zero-copy
+where available (GGUF mmap, SafeTensors `safe_open`).*
 
-The cold-cache row is the one that reflects the device (2.38 GB/s here);
-the harness omits it entirely if dropping the page cache had no measurable
-effect, rather than publishing a number that came out of RAM.
+**Zero-copy vs. copy.** By default (`copy=False`) zTensor returns
+mmap-backed arrays with no memory copy; `copy=True` reads into owned arrays.
+The spread between the two columns is the memcpy, and it is most of the cost:
+once the bytes have to be copied, every format converges on what memory
+bandwidth allows. The formats with real serialization overhead — pickle for
+`.pt`, zip for `.npz`, protobuf for `.onnx` — stay slower in both modes because
+that work does not go away.
 
-The copy row is listed for completeness but is **not comparable** to the
-traversal rows above it: it measures `memcpy`, while the traversals sum
-every byte.
+**Where zTensor does not win.** GGUF's own reader is faster on its own files
+(2.52 vs 2.37 GB/s): it maps the file and hands back block pointers, which is
+the same thing zTensor does with one more layer of indirection. Reading is not
+where a container format earns its keep; the columns above are close because
+they are all measuring the same mmap.
 
-## Open latency
+**Safety.** For `.pt`, zTensor runs a restricted pickle VM that recognizes only
+tensor-reconstruction opcodes and extracts metadata without executing anything,
+unlike `torch.load()`, which calls `pickle.load()`. It also refuses
+non-contiguous tensors rather than reading a transposed tensor's storage as if
+it were dense.
 
-Time to learn what is in the file — the cost a loader pays before it can
-plan anything:
+---
 
-| Format | 50 tensors | 1538 tensors |
-| --- | --- | --- |
-| `.zt` | 0.04 ms | 0.95 ms |
-| `.safetensors` | 0.03 ms | 0.68 ms |
+## Writing
 
-Both are a single metadata read plus a parse. `.zt` is marginally slower
-because opening also **validates**: bounds, alignment, blob non-overlap,
-size equations, and the manifest hash. That work is the point — a
-safetensors reader that skipped its own header checks would be faster
-still, and wrong.
+Each format written by its own reference implementation, three workloads at
+512 MB: **Large** (few big matrices), **Mixed** (realistic model shapes),
+**Small** (many ~10 KB parameters).
 
-## File size
+![Write throughput by workload](../static/charts/write_throughput.svg)
 
-The 64 KiB canonical placement costs padding — how much depends entirely
-on how large the tensors are, since the cost is per tensor, not per byte:
+| Format | Large | Mixed | Small |
+|---|---|---|---|
+| **ztensor** | 3.29 GB/s | 3.62 GB/s | 0.80 GB/s |
+| safetensors | 5.18 GB/s | **6.27 GB/s** | 2.62 GB/s |
+| pickle | 5.91 GB/s | 6.03 GB/s | **2.86 GB/s** |
+| npz | 1.10 GB/s | 1.15 GB/s | 0.54 GB/s |
+| gguf | 4.78 GB/s | 6.25 GB/s | 1.30 GB/s |
+| onnx | 0.29 GB/s | 0.30 GB/s | 0.35 GB/s |
+| hdf5 | **6.13 GB/s** | 5.96 GB/s | 0.28 GB/s |
 
-| Model shape | `.zt` canonical (64 KiB) | `.zt` 4 KiB floor | `.safetensors` |
-| --- | --- | --- | --- |
-| 50 × 32 MiB tensors (transformer-like) | **+0.15%** | +0.01% | +0.00% |
-| 1538 × 1 MiB tensors (worst case) | **+4.68%** | +0.27% | +0.01% |
+zTensor is not the fastest writer, and the reason is that it is not writing the
+same file. Canonical form places every tensor on a 64 KiB boundary, computes an
+XXH3 digest for each one, and shares a blob between byte-identical tensors — so
+a canonical write hashes all the bytes and pads between them. safetensors
+writes a header and then concatenates. That is a real cost of a real guarantee,
+and it is paid once per artifact rather than on every load.
 
-Average padding is half the alignment, i.e. ~32 KiB per tensor. For real
-checkpoints — whose weight matrices are tens to hundreds of MiB — that is
-a rounding error. It only becomes visible on models made of many tiny
-tensors, and for those a writer can drop to the 4 KiB floor
-(`Writer::create_with_alignment`, `zt convert --align 4096`) and give up
-per-tensor mapping on 16 KiB and 64 KiB page systems.
+## Alignment is a tradeoff {#alignment-is-a-tradeoff}
+
+The padding is per *tensor*, not per byte — about 32 KiB on average — so what
+it costs depends entirely on how large the tensors are:
+
+| Workload | 4 KiB floor | 64 KiB canonical |
+|---|---|---|
+| Large (few big matrices) | 1.00× payload, 1.98 GB/s | 1.00× payload, 1.11 GB/s |
+| Mixed (realistic shapes) | 1.00× payload, 2.05 GB/s | 1.00× payload, 1.23 GB/s |
+| **Small (~10 KB tensors)** | **1.21× payload, 1.32 GB/s** | **6.41× payload, 0.39 GB/s** |
+
+For a transformer checkpoint — weight matrices in the tens to hundreds of
+megabytes — 64 KiB placement is free, and it buys per-tensor mapping and
+eviction on every page size in use (4 KiB x86/ARM, 16 KiB Apple silicon, 64 KiB
+ARM64 distributions). For a model made of many tiny tensors it is ruinous: 51k
+tensors each rounded to a page turn 512 MB into 3.4 GB, and every read then
+pays for the padding too.
+
+**This is a known limitation of canonical form as specified.** Blanket
+alignment is the wrong default for small-tensor models, and the fix is to align
+*selectively* — only tensors large enough that a page of padding is noise
+against them. Until the spec says so, use `Writer::create_with_alignment(path,
+4096)` (`zt convert --align 4096`, `ztensor.numpy.save_file(..., align=4096)`)
+for checkpoints of that shape.
 
 ## What the alignment buys
 
-The padding is not decoration. At 64 KiB every tensor starts on a page
-boundary on **every** platform in use (4 KiB x86/ARM, 16 KiB Apple
-Silicon, 64 KiB ARM64 distributions), which means:
+- Each tensor can be memory-mapped, registered, and evicted independently.
+- `madvise(MADV_DONTNEED)` on one tensor cannot drop a neighbour's pages, so a
+  streaming loader can release weights it has finished with.
+- The offsets satisfy O_DIRECT and GPUDirect Storage block alignment.
 
-- each tensor can be memory-mapped, registered, and evicted independently;
-- `madvise(MADV_DONTNEED)` on one tensor cannot drop a neighbour's pages,
-  so a streaming loader can release weights it has finished with;
-- the offsets satisfy O_DIRECT and GPUDirect Storage block alignment.
-
-None of that is available at arbitrary alignment, which is why the
-capability ladder reports tier 3 only for files that have it. `.zt` files
-written at the 4 KiB floor, and every foreign format, report what they
-actually support instead.
+None of that is available at arbitrary alignment, which is why the capability
+ladder reports tier 3 only for files that have it. Files written at the 4 KiB
+floor, and every foreign format, report what they actually support instead.
 
 ## Reproducing
 
 ```bash
-# defaults: 512 MiB of data, 1 MiB tensors, 5 runs
-cargo run --release -p benchmark
-
-# the configuration used above
-cargo run --release -p benchmark -- --size-mb 1024 --tensor-mb 32 --runs 9
-
-# put the files somewhere else (must be real storage, not tmpfs)
-ZTENSOR_BENCH_DIR=/mnt/nvme/bench cargo run --release -p benchmark
+cd benchmark
+pip install -r requirements.txt          # torch, numpy, safetensors, h5py, gguf, onnx
+python bench.py --dist llama-1b --scenario fastest --runs 5
+python bench.py --dist small --size 512 --runs 5
 ```
 
-The harness refuses to fake a cold-cache measurement: if the file lives on
-tmpfs or the cache drop is otherwise a no-op, it prints a note and omits
-the row.
+The harness writes its files to `benchmark/bench_out`. Put that on real
+storage: on tmpfs a "cold cache" read never reaches a device, and the number
+would be fiction.

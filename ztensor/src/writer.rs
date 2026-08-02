@@ -193,7 +193,9 @@ impl Writer {
         // written. Parts are processed in name order — canonical blob order
         // is (object name, part name).
         let mut built: BTreeMap<String, Part> = BTreeMap::new();
-        let mut payloads: Vec<Vec<u8>> = Vec::with_capacity(parts.len());
+        // Raw payloads are borrowed, not copied: a checkpoint's worth of
+        // tensor bytes is the one thing worth not duplicating.
+        let mut payloads: Vec<std::borrow::Cow<'_, [u8]>> = Vec::with_capacity(parts.len());
         let mut order: Vec<usize> = (0..parts.len()).collect();
         order.sort_by_key(|&i| parts[i].0);
         for &i in &order {
@@ -210,7 +212,7 @@ impl Writer {
                 }
             }
             let (stored, encoding, decoded_length) = match def.encoding {
-                None => (def.data.to_vec(), None, None),
+                None => (std::borrow::Cow::Borrowed(def.data), None, None),
                 Some(enc) => {
                     if self.canonical {
                         return Err(Error::InvalidInput(
@@ -222,7 +224,7 @@ impl Writer {
                         Error::Unsupported(format!("unknown encoding profile {enc:?}"))
                     })?;
                     (
-                        profile.encode(def.data)?,
+                        std::borrow::Cow::Owned(profile.encode(def.data)?),
                         Some(enc.to_string()),
                         Some(def.data.len() as u64),
                     )
@@ -520,7 +522,10 @@ impl Writer {
         self.offset += FOOTER_LEN;
 
         self.out.flush()?;
-        self.out.get_ref().sync_all()?;
+        // No fsync here: per the spec (Appendix D) durable publication is
+        // a transport concern — write to a temporary name, fsync, then
+        // rename. Syncing unconditionally would tax every caller for a
+        // guarantee only publishers need.
         Ok(self.offset)
     }
 }
@@ -594,7 +599,7 @@ impl DataShardWriter {
         footer[32..40].copy_from_slice(&MAGIC);
         self.put(&footer)?;
         self.out.flush()?;
-        self.out.get_ref().sync_all()?;
+        // See Writer::finish: durability is the caller's call.
         Ok((self.offset, format!("xxh3:{:016x}", self.hasher.digest())))
     }
 }
