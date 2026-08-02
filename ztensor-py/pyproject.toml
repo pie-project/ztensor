@@ -1,0 +1,15 @@
+[build-system]
+requires = ["maturin>=1.5"]
+build-backend = "maturin"
+
+[project]
+name = "ztensor"
+version = "2.0.0a0"
+description = "Read any tensor format, write canonical .zt"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+
+[tool.maturin]
+module-name = "ztensor._ztensor"
+python-source = "python"
+manifest-path = "Cargo.toml"

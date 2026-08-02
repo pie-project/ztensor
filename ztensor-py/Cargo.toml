@@ -1,0 +1,24 @@
+[package]
+name = "ztensor-py"
+version = "2.0.0-alpha.0"
+description = "Python bindings for zTensor: read any tensor format, write canonical .zt"
+authors = ["In Gim <in.gim@icloud.com>"]
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "_ztensor"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.26", features = ["extension-module", "abi3-py39"] }
+ztensor = { path = "../ztensor", features = ["zstd"] }
+ztensor-compat = { path = "../ztensor-compat", features = [
+    "safetensors",
+    "gguf",
+    "npz",
+    "pickle",
+    "hdf5",
+    "onnx",
+] }

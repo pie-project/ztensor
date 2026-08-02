@@ -1,5 +1,5 @@
 [workspace]
-members = ["ztensor", "ztensor-compat", "ztensor-cli", "conformance"]
+members = ["ztensor", "ztensor-compat", "ztensor-cli", "ztensor-py", "conformance"]
 resolver = "2"
 
 [workspace.package]
