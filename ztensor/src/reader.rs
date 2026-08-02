@@ -122,8 +122,11 @@ impl Reader {
         decode_part(p, self.stored_slice(p))
     }
 
-    /// The stored (possibly encoded) bytes of a local part. Bounds were
-    /// validated at open.
+    /// The stored (possibly encoded) bytes of a local part.
+    ///
+    /// The `usize` casts are sound on every platform: validation bounded
+    /// `offset + length` by the mapped length, which is itself a `usize`,
+    /// so neither value can exceed `usize::MAX` by the time we get here.
     pub(crate) fn stored_slice(&self, part: &Part) -> &[u8] {
         let start = part.blob.offset as usize;
         &self.mmap[start..start + part.blob.length as usize]

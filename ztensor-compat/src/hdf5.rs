@@ -21,6 +21,7 @@ use std::io::Read;
 use std::path::Path;
 
 use memmap2::Mmap;
+use ztensor::cbor::Value;
 use ztensor::{
     BlobRef, Caps, DType, Error, Layout, Manifest, Object, Part, Result, Source,
 };
@@ -191,10 +192,19 @@ impl Hdf5 {
             skipped,
             ..
         } = walker;
+        // Skipped datasets are recorded in the projected manifest, not just
+        // behind an accessor: a consumer that only sees `objects` would
+        // otherwise have no way to notice they exist.
+        let attributes = (!skipped.is_empty()).then(|| {
+            Value::Map(vec![(
+                Value::Text("hdf5.skipped".into()),
+                Value::Array(skipped.iter().map(|s| Value::Text(s.clone())).collect()),
+            )])
+        });
         Ok(Self {
             mmap,
             manifest: Manifest {
-                attributes: None,
+                attributes,
                 shards: BTreeMap::new(),
                 objects,
             },

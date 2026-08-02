@@ -154,8 +154,14 @@ impl<'a> Cursor<'a> {
             9 => {
                 let elem_type = self.u32()?;
                 let count = self.u64()?;
-                if count > self.data.len() as u64 {
-                    return Err(bad("array length exceeds file"));
+                // Even a 1-byte element type needs a byte on disk, so a
+                // count beyond the remaining bytes is a lie — and the
+                // materialized `Value`s are far larger than their encoding,
+                // so this bound is what keeps the projection proportional
+                // to the file.
+                let remaining = (self.data.len() - self.pos) as u64;
+                if count > remaining {
+                    return Err(bad("array length exceeds remaining bytes"));
                 }
                 let mut items = Vec::with_capacity(count.min(1 << 16) as usize);
                 for _ in 0..count {

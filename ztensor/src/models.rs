@@ -312,6 +312,48 @@ pub(crate) fn check_digest(d: &str) -> Result<()> {
 // Manifest <-> CBOR
 // =======================================================================
 
+// ---- schema decoding helpers ------------------------------------------
+
+/// A required field that turned out to be absent.
+fn missing<T>(what: &str, field: &str) -> Result<T> {
+    Err(Error::reject(
+        Rule::Schema,
+        format!("{what} missing {field:?}"),
+    ))
+}
+
+impl Value {
+    fn text_or(&self, field: &str) -> Result<&str> {
+        self.as_text()
+            .ok_or_else(|| Error::reject(Rule::Schema, format!("{field:?} must be text")))
+    }
+
+    fn u64_or(&self, field: &str) -> Result<u64> {
+        self.as_u64().ok_or_else(|| {
+            Error::reject(Rule::Schema, format!("{field:?} must be an unsigned int"))
+        })
+    }
+
+    fn map_or(&self, field: &str) -> Result<&[(Value, Value)]> {
+        self.as_map()
+            .ok_or_else(|| Error::reject(Rule::Schema, format!("{field:?} must be a map")))
+    }
+
+    fn array_or(&self, field: &str) -> Result<&[Value]> {
+        self.as_array()
+            .ok_or_else(|| Error::reject(Rule::Schema, format!("{field:?} must be an array")))
+    }
+
+    /// An array of unsigned integers (shapes, blob triples).
+    fn uints_or(&self, field: &str) -> Result<Vec<u64>> {
+        self.array_or(field)?
+            .iter()
+            .map(|v| v.u64_or(field))
+            .collect()
+    }
+}
+
+
 fn text(s: &str) -> Value {
     Value::Text(s.to_string())
 }
@@ -379,23 +421,17 @@ impl Manifest {
 }
 
 fn parse_shards(v: Value) -> Result<BTreeMap<u64, Shard>> {
-    let entries = v
-        .as_map()
-        .ok_or_else(|| Error::reject(Rule::Schema, "'shards' must be a map"))?;
+    let entries = v.map_or("shards")?;
     let mut shards = BTreeMap::new();
     for (k, val) in entries {
-        let idx = k
-            .as_u64()
-            .ok_or_else(|| Error::reject(Rule::Schema, "shard keys must be unsigned ints"))?;
+        let idx = k.u64_or("shard key")?;
         if idx == 0 {
             return Err(Error::reject(
                 Rule::ShardIndex,
                 "shard index 0 is the containing file and must not appear",
             ));
         }
-        let m = val
-            .as_map()
-            .ok_or_else(|| Error::reject(Rule::Schema, "shard entry must be a map"))?;
+        let m = val.map_or("shard entry")?;
         let mut size = None;
         let mut digest = None;
         for (fk, fv) in m {
@@ -405,10 +441,12 @@ fn parse_shards(v: Value) -> Result<BTreeMap<u64, Shard>> {
                 _ => {}
             }
         }
-        let size =
-            size.ok_or_else(|| Error::reject(Rule::Schema, "shard entry missing 'size'"))?;
-        let digest = digest
-            .ok_or_else(|| Error::reject(Rule::Schema, "shard entry missing 'digest'"))?;
+        let Some(size) = size else {
+            return missing("shard entry", "size");
+        };
+        let Some(digest) = digest else {
+            return missing("shard entry", "digest");
+        };
         check_digest(&digest)?;
         shards.insert(idx, Shard { size, digest });
     }
@@ -416,14 +454,10 @@ fn parse_shards(v: Value) -> Result<BTreeMap<u64, Shard>> {
 }
 
 fn parse_objects(v: Value) -> Result<BTreeMap<String, Object>> {
-    let entries = v
-        .as_map()
-        .ok_or_else(|| Error::reject(Rule::Schema, "'objects' must be a map"))?;
+    let entries = v.map_or("objects")?;
     let mut objects = BTreeMap::new();
     for (k, val) in entries {
-        let name = k
-            .as_text()
-            .ok_or_else(|| Error::reject(Rule::Schema, "object names must be text"))?;
+        let name = k.text_or("object name")?;
         check_name(name)?;
         objects.insert(name.to_string(), Object::from_value(val)?);
     }
@@ -451,29 +485,15 @@ impl Object {
     }
 
     fn from_value(v: &Value) -> Result<Object> {
-        let entries = v
-            .as_map()
-            .ok_or_else(|| Error::reject(Rule::Schema, "object must be a map"))?;
+        let entries = v.map_or("object")?;
         let mut shape = None;
         let mut layout = None;
         let mut attributes = None;
         let mut parts = None;
         for (k, val) in entries {
             match k.as_text() {
-                Some("shape") => {
-                    let arr = val
-                        .as_array()
-                        .ok_or_else(|| Error::reject(Rule::Schema, "'shape' must be an array"))?;
-                    let dims: Option<Vec<u64>> = arr.iter().map(Value::as_u64).collect();
-                    shape = Some(dims.ok_or_else(|| {
-                        Error::reject(Rule::Schema, "shape dims must be unsigned ints")
-                    })?);
-                }
-                Some("layout") => {
-                    layout = Some(Layout::from_name(val.as_text().ok_or_else(|| {
-                        Error::reject(Rule::Schema, "'layout' must be text")
-                    })?));
-                }
+                Some("shape") => shape = Some(val.uints_or("shape")?),
+                Some("layout") => layout = Some(Layout::from_name(val.text_or("layout")?)),
                 Some("attributes") => {
                     check_attributes(val)?;
                     attributes = Some(val.clone());
@@ -482,10 +502,9 @@ impl Object {
                 _ => {}
             }
         }
-        let shape = shape.ok_or_else(|| Error::reject(Rule::Schema, "object missing 'shape'"))?;
-        let layout =
-            layout.ok_or_else(|| Error::reject(Rule::Schema, "object missing 'layout'"))?;
-        let parts = parts.ok_or_else(|| Error::reject(Rule::Schema, "object missing 'parts'"))?;
+        let (Some(shape), Some(layout), Some(parts)) = (shape, layout, parts) else {
+            return missing("object", "shape/layout/parts");
+        };
         if parts.is_empty() {
             return Err(Error::reject(Rule::Schema, "object has no parts"));
         }
@@ -499,14 +518,10 @@ impl Object {
 }
 
 fn parse_parts(v: &Value) -> Result<BTreeMap<String, Part>> {
-    let entries = v
-        .as_map()
-        .ok_or_else(|| Error::reject(Rule::Schema, "'parts' must be a map"))?;
+    let entries = v.map_or("parts")?;
     let mut parts = BTreeMap::new();
     for (k, val) in entries {
-        let name = k
-            .as_text()
-            .ok_or_else(|| Error::reject(Rule::Schema, "part names must be text"))?;
+        let name = k.text_or("part name")?;
         check_name(name)?;
         parts.insert(name.to_string(), Part::from_value(val)?);
     }
@@ -541,9 +556,7 @@ impl Part {
     }
 
     fn from_value(v: &Value) -> Result<Part> {
-        let entries = v
-            .as_map()
-            .ok_or_else(|| Error::reject(Rule::Schema, "part must be a map"))?;
+        let entries = v.map_or("part")?;
         let mut dtype = None;
         let mut ltype = None;
         let mut blob = None;
@@ -553,61 +566,38 @@ impl Part {
         for (k, val) in entries {
             match k.as_text() {
                 Some("dtype") => {
-                    let s = val
-                        .as_text()
-                        .ok_or_else(|| Error::reject(Rule::Schema, "'dtype' must be text"))?;
+                    let s = val.text_or("dtype")?;
                     dtype = Some(DType::from_name(s).ok_or_else(|| {
                         Error::reject(Rule::Schema, format!("unknown dtype {s:?}"))
                     })?);
                 }
-                Some("type") => {
-                    ltype = Some(
-                        val.as_text()
-                            .ok_or_else(|| Error::reject(Rule::Schema, "'type' must be text"))?
-                            .to_string(),
-                    );
-                }
+                Some("type") => ltype = Some(val.text_or("type")?.to_string()),
                 Some("blob") => {
-                    let arr = val
-                        .as_array()
-                        .ok_or_else(|| Error::reject(Rule::Schema, "'blob' must be an array"))?;
-                    if arr.len() != 3 {
+                    let nums = val.uints_or("blob")?;
+                    let [shard, offset, length] = nums[..] else {
                         return Err(Error::reject(Rule::Schema, "'blob' must have 3 elements"));
-                    }
-                    let nums: Option<Vec<u64>> = arr.iter().map(Value::as_u64).collect();
-                    let nums = nums.ok_or_else(|| {
-                        Error::reject(Rule::Schema, "'blob' elements must be unsigned ints")
-                    })?;
+                    };
                     blob = Some(BlobRef {
-                        shard: nums[0],
-                        offset: nums[1],
-                        length: nums[2],
+                        shard,
+                        offset,
+                        length,
                     });
                 }
-                Some("encoding") => {
-                    encoding = Some(
-                        val.as_text()
-                            .ok_or_else(|| Error::reject(Rule::Schema, "'encoding' must be text"))?
-                            .to_string(),
-                    );
-                }
+                Some("encoding") => encoding = Some(val.text_or("encoding")?.to_string()),
                 Some("decoded_length") => {
-                    decoded_length = Some(val.as_u64().ok_or_else(|| {
-                        Error::reject(Rule::Schema, "'decoded_length' must be an unsigned int")
-                    })?);
+                    decoded_length = Some(val.u64_or("decoded_length")?)
                 }
                 Some("digest") => {
-                    let d = val
-                        .as_text()
-                        .ok_or_else(|| Error::reject(Rule::Schema, "'digest' must be text"))?;
+                    let d = val.text_or("digest")?;
                     check_digest(d)?;
                     digest = Some(d.to_string());
                 }
                 _ => {}
             }
         }
-        let dtype = dtype.ok_or_else(|| Error::reject(Rule::Schema, "part missing 'dtype'"))?;
-        let blob = blob.ok_or_else(|| Error::reject(Rule::Schema, "part missing 'blob'"))?;
+        let (Some(dtype), Some(blob)) = (dtype, blob) else {
+            return missing("part", "dtype/blob");
+        };
         if encoding.is_some() != decoded_length.is_some() {
             return Err(Error::reject(
                 Rule::Schema,

@@ -1,3 +1,7 @@
+---
+sidebar_position: 4
+---
+
 # zTensor Container Format, Version 2
 
 **Status:** Draft 2 · **File extension:** `.zt` · **Footer version integer:** `2`

@@ -1,0 +1,93 @@
+name: CI
+
+on:
+  push:
+    branches: [main, v2]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features
+
+      # The conformance corpus is the gate: every case in `all_cases()`
+      # must behave, and the exported golden files must still match it.
+      - name: Test (all features)
+        run: cargo test --all-features
+
+      # Release mode matters here: several hardening regressions only
+      # reproduce without debug overflow checks.
+      - name: Hostile-input regressions (release)
+        run: cargo test --release -p ztensor-compat --all-features --test hostile
+
+      - name: Corpus is in sync
+        run: |
+          cargo run -q -p conformance --bin gen
+          git diff --exit-code conformance/corpus
+
+  fuzz:
+    name: fuzz smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+      # Short runs: enough to catch a regression that panics immediately,
+      # not a substitute for a real fuzzing campaign.
+      - name: Container and CBOR
+        run: |
+          cargo fuzz run fuzz_validate conformance/corpus/valid -- -max_total_time=60
+          cargo fuzz run fuzz_cbor -- -max_total_time=60
+      - name: Foreign-format parsers
+        run: cargo fuzz run fuzz_compat -- -max_total_time=120 -rss_limit_mb=2048
+
+  python:
+    name: python bindings
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+      - uses: Swatinem/rust-cache@v2
+      - name: Build wheel
+        run: |
+          pip install maturin
+          maturin build -m ztensor-py/Cargo.toml --release
+      - name: Install and smoke-test
+        run: |
+          # Install the built wheel by path: `pip install ztensor` would
+          # resolve the unrelated package of that name on PyPI.
+          pip install --no-index target/wheels/*.whl
+          python - <<'EOF'
+          import struct, tempfile, os, ztensor
+          path = os.path.join(tempfile.mkdtemp(), "m.zt")
+          w = ztensor.Writer(path)
+          w.add("a", [2], "f32", struct.pack("<2f", 1, 2))
+          w.finish()
+          src = ztensor.open(path)
+          assert struct.unpack("<2f", src.read("a")) == (1.0, 2.0)
+          assert ztensor.verify(path) == 1
+          assert src.caps("a")["tier"] >= 2
+          print("python smoke ok")
+          EOF

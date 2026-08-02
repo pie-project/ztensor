@@ -1,0 +1,22 @@
+[package]
+name = "benchmark"
+version = "0.0.0"
+publish = false
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ztensor = { path = "../ztensor", features = ["zstd"] }
+libc = "0.2"
+ztensor-compat = { path = "../ztensor-compat", features = [
+    "safetensors",
+    "gguf",
+    "npz",
+    "pickle",
+    "hdf5",
+    "onnx",
+] }
+
+[[bin]]
+name = "bench"
+path = "src/main.rs"
