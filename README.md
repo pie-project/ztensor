@@ -3,7 +3,12 @@
 An aligned, verifiable container format for tensor data — and one loader
 that reads every other tensor format into the same object model.
 
-**Crates 1.3.0 · Format `.zt` version 2 · Spec Draft 2**
+**Crates 2.0.0 · Format `.zt` version 2 · Spec Draft 2**
+
+*The crate version and the format version are not the same number and do not
+move together — 2.0 happens to be both because the API was rewritten while the
+container stayed frozen. A `.zt` file written by any 1.x release is read by 2.0
+unchanged.*
 
 ```rust
 // Read anything: .zt, .safetensors, .gguf, .npz, .pt, .h5, .onnx
