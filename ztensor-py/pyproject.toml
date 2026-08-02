@@ -6,8 +6,37 @@ build-backend = "maturin"
 name = "ztensor"
 version = "2.0.0"
 description = "Read any tensor format, write canonical .zt"
+readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
+authors = [{ name = "In Gim", email = "in.gim@icloud.com" }]
+keywords = ["tensor", "safetensors", "gguf", "checkpoint", "dlpack", "mmap"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Rust",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: System :: Archiving",
+]
+
+# numpy is not a dependency: tensors export DLPack and the buffer protocol, so
+# every framework reads them without this package importing any of them. It is
+# needed only by the `ztensor.numpy` migration shim, and by the tests.
+dependencies = []
+
+[project.optional-dependencies]
+numpy = ["numpy>=1.23"] # np.from_dlpack landed in 1.23
+
+[project.urls]
+Homepage = "https://github.com/pie-project/ztensor"
+Repository = "https://github.com/pie-project/ztensor"
+Changelog = "https://github.com/pie-project/ztensor/blob/main/CHANGELOG.md"
+Specification = "https://github.com/pie-project/ztensor/blob/main/spec/ztensor-v2-spec.md"
 
 [tool.maturin]
 module-name = "ztensor._ztensor"

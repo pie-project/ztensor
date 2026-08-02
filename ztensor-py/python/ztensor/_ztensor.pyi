@@ -2,6 +2,7 @@
 
 from collections.abc import Iterator, Sequence
 from types import TracebackType
+from typing import final
 
 __all__ = [
     "Caps",
@@ -17,6 +18,7 @@ __all__ = [
     "verify",
 ]
 
+@final
 class Caps:
     """What one part can do. Each field is the precondition of the operation
     it names."""
@@ -32,6 +34,7 @@ class Caps:
     @property
     def alignment(self) -> int: ...
 
+@final
 class Location:
     """Where a part's bytes are."""
 
@@ -42,6 +45,7 @@ class Location:
     @property
     def nbytes(self) -> int: ...
 
+@final
 class Tensor:
     """One tensor, or one part of one."""
 
@@ -65,7 +69,7 @@ class Tensor:
     def caps(self) -> Caps: ...
     @property
     def location(self) -> Location: ...
-    def __getitem__(self, part: str) -> Tensor: ...
+    def __getitem__(self, part: str, /) -> Tensor: ...
     def tobytes(self) -> bytes: ...
     def is_mapped(self) -> bool: ...
     def verify(self) -> bool: ...
@@ -74,6 +78,7 @@ class Tensor:
     def __dlpack__(self, stream: object | None = ...) -> object: ...
     def __dlpack_device__(self) -> tuple[int, int]: ...
 
+@final
 class Source:
     """A tensor file, or several read as one."""
 
@@ -86,8 +91,8 @@ class Source:
     def verify(self, deep: bool = ...) -> tuple[int, int]: ...
     def close(self) -> None: ...
     def __len__(self) -> int: ...
-    def __contains__(self, name: str) -> bool: ...
-    def __getitem__(self, name: str) -> Tensor: ...
+    def __contains__(self, name: str, /) -> bool: ...
+    def __getitem__(self, name: str, /) -> Tensor: ...
     def __iter__(self) -> Iterator[Tensor]: ...
     def __enter__(self) -> Source: ...
     def __exit__(
@@ -97,16 +102,17 @@ class Source:
         tb: TracebackType | None,
     ) -> bool: ...
 
+@final
 class Writer:
     """Writes `.zt` files."""
 
-    def __init__(
-        self,
+    def __new__(
+        cls,
         path: str,
         canonical: bool = ...,
         align: int | None = ...,
         publish: bool = ...,
-    ) -> None: ...
+    ) -> Writer: ...
     def add(
         self,
         name: str,

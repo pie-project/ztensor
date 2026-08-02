@@ -115,3 +115,11 @@ jobs:
           pip install --no-index --find-links target/wheels ztensor
           pip install pytest numpy
           pytest ztensor-py/tests -q
+
+      # The stubs are a second description of the same API, so something has
+      # to hold them to it. This caught four real mismatches the first time
+      # it ran, including a `__init__` that is a `__new__` at runtime.
+      - name: Stubs match the module
+        run: |
+          pip install mypy
+          python -m mypy.stubtest ztensor._ztensor --ignore-missing-stub

@@ -1,0 +1,119 @@
+name: Release
+
+# Tagging is the trigger, and the tag is the source of truth for the version:
+# the job refuses to publish if the manifests disagree with it.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: tag matches the manifests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compare
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          [ -n "$tag" ] || tag="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
+          crate="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
+          py="$(grep -m1 '^version' ztensor-py/pyproject.toml | cut -d'"' -f2)"
+          echo "tag=$tag crates=$crate python=$py"
+          test "$tag" = "$crate" || { echo "::error::tag $tag != crate $crate"; exit 1; }
+          test "$tag" = "$py" || { echo "::error::tag $tag != python $py"; exit 1; }
+
+  # Wheels are per-version because the bindings are not abi3: the buffer
+  # protocol is not in the limited API, and zero-copy is the point of them.
+  #
+  # Linux and macOS only. Windows is not tested (see README, "Platform
+  # support"), and shipping a wheel for a platform nobody has run would be
+  # claiming support that does not exist.
+  wheels:
+    name: wheel (${{ matrix.platform.target }}, py${{ matrix.python }})
+    needs: check
+    runs-on: ${{ matrix.platform.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.9", "3.10", "3.11", "3.12", "3.13"]
+        platform:
+          - { runner: ubuntu-latest, target: x86_64 }
+          - { runner: ubuntu-latest, target: aarch64 }
+          - { runner: macos-latest, target: x86_64 }
+          - { runner: macos-latest, target: aarch64 }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.platform.target }}
+          args: >-
+            --release
+            --out dist
+            --manifest-path ztensor-py/Cargo.toml
+            --interpreter python${{ matrix.python }}
+          manylinux: auto
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ matrix.platform.runner }}-${{ matrix.platform.target }}-${{ matrix.python }}
+          path: dist
+
+  sdist:
+    name: sdist
+    needs: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --out dist --manifest-path ztensor-py/Cargo.toml
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: dist
+
+  pypi:
+    name: publish to PyPI
+    needs: [wheels, sdist]
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write # trusted publishing; no token to leak
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: "{wheel-*,sdist}"
+          merge-multiple: true
+          path: dist
+      - run: ls -l dist
+      - uses: pypa/gh-action-pypi-publish@release/v1
+
+  # Order matters: a dependent crate cannot be verified until the crate it
+  # depends on is on the index.
+  crates:
+    name: publish to crates.io
+    needs: check
+    runs-on: ubuntu-latest
+    environment: crates-io
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Publish in dependency order
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -e
+          for crate in ztensor ztensor-compat ztensor-cli; do
+            echo "::group::$crate"
+            cargo publish -p "$crate"
+            # crates.io needs a moment before a dependent can resolve it.
+            sleep 30
+            echo "::endgroup::"
+          done
