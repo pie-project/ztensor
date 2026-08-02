@@ -16,10 +16,12 @@ use memmap2::Mmap;
 
 use crate::error::{Error, Result};
 
-/// Index of a [`Store`] within a [`Source`](crate::Source).
+/// Index of a [`Store`] within a [`Source`](crate::Source) — that is, the
+/// position in [`Source::stores`](crate::Source::stores).
 ///
-/// Process-local. Unrelated to a manifest's shard index, which is a claim one
-/// file makes about others; this is where the bytes actually are.
+/// Process-local, and unrelated to a manifest's shard name: a name is a claim
+/// one file makes about another, while this is where the bytes actually are,
+/// in this process, right now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct StoreId(pub u32);
 

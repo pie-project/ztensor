@@ -629,10 +629,18 @@ impl Source {
         &self.catalog
     }
 
+    /// Every file this source reads from, in the order that fixes their
+    /// [`StoreId`]s: `stores()[k]` is `StoreId(k)`.
     pub fn stores(&self) -> &[Store] {
         &self.stores
     }
 
+    /// The file an address names.
+    ///
+    /// # Panics
+    ///
+    /// If `id` did not come from this `Source`. Every [`Location`] this source
+    /// hands out carries a valid one; a `StoreId` built by hand may not.
     pub fn store(&self, id: StoreId) -> &Store {
         &self.stores[id.0 as usize]
     }
