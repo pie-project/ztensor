@@ -29,6 +29,10 @@ w.ingest(&src)?;
 w.finish()?;
 ```
 
+## What a `.zt` file is
+
+![The layout of a .zt file](../static/diagrams/file-layout.svg)
+
 ## Why another format
 
 The formats in use today each gave up something that matters for serving
@@ -48,20 +52,23 @@ canonical files, a vocabulary of versioned profiles instead of built-in
 quantization, no code execution anywhere, and an XXH3 digest per tensor
 plus one over the manifest.
 
+![Canonical .zt places every tensor on a page boundary; safetensors packs them back to back](../static/diagrams/alignment.svg)
+
+Placement is what the rest rests on. A tensor that owns its pages can be
+mapped, registered with a driver, and dropped from the page cache on its
+own; one that shares them cannot be touched without touching its
+neighbours.
+
 ## The three layers
 
 The format is organized so that the mortal parts can die without taking
 the rest with them:
 
-| Layer | Contents | Contract |
-| --- | --- | --- |
-| **L0 — Container** | Magic, 40-byte footer, aligned blob heap, byte order | **Frozen.** Never changes. |
-| **L1 — Manifest** | Deterministic-CBOR schema: objects, parts, blob references, shards | Gated by the footer's version integer; evolves rarely. |
-| **L2 — Vocabulary** | Layout profiles, logical types, encodings, digest algorithms | **Deliberately mortal.** Namespaced, versioned, registry-managed. |
+![L0 container, frozen; L1 manifest, version-gated; L2 vocabulary, deliberately mortal](../static/diagrams/layers.svg)
 
-A reader needs L0 and L1 to be useful at all; it can refuse anything in L2
-it does not recognize, and it must — silently reinterpreting unknown
-vocabulary is how formats produce wrong tensors instead of errors.
+Refusing unknown L2 vocabulary is not a limitation, it is the point:
+silently reinterpreting it is how a format produces wrong tensors instead
+of errors.
 
 See the [format specification](./spec.md) for the normative rules and
 [profiles](https://github.com/pie-project/ztensor/tree/main/spec/profiles)

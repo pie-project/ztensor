@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 232" width="720" height="232" role="img" aria-label="Three layers. L0, the container, is frozen. L1, the manifest, is gated by a version integer. L2, the vocabulary, is deliberately mortal and may be refused.">
+  <style>
+    text { font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .fg { fill: #1c1e21; }
+    .dim { fill: #57606a; }
+    .rule { stroke: #d0d7de; }
+    .edge { stroke: #b6bfc8; }
+    .fill-alt { fill: #f6f7f8; }
+    .accent { fill: #2b6cb0; }
+    .accent-s { stroke: #2b6cb0; }
+    .on-accent { fill: #ffffff; }
+    .pad { stroke: #b6bfc8; }
+    @media (prefers-color-scheme: dark) {
+      .fg { fill: #e3e3e3; }
+      .dim { fill: #a8a8a8; }
+      .rule { stroke: #3a3b3f; }
+      .edge { stroke: #4d4e53; }
+      .fill-alt { fill: #242526; }
+      .accent { fill: #78a9e0; }
+      .accent-s { stroke: #78a9e0; }
+      .on-accent { fill: #1b1b1d; }
+      .pad { stroke: #4d4e53; }
+    }
+  </style>
+  <rect x="96" y="20" width="604" height="52" rx="3" class="fill-alt edge" stroke-width="1" stroke-dasharray="5 4" />
+  <text class="mono accent" x="82" y="44" font-size="12" text-anchor="end">L2</text>
+  <text class="fg" x="112" y="42" font-size="14" font-weight="600">Vocabulary</text>
+  <text class="dim" x="112" y="60" font-size="11.5">Layout profiles, logical types, encodings, digest algorithms</text>
+  <text class="mono dim" x="684" y="42" font-size="10.5" text-anchor="end">Mortal — namespaced, versioned, refusable</text>
+  <rect x="96" y="82" width="604" height="52" rx="3" class="fill-alt edge" stroke-width="1" />
+  <text class="mono accent" x="82" y="106" font-size="12" text-anchor="end">L1</text>
+  <text class="fg" x="112" y="104" font-size="14" font-weight="600">Manifest</text>
+  <text class="dim" x="112" y="122" font-size="11.5">Deterministic CBOR: objects, parts, blob references, shards</text>
+  <text class="mono dim" x="684" y="104" font-size="10.5" text-anchor="end">Version-gated — evolves rarely</text>
+  <rect x="96" y="144" width="604" height="52" rx="3" class="fill-alt edge" stroke-width="2" />
+  <text class="mono accent" x="82" y="168" font-size="12" text-anchor="end">L0</text>
+  <text class="fg" x="112" y="166" font-size="14" font-weight="600">Container</text>
+  <text class="dim" x="112" y="184" font-size="11.5">Magic, 40-byte footer, aligned blob heap, byte order</text>
+  <text class="mono dim" x="684" y="166" font-size="10.5" text-anchor="end">Frozen — never changes</text>
+  <text class="dim" x="96" y="224" font-size="11.5">A reader needs L0 and L1 to be useful at all, and may refuse anything in L2 it does not know.</text>
+</svg>
