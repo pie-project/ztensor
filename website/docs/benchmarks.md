@@ -115,6 +115,34 @@ None of that is available at arbitrary alignment, which is why `caps().evict`
 is true only for files that have it. Files written at the 4 KiB floor, and
 every foreign format, report what they actually support instead.
 
+## A note on the 2.0 rewrite
+
+The figures on this page and in the README were measured against the 1.x read
+path. The 2.0 release rewrote the crate API but not the container, so the
+question was whether the new indirection cost anything. It was measured
+directly: the in-repo harness (`cargo run --release -p benchmark`) run
+alternately against `df9c1c6` (the last commit before the rewrite) and the
+2.0 tree, three rounds of nine runs each at 1 GiB.
+
+| Operation | 1.3 | 2.0 | |
+| --- | ---: | ---: | ---: |
+| read `.zt` zero-copy (warm) | 6.34 GB/s | 6.11 GB/s | −3.6% |
+| read `.safetensors` zero-copy (warm) | 6.96 GB/s | 6.84 GB/s | −1.7% |
+| read `.zt` zero-copy (cold) | 2.62 GB/s | 2.65 GB/s | +1.1% |
+| copy `.zt` into owned buffers | 10.08 GB/s | 9.48 GB/s | −6.0% |
+
+Reads are within a few percent, which is where the catalog indirection and the
+`Bytes` enum land. **Writes are not reported here because this harness cannot
+measure them at that size**: at 1 GiB the run-to-run spread on every write row
+exceeded 70%, since what is being timed is the kernel's writeback rather than
+the writer. At 512 MiB, where the spread falls to about ±5%, the two trees are
+indistinguishable (2.02–2.23 GB/s canonical write on both).
+
+**If you re-run this, pin `ZTENSOR_BENCH_DIR` for every tree you compare.** It
+defaults to `target/bench` beside the manifest, so two checkouts can easily
+land on different filesystems — measuring one on tmpfs and one on NVMe
+produced an apparent 40% write regression that was entirely the storage.
+
 ## Reproducing
 
 ```bash

@@ -272,7 +272,17 @@ fn main() {
         || {
             let mut total = 0usize;
             for n in &names {
-                total += reader.tensor(n).expect("tensor").bytes().expect("read").len();
+                // `into_owned` is the point of this row: `bytes()` hands back a
+                // borrow when the file is mapped, and timing that would be
+                // timing nothing.
+                let owned = reader
+                    .tensor(n)
+                    .expect("tensor")
+                    .bytes()
+                    .expect("read")
+                    .into_owned();
+                total += owned.len();
+                std::hint::black_box(&owned);
             }
             std::hint::black_box(total);
         },

@@ -68,8 +68,9 @@ arbitrary code can execute.
 | .onnx | **2.30 GB/s** | 0.82 GB/s | 0.81 GB/s ([onnx](https://github.com/onnx/onnx)) |
 | .h5 | **2.36 GB/s** | 0.95 GB/s | 1.47 GB/s ([h5py](https://github.com/h5py/h5py)) |
 
-*Llama 3.2 1B shapes (~2.8 GB). Linux, i9-13900K, NVMe SSD, median of 5 runs,
-cold reads. ONNX at 1 GB (protobuf limit). †Native zero-copy where available
+*Measured on the 1.x read path and re-verified against 2.0 (see
+[Benchmarks](website/docs/benchmarks.md#a-note-on-the-20-rewrite)); Llama 3.2 1B
+shapes (~2.8 GB). Linux, i9-13900K, NVMe SSD, median of 5 runs, cold reads. ONNX at 1 GB (protobuf limit). †Native zero-copy where available
 (GGUF mmap, SafeTensors `safe_open`). See
 [Benchmarks](website/docs/benchmarks.md) for details.*
 
