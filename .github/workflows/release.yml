@@ -94,6 +94,10 @@ jobs:
           path: dist
       - run: ls -l dist
       - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          # A release can fail halfway: 2.0.0 landed 20 wheels and no sdist,
+          # and the retry then has to be allowed to skip what is already up.
+          skip-existing: true
 
   # Order matters: a dependent crate cannot be verified until the crate it
   # depends on is on the index.
@@ -110,10 +114,18 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
           set -e
+          version="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
           for crate in ztensor ztensor-compat ztensor-cli; do
             echo "::group::$crate"
-            cargo publish -p "$crate"
-            # crates.io needs a moment before a dependent can resolve it.
-            sleep 30
+            # Already on the index means a previous run got this far, so the
+            # retry has nothing to do for this crate.
+            if curl -sf -H "User-Agent: ztensor-release" \
+                 "https://crates.io/api/v1/crates/$crate/$version" >/dev/null; then
+              echo "$crate $version is already published; skipping"
+            else
+              cargo publish -p "$crate"
+              # crates.io needs a moment before a dependent can resolve it.
+              sleep 30
+            fi
             echo "::endgroup::"
           done
