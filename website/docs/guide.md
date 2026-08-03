@@ -6,9 +6,9 @@ sidebar_position: 2
 
 ## Reading
 
-`open` sniffs the format and returns a [`Source`] — one type whether it is a
-`.zt` file, a sharded model, a foreign checkpoint, or a snapshot spread over
-several files.
+`open` detects the format and returns a [`Source`]. The same type comes back
+for a `.zt` file, a sharded model, a foreign checkpoint, or a snapshot spread
+over several files.
 
 ```rust
 let src = ztensor_compat::open("model.gguf")?;
@@ -20,16 +20,17 @@ for t in src.tensors() {
 let t = src.tensor("blk.0.attn_q.weight")?;
 let bytes = t.bytes()?;     // the best available; says which it gave
 let view = t.map()?;        // a borrow, or an error
-let at = t.locate()?;       // (store, offset, len) — read it yourself
+let at = t.locate()?;       // (store, offset, len) for your own read
 ```
 
 ### Three ways to get bytes
 
-Three methods because there are three intents. `bytes()` serves the caller who
-just wants the data and would rather not write the branch; `map()` serves the
-one whose plan is invalid without a borrow, and errors instead of quietly
-copying; `locate()` serves the one doing its own I/O — io_uring, cuFile, a
-staged host-to-device copy — and wants the address, not the bytes.
+There are three methods because callers want three different things.
+`bytes()` is for code that just wants the data and does not want to write the
+branch. `map()` is for code that needs a borrow and should fail if it cannot
+have one, so it errors rather than copying. `locate()` is for code doing its
+own I/O with io_uring, cuFile or a staged host-to-device copy, which needs
+the address rather than the bytes.
 
 ### Asking what a part supports
 
@@ -42,13 +43,14 @@ if caps.evict {
 }
 ```
 
-Every `Caps` field is named after the method it gates and is computed by that
-method's own precondition, so the report and the behaviour cannot drift apart.
+Each `Caps` field is named after the method it gates, and is computed from
+that method's own precondition. The report and the behaviour therefore stay
+in sync.
 
 ### Metadata without mapping
 
-When only the metadata is wanted — a planner deciding what to load — open
-without mapping:
+When you only need the metadata, for example in a planner deciding what to
+load, open the file without mapping it:
 
 ```rust
 let src = ztensor::Source::index("model.zt")?;   // header reads, no mapping
@@ -70,13 +72,13 @@ w.add("b.bias", [4096u64], DType::F32, &bias)?;
 w.finish()?;
 ```
 
-Two canonical writes of the same tensors produce **byte-identical files**, so a
+Two canonical writes of the same tensors produce byte-identical files, so a
 file's hash is a stable identity for the model.
 
 ### Building anything else
 
-`add` is the one-liner over `object`, which builds anything else — several
-parts, a layout profile, attributes, or a part streamed a chunk at a time:
+`add` is a shorthand for `object`, which builds everything else: several
+parts, a layout profile, attributes, or a part streamed a chunk at a time.
 
 ```rust
 w.object("q")
@@ -90,14 +92,16 @@ w.object("q")
 
 ### Leaving canonical form
 
-For non-distribution files — smaller alignment, compression, sharding — say so:
+For files that are not for distribution, ask for what you want instead:
+smaller alignment, compression, or sharding.
 
 ```rust
 let mut w = Writer::options().canonical(false).align(4096).create("scratch.zt")?;
 ```
 
-Alignment and canonical form are separate questions, and asking for one while
-meaning the other is refused rather than obeyed.
+Alignment and canonical form are separate options. Asking for an alignment
+while leaving canonical form on is an error, and the message says how to mean
+what you probably meant.
 
 ### Publishing atomically
 
@@ -119,10 +123,10 @@ w.ingest(&src)?;
 w.finish()?;
 ```
 
-This is the upgrade path: the foreign file has no digests and arbitrary
-alignment; the result has both, and pages of its own. Layouts survive the trip
-— a GGUF `q8_0` tensor stays a `gguf.q8_0/1` object with its block bytes
-intact, not a dequantized approximation.
+This is the upgrade path. The foreign file has no digests and arbitrary
+alignment; the result has digests and 64 KiB placement. Layouts are preserved:
+a GGUF `q8_0` tensor stays a `gguf.q8_0/1` object with its block bytes intact,
+so nothing is dequantized along the way.
 
 ## Verifying
 
@@ -132,23 +136,22 @@ src.tensor("a.weight")?.verify()?;   // digest + logical-type content rules
 src.verify_shards()?;                // whole-file digests of every shard
 ```
 
-`verify` returns `Verified::Digest` when it checked one and
-`Verified::NoDigest` when there was none to check; a *mismatch* is
-`Err(Reject { rule: Digest, .. })`, because that is a rejected file rather than
-an answer.
+`verify` returns `Verified::Digest` when it checked a digest and
+`Verified::NoDigest` when the part carries none. A mismatch comes back as
+`Err(Reject { rule: Digest, .. })`, since the file has failed a rule.
 
-### The ladder is cheapest-first
+### What is checked when
 
-Structure and the manifest hash are checked at
-open, per-part digests when you ask, whole-shard digests only in
-`verify_shards`. Hashing 100 GB on every load would be a tax nobody pays, so it
-is opt-in.
+Structure and the manifest hash are checked when the file is opened. Per-part
+digests are checked when you ask for them, and whole-shard digests only in
+`verify_shards`. Hashing 100 GB on every load would be too slow to be
+practical, so the expensive checks are opt-in.
 
 ## Sharded models and overlays
 
 A multi-file model is one root manifest plus data shards. The root names each
-shard, but a name is only a label: identity is `(size, digest)`, so renaming a
-model cannot break or change it.
+shard, but the name is only a label. A shard's identity is its size and
+digest, so renaming the files does not break the model or change it.
 
 ```rust
 let model = ztensor::Source::open("model.zt")?;   // positional resolver
@@ -156,10 +159,10 @@ let model = ztensor::Source::open("model.zt")?;   // positional resolver
 
 ### Finding the shards
 
-A resolver turns a name into bytes, and can ignore the name entirely:
+A resolver turns a shard name into a file. It can also ignore the name:
 
 ```rust
-// Match on size and digest instead — the one convention that survives a rename.
+// Match on size and digest instead, which still works after a rename.
 let model = ztensor::Source::options()
     .resolver(ztensor::DirectoryResolver::scan("checkpoint/")?)
     .open("checkpoint/model.zt")?;
@@ -168,8 +171,8 @@ let model = ztensor::Source::options()
 ### Overlays
 
 Because a part may name a shard, a file can reference another model's blobs.
-That is how an overlay works: a LoRA stores only its deltas and points at the
-base model's tensors.
+An overlay uses this: a LoRA stores only its deltas and points at the base
+model's tensors.
 
 ```rust
 let base = ztensor::Source::open("base.zt")?;
@@ -182,17 +185,18 @@ w.add("base.weight.lora_a", [64u64], DType::F32, &delta)?;
 w.finish()?;
 ```
 
-### A set nobody wrote together
+### Files that were not written together
 
-A set of files that were *not* written for each other — a sharded safetensors
-snapshot — is the other shape, and it is not the same claim:
+A sharded safetensors snapshot is a different case. The files were not written
+for each other, and opening them together makes a weaker claim:
 
 ```rust
 let src = ztensor_compat::open_all(&paths)?;   // one name space, nothing verified
 ```
 
-Nothing binds that set but the caller's list, so nothing pretends to verify it.
-What it checks is that the names do not collide.
+The only thing tying the set together is the caller's list, so there is
+nothing to verify it against. What `open_all` does check is that no tensor
+name appears in two files.
 
 ## Streaming weights
 
@@ -207,9 +211,8 @@ t.prefetch()?;   // MADV_WILLNEED
 t.evict()?;      // MADV_DONTNEED, exact range
 ```
 
-`evict` refuses when a part shares a page with another blob rather than
-dropping a neighbour's cache — the check that makes 64 KiB placement worth its
-padding.
+`evict` refuses when a part shares a page with another blob, so it will not
+drop a neighbour's cache.
 
 ## Python
 

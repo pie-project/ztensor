@@ -7,12 +7,12 @@ slug: /
 
 zTensor is two things:
 
-1. **A container format** (`.zt`) for tensor data — aligned, verifiable,
-   and designed so that the parts of it that must never change are
-   separated from the parts that are expected to.
-2. **A universal loader** — one API that reads `.safetensors`, `.gguf`,
-   `.npz`, PyTorch `.pt`, HDF5, and ONNX by projecting each into the same
-   object model, and writes exactly one format: canonical `.zt`.
+1. **A container format** (`.zt`) for tensor data. Tensors are aligned and
+   carry digests, and the format keeps its frozen parts separate from the
+   parts that are expected to change.
+2. **A universal loader**. One API reads `.safetensors`, `.gguf`, `.npz`,
+   PyTorch `.pt`, HDF5 and ONNX by projecting each into the same object
+   model. It writes one format: canonical `.zt`.
 
 ```rust
 use ztensor::{Source, Writer};
@@ -33,56 +33,57 @@ w.finish()?;
 
 ![The layout of a .zt file](../static/diagrams/file-layout.svg)
 
-Read the last 40 bytes and you know where the manifest is; read the
-manifest and you know where every tensor is.
+The last 40 bytes point at the manifest, and the manifest gives the location
+of every tensor.
 
 
 ## Why another format
 
-The formats in use today each gave up something that matters for serving
-large models:
+Each of the formats in common use gives up something that matters when
+serving large models:
 
 - **Alignment.** safetensors packs tensors back to back, so a tensor
   rarely starts on a page boundary. You cannot map, register, or evict one
   tensor without touching its neighbours.
 - **Extensibility.** GGUF encodes each quantization scheme into the
   container itself, so every new scheme is a format change.
-- **Safety.** `.pt` is pickle: reading it is executing it.
+- **Safety.** `.pt` is pickle, so reading a file executes whatever code it
+  contains.
 - **Verifiability.** None of them carry per-tensor digests, so a corrupt
   byte surfaces as a wrong answer rather than an error.
 
 ### What `.zt` does instead
 
-`.zt` fixes those without inventing a new problem: 64 KiB placement in
-canonical files, a vocabulary of versioned profiles instead of built-in
-quantization, no code execution anywhere, and an XXH3 digest per tensor
-plus one over the manifest.
+Canonical `.zt` files place tensors on 64 KiB boundaries. Quantization
+schemes live in a registry of versioned profiles instead of the container.
+Nothing in the format executes code. Every tensor carries an XXH3 digest, and
+so does the manifest.
 
 ![In canonical .zt every page holds one tensor; packed back to back, two pages end up holding two tensors each](../static/diagrams/alignment.svg)
 
-The page is the unit the operating system deals in, so it is also the unit
-of ownership. A tensor whose pages are its own can be mapped, registered
-with a driver, and dropped from the cache without touching anything else.
+The page is the unit the operating system works in. A tensor that has its
+pages to itself can be mapped, registered with a driver, and dropped from
+the cache without affecting anything else.
 
 ## The three layers
 
-The format is organized so that the mortal parts can die without taking
-the rest with them:
+The format separates the parts that are frozen from the parts that are
+expected to change:
 
 ![The three layers: bytes in L0, a manifest record in L1, vocabulary identifiers in L2, and above them a framework that decides what the values mean](../static/diagrams/layers.svg)
 
-A manifest entry says where a tensor *is* by naming a byte range in L0, and
-what it *is* by naming a profile in L2 — so the layer that is allowed to
-change never touches the layer that is not.
+A manifest entry gives a tensor's location as a byte range in L0, and its
+meaning as a profile name in L2. Adding a profile to L2 does not change L1
+or L0.
 
-### A name is checked, not interpreted
+### How L2 names are handled
 
-What zTensor does with an L2 name is check it and hand it over. Deciding
-that `zt.quant_group/1` with an `f4_e2m1` payload and `f8_e8m0` scales
-dequantizes to bf16 is the framework's business, not the format's. A name
-it does not know is refused rather than guessed at, because silently
-reinterpreting one is how a format returns a wrong tensor instead of an
-error.
+zTensor checks an L2 name against its registry and passes it through. It
+does not act on it. Working out that `zt.quant_group/1` with an `f4_e2m1`
+payload and `f8_e8m0` scales dequantizes to bf16 is the framework's job.
+
+An unregistered name is an error. If zTensor guessed instead, it would
+hand back a tensor that looks fine and holds the wrong numbers.
 
 See the [format specification](./spec.md) for the normative rules and
 [profiles](https://github.com/pie-project/ztensor/tree/main/spec/profiles)
@@ -90,20 +91,19 @@ for the registry.
 
 ## One model, several files
 
-A part may name a shard, so a manifest can address bytes in files other than
-its own. That is all sharding is. A part that names none lives here, which is
-why a single-file model never mentions sharding at all — the one file is the
-degenerate case, not a special case.
+A part may name a shard, which lets a manifest address bytes in files other
+than its own. That is all sharding is. A part that names no shard lives in
+the containing file, so a single-file model never mentions sharding at all.
 
-The name is only a label. What the table records is **size and digest**, so
-moving or renaming the files cannot break or silently change a model.
+The name is only a label. The shard table records size and digest, so moving
+or renaming the files cannot break a model or silently change it.
 
 ![A root manifest naming shards by size and digest; the shards are containers with no manifest of their own](../static/diagrams/sharding.svg)
 
 ### Overlays
 
-The same mechanism is how an overlay works: a LoRA stores only its deltas
-and points at the base model's blobs, without copying them.
+Overlays use the same mechanism. A LoRA stores only its deltas and points at
+the base model's blobs instead of copying them.
 
 ## Performance
 
@@ -112,7 +112,8 @@ and points at the base model's blobs, without copying them.
 
 ### Reading
 
-One mmap-backed API across every format, against each format's own library.
+One mmap-backed API across every format, compared against each format's own
+library.
 
 | Source format | zTensor | zTensor (zc off) | Reference impl. |
 |---|---|---|---|
@@ -143,15 +144,14 @@ Each format written by its own reference implementation, three workloads at
 | onnx | 0.29 GB/s | 0.30 GB/s | 0.35 GB/s |
 | hdf5 | **6.13 GB/s** | 5.96 GB/s | 0.28 GB/s |
 
-zTensor is not the fastest writer, because it is not writing the same file: a
-canonical write hashes every byte, pads to 64 KiB, and shares blobs between
-identical tensors. That cost is paid once per artifact rather than on every
-load.
+zTensor is not the fastest writer, because it is not writing the same file.
+A canonical write hashes every byte, pads to 64 KiB and shares blobs between
+identical tensors. You pay that once when the artifact is written, not on
+each load.
 
 ## The capability ladder
 
-Different files support different things, and the API says so rather than
-pretending otherwise:
+Different files support different operations, and the API reports which:
 
 | Operation | What it gives you | Where it works |
 | --- | --- | --- |
@@ -161,9 +161,9 @@ pretending otherwise:
 | `verify()` | a digest check | `.zt` |
 | `evict()` | drops these pages without touching a neighbour's | page-exclusive parts |
 
-`caps()` reports which of those will work, per part, and `map()` returns an
-error rather than silently falling back to a copy. To get what a foreign
-checkpoint cannot offer, convert it — that is what `ingest` is for.
+`caps()` reports which of these will work for a given part. `map()` returns
+an error instead of falling back to a copy. If a foreign checkpoint does not
+support what you need, convert it with `ingest`.
 
 ## Getting started
 

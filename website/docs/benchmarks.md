@@ -7,7 +7,7 @@ sidebar_position: 5
 *Linux, i9-13900K, 61 GiB RAM, Samsung 980 PRO NVMe, ext4. Median of 5 runs
 after 1 warmup; cold reads drop the page cache with
 `posix_fadvise(POSIX_FADV_DONTNEED)`. Both zero-copy and copy modes are shown
-where applicable. Reproduce with `benchmark/bench.py` — every number below is
+where applicable. Reproduce with `benchmark/bench.py`; every number below is
 its output.*
 
 ## Cross-format reading
@@ -26,17 +26,16 @@ By default (`copy=False`) zTensor returns
 mmap-backed arrays with no memory copy; `copy=True` reads into owned arrays.
 The spread between the two columns is the memcpy, and it is most of the cost:
 once the bytes have to be copied, every format converges on what memory
-bandwidth allows. The formats with real serialization overhead — pickle for
-`.pt`, zip for `.npz`, protobuf for `.onnx` — stay slower in both modes because
-that work does not go away.
+bandwidth allows. Formats with real serialization overhead stay slower in
+both modes, because that work does not go away: pickle for `.pt`, zip for
+`.npz`, protobuf for `.onnx`.
 
-### Where zTensor does not win
+### Where GGUF is faster
 
-GGUF's own reader is faster on its own files
-(2.52 vs 2.37 GB/s): it maps the file and hands back block pointers, which is
-the same thing zTensor does with one more layer of indirection. Reading is not
-where a container format earns its keep; the columns above are close because
-they are all measuring the same mmap.
+GGUF's own reader beats zTensor on its own files, 2.52 against 2.37 GB/s. It
+maps the file and hands back block pointers, which is what zTensor does with
+one more layer of indirection. The columns are close because they are all
+measuring the same mmap.
 
 ### Safety
 
@@ -58,17 +57,17 @@ Each format written by its own reference implementation, three workloads at
 
 *The table is on the [introduction](./intro.md#writing).*
 
-zTensor is not the fastest writer, and the reason is that it is not writing the
-same file. Canonical form places every tensor on a 64 KiB boundary, computes an
-XXH3 digest for each one, and shares a blob between byte-identical tensors — so
-a canonical write hashes all the bytes and pads between them. safetensors
-writes a header and then concatenates. That is a real cost of a real guarantee,
-and it is paid once per artifact rather than on every load.
+zTensor is not the fastest writer, because it is not writing the same file.
+Canonical form places every tensor on a 64 KiB boundary, computes an XXH3
+digest for each one, and shares a blob between byte-identical tensors, so a
+canonical write hashes all the bytes and pads between them. safetensors writes
+a header and concatenates. The extra work buys the digests and the alignment,
+and you pay for it once per artifact instead of on every load.
 
 ## Alignment is a tradeoff {#alignment-is-a-tradeoff}
 
-The padding is per *tensor*, not per byte — about 32 KiB on average — so what
-it costs depends entirely on how large the tensors are:
+The padding is per tensor rather than per byte, about 32 KiB on average, so
+what it costs depends on how large the tensors are:
 
 | Workload | 4 KiB floor | 64 KiB canonical |
 |---|---|---|
@@ -76,19 +75,19 @@ it costs depends entirely on how large the tensors are:
 | Mixed (realistic shapes) | 1.00× payload, 2.05 GB/s | 1.00× payload, 1.23 GB/s |
 | **Small (~10 KB tensors)** | **1.21× payload, 1.32 GB/s** | **6.41× payload, 0.39 GB/s** |
 
-For a transformer checkpoint — weight matrices in the tens to hundreds of
-megabytes — 64 KiB placement is free, and it buys per-tensor mapping and
-eviction on every page size in use (4 KiB x86/ARM, 16 KiB Apple silicon, 64 KiB
-ARM64 distributions). For a model made of many tiny tensors it is ruinous: 51k
-tensors each rounded to a page turn 512 MB into 3.4 GB, and every read then
-pays for the padding too.
+For a transformer checkpoint, where weight matrices run to tens or hundreds
+of megabytes, 64 KiB placement costs nothing measurable and gives per-tensor
+mapping and eviction on every page size in use (4 KiB x86/ARM, 16 KiB Apple
+silicon, 64 KiB ARM64 distributions). For a model made of many tiny tensors it
+is very expensive: 51k tensors each rounded up to a page turn 512 MB into
+3.4 GB, and every read then pays for the padding as well.
 
 ### A known limitation
 
-Blanket
-alignment is the wrong default for small-tensor models, and the fix is to align
-*selectively* — only tensors large enough that a page of padding is noise
-against them. Until the spec says so, use
+Blanket alignment is the wrong default for small-tensor models. The fix is to
+align
+selectively, aligning only tensors large enough that a page of padding does
+not matter. Until the spec covers that, use
 `Writer::options().canonical(false).align(4096).create(path)`
 (`zt convert --align 4096`, `ztensor.numpy.save_file(..., align=4096)`) for
 checkpoints of that shape.
@@ -100,9 +99,9 @@ checkpoints of that shape.
   streaming loader can release weights it has finished with.
 - The offsets satisfy O_DIRECT and GPUDirect Storage block alignment.
 
-None of that is available at arbitrary alignment, which is why `caps().evict`
-is true only for files that have it. Files written at the 4 KiB floor, and
-every foreign format, report what they actually support instead.
+None of that works at arbitrary alignment, so `caps().evict` is true only for
+files that have 64 KiB placement. Files written at the 4 KiB floor, and every
+foreign format, report what they support.
 
 ## A note on the 2.0 rewrite
 
@@ -120,8 +119,8 @@ alternately against `df9c1c6` (the last commit before the rewrite) and the
 | read `.zt` zero-copy (cold) | 2.62 GB/s | 2.65 GB/s | +1.1% |
 | copy `.zt` into owned buffers | 10.08 GB/s | 9.48 GB/s | −6.0% |
 
-Reads are within a few percent, which is where the catalog indirection and the
-`Bytes` enum land. **Writes are not reported here because this harness cannot
+Reads are within a few percent, which is the cost of the catalog indirection
+and the `Bytes` enum. **Writes are not reported here because this harness cannot
 measure them at that size**: at 1 GiB the run-to-run spread on every write row
 exceeded 70%, since what is being timed is the kernel's writeback rather than
 the writer. At 512 MiB, where the spread falls to about ±5%, the two trees are
@@ -131,8 +130,8 @@ indistinguishable (2.02–2.23 GB/s canonical write on both).
 
 `ZTENSOR_BENCH_DIR` matters for every tree you compare. It
 defaults to `target/bench` beside the manifest, so two checkouts can easily
-land on different filesystems — measuring one on tmpfs and one on NVMe
-produced an apparent 40% write regression that was entirely the storage.
+land on different filesystems. Measuring one on tmpfs and one on NVMe
+produced an apparent 40% write regression that turned out to be the storage.
 
 ## Reproducing
 
