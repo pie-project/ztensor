@@ -6,7 +6,7 @@ and the `ztensor` Python package, which are versioned together.
 The **file format is versioned separately**: `.zt` is container version 2,
 spec **Draft 4**.
 
-## 2.2.0
+## 2.1.0
 
 ### Format (spec Draft 4)
 
@@ -26,40 +26,6 @@ spec **Draft 4**.
   This is also why a canonical multi-file profile stays deferred. The reason
   to pin a shard-partition policy was to keep identity stable across splits,
   and identity is now stable without one.
-
-### Added
-
-- **`Manifest::content_digest`** and **`zt id`**, computing the above.
-- **`validate::canonical_violations`** and **`zt verify --canonical`** decide
-  whether a file is in canonical form and name every rule it breaks. The spec
-  calls canonical form the recommended distribution format, which is only
-  worth saying if the receiver can tell; nothing is stored in a file to say
-  it, and nothing needs to be, since all six rules of §6.3 are decidable from
-  the bytes.
-- **`DigestAlgorithm`**, with `sha256` alongside `xxh3`, plus
-  `shard_identity_with` and `DataShardWriter::create_with`. §6.5 makes a
-  cryptographic shard digest the thing that lets one signature over a root
-  cover every shard byte, and that was previously impossible to produce
-  through the API. Verification takes whatever algorithm a file used, so a
-  build cannot write digests it is unable to check.
-
-### Fixed
-
-- **`Writer::append` overwrote the manifest it was replacing.** §2.5 requires
-  that a writer never truncate or overwrite existing bytes: prior manifests
-  stay in the file as unreferenced blobs, and the footer at EOF decides what
-  the file means. Appending now writes past the old end and never truncates,
-  which also makes a crashed append recoverable by truncating back to the old
-  length.
-- **`Writer::append` dropped the file's alignment**, taking the 4 KiB floor
-  regardless of how the file had been written. A 64 KiB model gained tensors
-  on 4 KiB boundaries, losing per-tensor page exclusivity on every host with
-  pages larger than 4 KiB, which the machine that wrote the file would never
-  see. The alignment is now read back from the offsets already in the file.
-
-## 2.1.0
-
-The format is unchanged; this adds one thing to the writer.
 
 ### Added
 
@@ -84,12 +50,21 @@ The format is unchanged; this adds one thing to the writer.
   Canonical form forbids unreferenced blobs (§6.3 rule 1), which an append
   leaves behind, so this needs `.canonical(false)`.
 
-### Fixed
+- **`Manifest::content_digest`** and **`zt id`**, computing the digest above.
 
-- `Writer::abandon` deleted the file it was given. That was right for a
-  writer that created the file and wrong for one appending to a file it did
-  not own. Abandoning or dropping an append now discards the buffered bytes
-  instead of flushing them, and leaves the file alone.
+- **`validate::canonical_violations`** and **`zt verify --canonical`** decide
+  whether a file is in canonical form and name every rule it breaks. The spec
+  calls canonical form the recommended distribution format, which is only
+  worth saying if the receiver can tell; nothing is stored in a file to say
+  it, and nothing needs to be, since all six rules of §6.3 are decidable from
+  the bytes.
+
+- **`DigestAlgorithm`**, with `sha256` alongside `xxh3`, plus
+  `shard_identity_with` and `DataShardWriter::create_with`. §6.5 makes a
+  cryptographic shard digest the thing that lets one signature over a root
+  cover every shard byte, and that was previously impossible to produce
+  through the API. Verification takes whatever algorithm a file used, so a
+  build cannot write digests it is unable to check.
 
 ## 2.0.0
 

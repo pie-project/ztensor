@@ -3,7 +3,7 @@
 An aligned, verifiable container format for tensor data, and one loader
 that reads every other tensor format into the same object model.
 
-**Crates 2.2.0 · Format `.zt` version 2 · Spec Draft 4**
+**Crates 2.1.0 · Format `.zt` version 2 · Spec Draft 4**
 
 *The crate version and the format version are not the same number and do not
 move together.*
