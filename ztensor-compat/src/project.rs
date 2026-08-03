@@ -2,8 +2,8 @@
 //!
 //! A projection reads a file's own metadata and says three things: what
 //! tensors are in it and where ([`Catalog`]), which byte ranges the file
-//! occupies (so page exclusivity can be decided rather than guessed), and —
-//! for formats whose bytes are not simply lying there — how to produce the
+//! occupies (so page exclusivity can be decided rather than guessed), and,
+//! for formats whose bytes are not simply lying there, how to produce the
 //! ones that have no address.
 //!
 //! It never builds a [`Manifest`](ztensor::schema::Manifest). A safetensors

@@ -2,7 +2,7 @@
 """Builds the docs site into `_site/`.
 
 A documentation site and nothing more: a nav bar, a sidebar, the page. The
-docs are the content — there is no landing page, because `intro.md` carries
+docs are the content. There is no landing page, because `intro.md` carries
 `slug: /` and is the front page, which is how this site was always arranged.
 
 No generator, no node_modules; the output is HTML, CSS and two SVGs.
@@ -247,8 +247,8 @@ def sections(html: str) -> list[tuple[str, str]]:
     """The `##` headings of a page, as `(id, text)`.
 
     Only `##`. A sidebar that listed every `###` would be longer than the page
-    it navigates — the spec alone has dozens — and the point of the nesting is
-    to show a page's shape, not to reproduce it.
+    it navigates, since the spec alone has dozens. The nesting is there to
+    show a page's shape rather than reproduce it.
     """
     return [
         (anchor, re.sub(r"<[^>]+>", "", text).strip())
@@ -290,9 +290,9 @@ def build() -> None:
     for i, (md_name, title, slug) in enumerate(PAGES):
         source, html, _ = rendered[i]
         # Cross-doc links are written as `./other.md`; here they are pages.
-        # A page may be reached by its source filename or by its slug — the
+        # A page may be reached by its source filename or by its slug. The
         # spec is written as `./spec.md` but lives in `spec/` under its own
-        # name — so both spellings resolve.
+        # name, so both spellings resolve.
         for other_md, _, other_slug in PAGES:
             stems = {Path(other_md).stem, Path(other_slug).stem}
             for stem in stems:

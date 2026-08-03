@@ -6,7 +6,7 @@
 //! exported files honest.
 //!
 //! Every case states the operation it exercises and the exact expected
-//! outcome — for rejections, the specific spec rule.
+//! outcome. For rejections that means the specific spec rule.
 
 use xxhash_rust::xxh3::xxh3_64;
 use ztensor::cbor::{self, Value};
@@ -144,7 +144,7 @@ pub fn assemble(data_end: u64, m: &Value) -> Vec<u8> {
     assemble_raw(data_end, &cbor::encode(m).unwrap())
 }
 
-/// `assemble`, then overwrite data-region bytes at the given offsets —
+/// `assemble`, then overwrite data-region bytes at the given offsets, for
 /// for cases whose *data* (not metadata) must be hostile.
 pub fn assemble_with_data(data_end: u64, m: &Value, writes: &[(u64, Vec<u8>)]) -> Vec<u8> {
     let mut bytes = assemble(data_end, m);
@@ -159,7 +159,7 @@ fn le_u64s(vals: &[u64]) -> Vec<u8> {
 }
 
 /// A metadata-valid `zt.sparse_csr/1` file: shape [2, 3], nnz 3, u64
-/// indices at 4096, indptr at 8192, f32 values at 12288 — with the given
+/// indices at 4096, indptr at 8192, f32 values at 12288, with the given
 /// index data planted.
 fn csr_file(indices: &[u64], indptr: &[u64]) -> Vec<u8> {
     let m = manifest(vec![(
@@ -468,7 +468,7 @@ pub fn all_cases() -> Vec<Case> {
         ),
         // A blob in another file is a valid *image*: whether that file is
         // there, and whether it is the file the root meant, are questions for
-        // resolution — a different rung, and a different test.
+        // resolution, which is a different rung and a different test.
         op: Op::Open,
         expect: Expect::Valid,
     });

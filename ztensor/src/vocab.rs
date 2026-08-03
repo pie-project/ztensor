@@ -1,4 +1,4 @@
-//! L2 vocabulary: layouts, encodings, and logical types — as a value.
+//! L2 vocabulary: layouts, encodings and logical types, held as a value.
 //!
 //! A profile is the code form of a registry mini-spec: implementable from its
 //! text alone, and a reader that does not know one refuses to interpret rather
@@ -23,7 +23,7 @@ use crate::schema::{DType, Object};
 
 /// A layout profile: how an object's parts combine into a tensor.
 ///
-/// `validate` runs at open time (and at write time) on metadata only — part
+/// `validate` runs at open time (and at write time) on metadata only. Part
 /// names, dtypes, and decoded sizes. Data-level rules (e.g. CSR index
 /// monotonicity) run when the object is actually assembled.
 pub trait Layout: Send + Sync {
@@ -173,7 +173,7 @@ impl Vocabulary {
     }
 
     /// Decoded byte size of `elems` elements of `dtype` seen through
-    /// `logical`. `None` when the logical type is unregistered — the size is
+    /// `logical`. `None` when the logical type is unregistered, so the size is
     /// then simply unknown, and callers stay structural.
     pub fn size_of(&self, logical: Option<&str>, dtype: DType, elems: u64) -> Option<u64> {
         match logical {
@@ -330,7 +330,7 @@ impl Layout for Dense {
 struct SparseCsr;
 
 /// `nnz` is derived from `indices` (whose size function is exact), then
-/// `values` is validated against it — this stays well-defined even when
+/// `values` is validated against it, so this stays well-defined even when
 /// `values` uses a packed sub-byte type.
 impl Layout for SparseCsr {
     fn id(&self) -> &str {

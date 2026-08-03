@@ -1,4 +1,4 @@
-//! `zt` — inspect, verify, convert, and diff tensor files.
+//! `zt`: inspect, verify, convert and diff tensor files.
 //!
 //! Reads every format the compat crate knows (safetensors, gguf, npz, torch
 //! .pt, hdf5, onnx) and writes exactly one: canonical `.zt`.
@@ -11,7 +11,7 @@ use ztensor::{Error, Verified, Writer};
 use ztensor_compat::{detect, open};
 
 const USAGE: &str = "\
-zt — tensor file tool (zTensor v2)
+zt: tensor file tool (zTensor v2)
 
 USAGE:
     zt ls <file>                  list tensors, shapes, and layouts
@@ -20,7 +20,7 @@ USAGE:
                [--align <bytes>]  non-canonical placement (power of two >= 4096)
     zt diff <a> <b>               compare two tensor files by content
 
-Reads: .zt, .safetensors, .gguf, .npz, .pt, .h5, .onnx — writes: .zt only.";
+Reads: .zt, .safetensors, .gguf, .npz, .pt, .h5, .onnx. Writes: .zt only.";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -82,9 +82,9 @@ fn shape_str(shape: &[u64]) -> String {
 fn ls(path: &Path) -> Result<ExitCode, Error> {
     let format = detect(path)?;
 
-    // A `.zt` root is listed from its own manifest, with nothing resolved, so
-    // `ls` still answers when the shard files are not here — listing is a
-    // question about this file.
+    // A `.zt` root is listed from its own manifest, with nothing resolved,
+    // so `ls` still answers when the shard files are absent. Listing is a
+    // question about this file alone.
     if format == "zt" {
         let Some(manifest) = ztensor::manifest_of(path)? else {
             println!("{}: zt data shard (no manifest)", path.display());
@@ -191,7 +191,7 @@ fn verify(path: &Path, deep: bool) -> Result<ExitCode, Error> {
     }
     let shard_count = src.manifest().map(|m| m.shards.len()).unwrap_or(0);
     println!(
-        "{}: ok — {verified} part(s) digest-verified, {undigested} without digests{}{}",
+        "{}: ok. {verified} part(s) digest-verified, {undigested} without digests{}{}",
         path.display(),
         if shard_count == 0 {
             String::new()

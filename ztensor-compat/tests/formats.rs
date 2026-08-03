@@ -388,7 +388,7 @@ mod onnx {
     }
 
     /// f16 stored in int32_data: one element per int32 (v1 assembled these
-    /// as 4-byte ints — silently wrong sizes).
+    /// as 4-byte ints, giving silently wrong sizes).
     #[test]
     fn f16_in_int32_data() {
         // two f16 1.0 values (0x3c00) as packed varints
@@ -581,7 +581,7 @@ mod pt {
     }
 }
 
-/// `FORMATS` must list exactly what `detect` can return — it is only useful to
+/// `FORMATS` must list exactly what `detect` can return, since it is only useful to
 /// a consumer building a table from it if it is complete.
 #[test]
 fn every_detected_label_is_listed() {

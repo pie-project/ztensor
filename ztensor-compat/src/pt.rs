@@ -7,8 +7,8 @@
 //! code**: it recognizes exactly the reconstruction patterns torch uses
 //! (`persistent_load` storage tuples, `torch._utils._rebuild_tensor_v2`,
 //! `collections.OrderedDict`) and materializes everything else as opaque.
-//! Anything that would require reinterpreting bytes to "make work" — an
-//! unknown storage dtype, a non-contiguous stride — is a loud refusal.
+//! Anything that would require reinterpreting bytes to "make work" is a loud
+//! refusal: an unknown storage dtype, or a non-contiguous stride.
 //!
 //! This module is feature-gated (`pickle`): parsing pickle at all is a
 //! larger attack surface than any other format here, and enabling it is an
@@ -167,7 +167,7 @@ impl<'a> Vm<'a> {
     }
 
     /// Pops back to the most recent MARK. `marks` tracks mark positions so
-    /// this is O(popped items) — a linear rescan would make N mark-less
+    /// this is O(popped items). A linear rescan would make N mark-less
     /// POP_MARKs quadratic.
     fn pop_to_mark(&mut self) -> Vec<Val> {
         match self.marks.pop() {
@@ -678,7 +678,7 @@ enum StorageLoc {
 /// Tensors that live inside a compressed storage.
 ///
 /// A `.pt` tensor is a window into a storage, and a compressed storage has no
-/// window until it is inflated — so these have no address, and the whole
+/// window until it is inflated, so these have no address and the whole
 /// storage is cached once rather than inflated per tensor.
 struct Compressed {
     archive: std::sync::Mutex<zip::ZipArchive<File>>,

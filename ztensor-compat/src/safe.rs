@@ -3,7 +3,7 @@
 //! Every offset and length in a foreign file is attacker-controlled. The
 //! rule in this crate: never cast a file-derived `u64` to `usize` with
 //! `as`, never add two of them bare, never index a slice with them
-//! directly — go through these helpers, which turn every hostile value
+//! directly. Go through these helpers, which turn every hostile value
 //! into an `Err` instead of a panic (debug), a wrapped guard (release), or
 //! a truncation (32-bit).
 

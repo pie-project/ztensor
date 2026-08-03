@@ -1,7 +1,7 @@
 //! Several self-describing files read as one.
 //!
-//! This is the shape every foreign snapshot arrives in — a sharded
-//! safetensors checkpoint is N complete files with an index beside them — and
+//! Every foreign snapshot arrives in this shape. A sharded safetensors
+//! checkpoint is N complete files with an index beside them, and
 //! it is not the shape `sharding.rs` covers. There, a root states each shard's
 //! size and digest and opening the model checks them. Here nothing binds the
 //! set but the caller's list, so nothing is verified and nothing pretends to
@@ -53,7 +53,7 @@ fn tensors_are_one_name_space_that_remembers_its_files() {
     assert_eq!(src.tensor("layer.1.weight").unwrap().map().unwrap(), &b[..]);
 }
 
-/// An offset belongs to the file that holds it, which is what makes the pair
+/// An offset belongs to the file that holds it, which is why the pair
 /// (store, offset) a complete address and a bare offset a meaningless one.
 #[test]
 fn offsets_stay_relative_to_their_own_file() {
@@ -64,7 +64,7 @@ fn offsets_stay_relative_to_their_own_file() {
     let at_a = src.tensor("w.a").unwrap().locate().unwrap();
     let at_b = src.tensor("w.b").unwrap().locate().unwrap();
     // Both files were written the same way, so both payloads land at the same
-    // offset — which is only coherent because the offset belongs to the file.
+    // offset, which is only coherent because the offset belongs to the file.
     assert_eq!(at_a.offset, at_b.offset);
     assert_ne!(at_a.store, at_b.store);
     assert!(at_a.offset >= 64 * 1024, "not page-placed");
@@ -98,7 +98,7 @@ fn capabilities_are_the_holding_file_s() {
     assert_eq!(merged.tensor("w").unwrap().caps().unwrap(), direct);
 }
 
-/// A merged set is not one file, so it has no manifest — there is no single
+/// A merged set is not one file, so it has no manifest. There is no single
 /// document any of these files wrote.
 #[test]
 fn a_merged_set_has_no_manifest() {

@@ -1,12 +1,12 @@
 //! One file, and what can be done with its bytes.
 //!
 //! A [`Store`] is opened in one of two ways. `map` establishes a read-only
-//! shared mapping, which is what makes borrowed reads and page-exact eviction
+//! shared mapping, which allows borrowed reads and page-exact eviction
 //! possible. `index` opens the file without mapping it: enough to answer where
 //! every tensor lives and to read a range on demand, which is all a planner
 //! needs and costs no address space.
 //!
-//! Which one a caller got is not hidden — it is exactly the difference between
+//! Which one a caller got is visible: it is the difference between
 //! [`Caps::map`](crate::Caps::map) and [`Caps::locate`](crate::Caps::locate).
 
 use std::fs::File;
@@ -16,7 +16,7 @@ use memmap2::Mmap;
 
 use crate::error::{Error, Result};
 
-/// Index of a [`Store`] within a [`Source`](crate::Source) — that is, the
+/// Index of a [`Store`] within a [`Source`](crate::Source), meaning its
 /// position in [`Source::stores`](crate::Source::stores).
 ///
 /// Process-local, and unrelated to a manifest's shard name: a name is a claim
@@ -31,12 +31,12 @@ impl std::fmt::Display for StoreId {
     }
 }
 
-/// Bytes only the projection that opened the file can produce — a deflated zip
-/// entry, a chunked HDF5 dataset. There is no address for these, so they are
-/// readable and nothing else, and they say so.
+/// Bytes only the projection that opened the file can produce, such as a
+/// deflated zip entry or a chunked HDF5 dataset. These have no address, so
+/// they can be read and nothing more, and they report as much.
 ///
 /// `Send + Sync` because a [`Source`](crate::Source) is: a loader that reads a
-/// checkpoint from several threads is the ordinary case, not the exotic one,
+/// checkpoint from several threads is the ordinary case,
 /// and a reader that needs interior mutability should reach for a lock rather
 /// than make the whole source single-threaded.
 pub trait Opaque: Send + Sync {
@@ -49,9 +49,9 @@ pub struct Store {
     len: u64,
     format: &'static str,
     map: Option<Mmap>,
-    /// Every occupied byte range in this file, sorted and deduplicated —
-    /// the basis for page exclusivity. Empty means *unknown*, and then
-    /// exclusivity is never claimed rather than optimistically assumed.
+    /// Every occupied byte range in this file, sorted and deduplicated. Page
+    /// exclusivity is computed from this. Empty means unknown, in which case
+    /// exclusivity is never claimed.
     occupied: Vec<(u64, u64)>,
     opaque: Option<Box<dyn Opaque>>,
 }
@@ -227,7 +227,7 @@ impl Store {
         }
         let (start, end) = page_envelope(offset, len, page_size());
         let end = end.min(map.len() as u64);
-        // SAFETY: the map is a read-only shared file mapping — DontNeed only
+        // SAFETY: the map is a read-only shared file mapping, so DontNeed only
         // drops clean page-cache pages; later accesses re-fault from the file.
         // It cannot discard writes because none exist.
         unsafe {
@@ -329,7 +329,7 @@ mod tests {
     /// The page-exclusivity predicate, which is the whole of `Caps::evict`.
     #[test]
     fn page_exclusivity() {
-        // header, two blobs, manifest, footer — a typical 4 KiB-aligned file
+        // header, two blobs, manifest, footer: a typical 4 KiB-aligned file
         let s = store_with(&[(0, 8), (4096, 8), (8192, 100), (12288, 340), (12628, 40)]);
         let page = page_size();
         if page <= 4096 {

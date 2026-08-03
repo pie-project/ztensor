@@ -3,7 +3,7 @@
 **Status:** Registry profile (**parametric**) · **Core spec:** zTensor v2 §5.2
 
 Affine group quantization: low-precision integer codes packed into a wider
-word, with a scale — and optionally a zero point — shared by each group of
+word, with a scale (and optionally a zero point) shared by each group of
 codes along one axis.
 
 This profile is a **space, not a scheme**. AWQ-int4, GPTQ-int4, MLX's
@@ -33,16 +33,16 @@ avoid.
 | `bits` | uint | Width of one code: 2, 3, 4, 5, 6 or 8. |
 | `group_size` | uint | Codes sharing one scale, along `axis`. `0` means per-channel: one scale per row of `axis`. |
 | `axis` | uint | The axis groups run along. |
-| `packing` | map | How codes sit in a storage word — see below. |
-| `scale_form` | text | How a consumer must read `scales` — see below. |
-| `zero_point` | map | Whether and how a zero point applies — see below. |
+| `packing` | map | How codes sit in a storage word; see below. |
+| `scale_form` | text | How a consumer must read `scales`; see below. |
+| `zero_point` | map | Whether and how a zero point applies; see below. |
 
 ### `packing`
 
 | Key | Type | Meaning |
 | --- | --- | --- |
 | `word` | text | The storage word: `"u8"`, `"u16"`, `"u32"` or `"u64"`. MUST equal `data.dtype` (or its unsigned counterpart when `data.dtype` is signed). |
-| `order` | text | `"lsb_first"` — the code for the lowest index occupies the low bits — or `"msb_first"`. |
+| `order` | text | `"lsb_first"`, where the code for the lowest index occupies the low bits, or `"msb_first"`. |
 | `per_word` | uint | Codes per word. MUST equal `8 × width(word) / bits`. |
 
 `bits` MUST divide `8 × width(word)`; a packing that leaves unused bits in
@@ -123,7 +123,7 @@ Data rules: none. Every bit pattern of a packed word is a valid code.
 
 These are not variants of the profile; they are attribute sets.
 
-**AWQ int4** — packed zero points, f16 scales, group 128:
+**AWQ int4**: packed zero points, f16 scales, group 128:
 
 ```text
 "attributes": {
@@ -134,13 +134,13 @@ These are not variants of the profile; they are attribute sets.
 }
 ```
 
-**GPTQ int4** — the same, with the other packing order:
+**GPTQ int4**: the same, with the other packing order:
 
 ```text
   "packing":    { "word": "u32", "order": "msb_first", "per_word": 8 }
 ```
 
-**MLX affine-u4** — group 64, unpacked zero points (biases):
+**MLX affine-u4**: group 64, unpacked zero points (biases):
 
 ```text
 "attributes": {
@@ -151,7 +151,7 @@ These are not variants of the profile; they are attribute sets.
 }
 ```
 
-**Bias-8 int4** — the zero point *is* the 8, so there is no `zeros` part:
+**Bias-8 int4**: the zero point *is* the 8, so there is no `zeros` part:
 
 ```text
 "attributes": {
@@ -162,7 +162,7 @@ These are not variants of the profile; they are attribute sets.
 }
 ```
 
-**Symmetric int8, per channel** — no grouping, no zero point:
+**Symmetric int8, per channel**: no grouping, no zero point:
 
 ```text
 "attributes": {

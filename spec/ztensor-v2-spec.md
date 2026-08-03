@@ -14,9 +14,9 @@ The format is organized in three layers with explicit stability contracts:
 
 | Layer | Contents | Stability contract |
 | --- | --- | --- |
-| **L0 — Container** | Magic, footer, blob heap, alignment floor, byte order | **Frozen.** Never changes. A major revision changes only what the footer points to. |
-| **L1 — Manifest** | Manifest schema (deterministic CBOR): objects, parts, blob references, shards | Gated by the footer version integer. Evolves rarely; unknown fields are ignored. |
-| **L2 — Vocabulary** | Layout profiles, logical types, encoding profiles, digest algorithms | **Deliberately mortal.** Namespaced, versioned identifiers managed by a registry. |
+| **L0: Container** | Magic, footer, blob heap, alignment floor, byte order | **Frozen.** Never changes. A major revision changes only what the footer points to. |
+| **L1: Manifest** | Manifest schema (deterministic CBOR): objects, parts, blob references, shards | Gated by the footer version integer. Evolves rarely; unknown fields are ignored. |
+| **L2: Vocabulary** | Layout profiles, logical types, encoding profiles, digest algorithms | **Deliberately mortal.** Namespaced, versioned identifiers managed by a registry. |
 
 Everything in the file is a **blob**: an aligned, contiguous, unnamed byte
 range. Tensor data is blobs. The manifest itself is a blob. The footer is a
@@ -87,7 +87,7 @@ The footer occupies the last 40 bytes of the file:
 | −32 | 8 | `manifest_length` | u64 LE. Byte length of the manifest blob. `0` if no manifest. |
 | −24 | 8 | `manifest_hash` | u64 LE. XXH3-64 of the manifest bytes. `0` if no manifest. |
 | −16 | 4 | `version` | u32 LE. This document defines version `2`. Gates the L1 schema. |
-| −12 | 4 | `reserved` | u32 LE. Writers MUST write `0`; readers MUST ignore it. Padding, not an evolution channel — `version` is the only one. |
+| −12 | 4 | `reserved` | u32 LE. Writers MUST write `0`; readers MUST ignore it. Padding, not an evolution channel; `version` is the only one. |
 | −8 | 8 | `magic` | Same 8 bytes as §2.2. |
 
 `manifest_hash` is an integrity check against corruption, not a cryptographic
@@ -104,7 +104,7 @@ canonical form (§6.3), which are algorithm-agile.
 - Blob references within a file, plus the manifest blob, MUST be pairwise
   **identical or disjoint**: two references are valid iff they have exactly
   equal `(offset, length)` or do not overlap at all. Partial overlap MUST be
-  rejected. Identical references are deliberate — they enable weight tying
+  rejected. Identical references are deliberate: they enable weight tying
   (e.g., input/output embeddings sharing one blob) and intra-file dedup,
   while the dangerous case (one range validated under one interpretation,
   read under another) remains impossible. (Zero-length blobs are exempt from
@@ -130,7 +130,7 @@ Files SHOULD nevertheless be treated as immutable artifacts once published.
 Canonical files (§6.3) contain exactly one manifest and no unreferenced
 blobs.
 
-A file whose footer is not at EOF — e.g., after a crashed append — is simply
+A file whose footer is not at EOF, for example after a crashed append, is
 invalid; there is no reader-side recovery (§10). Durable publication is a
 transport concern: write to a temporary name, then rename atomically
 (Appendix B).
@@ -150,7 +150,7 @@ non-shortest heads, indefinite lengths, unsorted or duplicate map keys, and
 non-canonical floats (NaN other than `0xf9 0x7e00`, or a float wider than
 the value requires). Anything weaker is unsound, not merely lenient: a
 reader that accepts non-canonical floats will accept two NaN-payload map
-keys as distinct — duplicate keys in disguise. Readers MUST reject a
+keys as distinct, which is duplicate keys in disguise. Readers MUST reject a
 manifest whose `manifest_length` exceeds **1 GiB**, before parsing.
 
 Readers MUST ignore map keys they do not recognize, at every level. This is
@@ -201,7 +201,7 @@ Shown in CBOR diagnostic notation:
 | --- | --- | --- | --- |
 | `shape` | array of u64 | Yes | Logical dimensions. Rank MUST be ≤ 64. The element count is the product of dimensions (empty shape ⇒ 1, scalar). The product MUST NOT overflow u64. |
 | `layout` | string | Yes | `"dense"` (core, §5.1) or a namespaced layout profile id (§5.2). |
-| `parts` | map | Yes | One entry per data blob, keyed by role name. MUST be non-empty — an object with no bytes has no meaning, and layouts cannot state that rule for layouts a reader does not know. |
+| `parts` | map | Yes | One entry per data blob, keyed by role name. MUST be non-empty: an object with no bytes has no meaning, and layouts cannot state that rule for layouts a reader does not know. |
 | `attributes` | map | No | Per-object metadata. Layout profiles define which keys they require. |
 
 ### 3.4 Part
@@ -234,14 +234,14 @@ The *decoded size* of a part is `length` when `encoding` is absent, else
 Digests cover decoded bytes because a digest identifies **content**, not its
 encoding; re-encoding a blob does not change its digest. Transport integrity
 of encoded bytes is the encoding profile's responsibility (e.g., zstd frame
-checksums — see `profiles/zt.zstd-seekable-1.md`).
+checksums; see `profiles/zt.zstd-seekable-1.md`).
 
 ### 3.5 Names
 
 Object names, part names, and attribute keys MUST be non-empty, valid UTF-8
 strings of at most 1024 bytes containing no `U+0000`. That is the entire
 reader-side check. Writers SHOULD emit names in Unicode Normalization
-Form C, and canonical form (§6.3) requires it — but readers do not verify
+Form C, and canonical form (§6.3) requires it, but readers do not verify
 normalization: NFC verification needs Unicode tables, which would break the
 minimal-reader contract (§11). Normalization is a writer duty, not a reader
 check.
@@ -259,7 +259,7 @@ A reader MUST reject a file if any of the following fail:
    `offset + length` within the referenced file's data region.
 4. Blob references are grouped by the file they point into (the `shard`
    name, or its absence) and checked per group: within each file,
-   references — plus the manifest blob for the containing file — are
+   references, plus the manifest blob for the containing file, are
    pairwise identical-or-disjoint; any partial
    overlap is rejected (§2.4). References into a shard are checked from the
    root manifest alone, without opening the shard.
@@ -294,7 +294,7 @@ pattern is valid."
 An open, registered set giving meaning to raw storage elements. When absent,
 the logical type equals the storage type and no interpretation is needed.
 Each registered logical type specifies its required `dtype`, its **size
-function** — the decoded byte size for a given logical element count — and,
+function** (the decoded byte size for a given logical element count) and,
 for packed sub-byte types, the bit order. A plain type has
 `size(n) = n × width(dtype)`; a compound type like `complex64` has
 `size(n) = 2n × width`; a packed type like `f4_e2m1` has `size(n) = ⌈n/2⌉`.
@@ -324,7 +324,8 @@ The only layout defined by this document.
 
 ### 5.2 Layout profiles
 
-Every other layout — sparse, quantized, anything future — is a **profile**:
+Every other layout, whether sparse, quantized or something future, is a
+**profile**:
 a separately published mini-specification identified by a namespaced,
 versioned id such as `zt.sparse_csr/1` or `pie.paged_kv/1`. Profiles live
 beside this document under `spec/profiles/`; this core specification
@@ -355,7 +356,7 @@ way to write a bad one.
 
 A **parametric** profile describes a space, not a scheme: its attributes
 determine the decoder, and two different attribute sets under the same
-profile are two different schemes. `zt.quant_group/1` is one — affine
+profile are two different schemes. `zt.quant_group/1` is one: affine
 group quantization, where the bit width, group size, packing order, scale
 form and zero-point form are each stated. A parametric profile MUST make
 every parameter its decoder needs a required attribute; anything left
@@ -367,7 +368,7 @@ An **opaque** profile does not describe the payload's internal structure
 at all. It names an authoritative external definition and preserves the
 bytes verbatim. The `gguf.<type>/1` family is opaque: a ggml block struct
 interleaves scales with data, and `q4_k` nests a second level of scales
-quantized to six bits inside a super-block — structure no attribute set
+quantized to six bits inside a super-block, which is structure no attribute set
 describes without inventing a layout language. An opaque profile MUST
 still carry the constants a reader needs to validate sizes without
 knowing the layout (for the `gguf` family, `elems_per_block` and
@@ -400,13 +401,13 @@ A reader encountering an unknown encoding MUST refuse to decode the part
 
 Cheapest first; each rung is independent:
 
-1. **Structural** — footer magic and bounds checks (always on).
-2. **Manifest** — XXH3-64 in the footer (always on).
-3. **Transport** — encoding-profile checksums, e.g. zstd frame checksums
+1. **Structural**: footer magic and bounds checks (always on).
+2. **Manifest**: XXH3-64 in the footer (always on).
+3. **Transport**: encoding-profile checksums, e.g. zstd frame checksums
    (on whenever the encoding is used).
-4. **Content** — per-part `digest` over decoded bytes (optional; verify
+4. **Content**: per-part `digest` over decoded bytes (optional; verify
    mode).
-5. **Model identity / provenance** — whole-file hash of a canonical file,
+5. **Model identity / provenance**: whole-file hash of a canonical file,
    optionally signed (§6.4).
 
 ### 6.2 What is deliberately not protected
@@ -447,7 +448,7 @@ The 64 KiB canonical alignment guarantees that no two blobs share a page on
 any known page size (4 KiB x86/ARM, 16 KiB Apple Silicon, 64 KiB ARM64
 distributions): every tensor can be independently memory-mapped, registered,
 and evicted (`madvise`) with exact page ranges, on every platform, with no
-fallback path. Average cost is 32 KiB per tensor — noise at weight-file
+fallback path. Average cost is 32 KiB per tensor, which is noise at weight-file
 scale.
 
 ### 6.4 Signing
@@ -492,7 +493,7 @@ the blob reference, with the single file as the degenerate case.
 A shard name is a **label**, not a **location**: no paths or URLs appear
 anywhere in the format, and a name carries no promise about what any file is
 called. A path is owned by the filesystem, is not verifiable by the format,
-and would couple model identity to naming — a rename would change or break
+and would couple model identity to naming, since a rename would change or break
 the model. Resolving a name to bytes is entirely the transport's concern
 (Appendix B gives the RECOMMENDED conventions); because identity lives in the
 content, a resolver can always ignore the name and locate a file by size and
@@ -501,7 +502,7 @@ digest instead.
 The character set is narrow for one reason: the conventional resolvers use
 a name as a single path component. Constraining it here means that a manifest
 cannot express a path such as `../../etc/passwd`, so no consumer has to
-sanitize one — an obligation that, spread across every implementation, would
+sanitize one. Spread across every implementation, that obligation would
 eventually be missed by one of them.
 
 ### 7.2 Data shards
@@ -510,7 +511,7 @@ A data shard is a minimal container: magic, blob heap, and a footer with
 `manifest_offset = manifest_length = manifest_hash = 0`. It carries no
 manifest and describes nothing; all meaning lives in the root manifest.
 
-Knowledge flows one way — the root knows its shards; shards do not know
+Knowledge flows one way: the root knows its shards, and shards do not know
 their root. This avoids circular hashing and keeps multi-file output
 deterministic.
 
@@ -569,7 +570,7 @@ is fixed-size).
 - **L0 is frozen.** The magic, footer layout, alignment floor, and byte
   order defined here never change. A hypothetical future major version
   changes the footer `version` integer and may point the footer at a
-  different root structure — the container skeleton survives.
+  different root structure. The container skeleton survives.
 - **L1 minor evolution:** new OPTIONAL manifest fields; readers MUST ignore
   unknown fields. **L1 major evolution:** increment the footer `version`.
 - **L2 evolves by registry:** new logical types, layout profiles, and
@@ -589,7 +590,7 @@ This format deliberately does not attempt to be:
   in-place writes.
 - **A crash-recovery journal.** A file whose footer is not at EOF is
   invalid, full stop. Durability comes from atomic publication (write to a
-  temporary name, rename into place — Appendix B), not from reader-side
+  temporary name, rename into place; Appendix B), not from reader-side
   recovery scans.
 - **An encryption container.** Encryption belongs to the transport or
   filesystem layer.
@@ -604,7 +605,7 @@ the format small enough to remain correct.
 ## 11. Conformance
 
 A conforming implementation is one that passes the **conformance corpus**:
-a versioned set of golden files — valid files with their expected decoded
+a versioned set of golden files: valid files with their expected decoded
 contents, and invalid files that MUST be rejected with the corresponding
 §3.6 rule. The corpus and a minimal reference reader (a few hundred lines,
 no dependencies beyond CBOR and XXH3) are normative companions to this
@@ -617,7 +618,7 @@ optional to support but mandatory to refuse cleanly (§4.2, §5.2, §5.3).
 
 ---
 
-## Appendix A — Registered logical types (initial)
+## Appendix A: Registered logical types (initial)
 
 | `type` | `dtype` | Size for n elements | Notes |
 | --- | --- | --- | --- |
@@ -631,19 +632,20 @@ optional to support but mandatory to refuse cleanly (§4.2, §5.2, §5.3).
 | `complex64` | `f32` | 8n | Interleaved `[real, imag]` |
 | `complex128` | `f64` | 16n | Interleaved `[real, imag]` |
 
-A registry entry defines its required `dtype`, its size function, and — for
-packed sub-byte types — the bit order. The `dense` layout applies the size
+A registry entry defines its required `dtype`, its size function, and, for
+packed sub-byte types, the bit order. The `dense` layout applies the size
 function to `num_elements(shape)`; other layout profiles state which element
 count each part's size function receives (e.g., the reserved `zt.mx/1`
 profile gives the `scales` part one `f8_e8m0` element per 32-element block).
 
-## Appendix B — Recommended conventions (non-normative)
+## Appendix B: Recommended conventions (non-normative)
 
 - **Shard resolution (positional):** for a root file named `<stem>.zt`, a
   shard named `n` resolves to a sibling file `<stem>-<n>.zt` (root
   `model.zt` with shards named `00001`, `00002` → `model-00001.zt`,
   `model-00002.zt`). Naming shards after the segment they already carry in
-  distribution — `00001-of-00003` — reproduces existing file names exactly.
+  distribution, such as `00001-of-00003`, reproduces existing file names
+  exactly.
   Renaming the family together (`model` → `llama`) keeps it resolvable. The
   name is safe to use as a path component unchanged, because §7.1 admits no
   separators or `..`.

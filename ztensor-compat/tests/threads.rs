@@ -1,14 +1,14 @@
 //! Reading one source from several threads.
 //!
 //! A `Source` is `Send + Sync`, which is what lets a loader fan a checkpoint
-//! out across threads — the ordinary case for anything feeding a GPU. The part
+//! out across threads, the ordinary case for anything feeding a GPU. The part
 //! that has to be right for that claim is the opaque readers: a deflated zip
 //! entry has no address, so producing it means holding a lock over an archive
 //! and, for torch, over a cache of inflated storages.
 //!
 //! These tests are about contention on exactly those locks. What they check is
 //! that concurrent readers get the same bytes a single reader would, and that
-//! they finish — a deadlock here would look like a hung loader, which is the
+//! they finish. A deadlock here would look like a hung loader, which is the
 //! failure mode nobody can debug from a stack trace.
 
 use std::io::Write;
@@ -59,7 +59,7 @@ fn threads_contending_on_an_opaque_reader_all_get_the_right_bytes() {
     let path = deflated_npz("threads-npz.zt", &tensors);
     let src = Arc::new(ztensor_compat::open(&path).unwrap());
 
-    // Nothing here is mappable, which is what makes it a lock test.
+    // Nothing here is mappable, so this exercises the lock.
     for (name, _, _) in &tensors {
         let caps = src.tensor(name).unwrap().caps().unwrap();
         assert!(!caps.map && !caps.locate, "{name} should be opaque");
@@ -93,7 +93,7 @@ fn threads_contending_on_an_opaque_reader_all_get_the_right_bytes() {
     }
 }
 
-/// The same tensor from every thread at once — one entry, one lock, maximum
+/// The same tensor from every thread at once: one entry, one lock, maximum
 /// contention on it.
 #[test]
 fn one_hot_tensor_read_by_everyone_at_once() {
@@ -120,8 +120,8 @@ fn one_hot_tensor_read_by_everyone_at_once() {
 
 /// Mapped and opaque tensors read side by side.
 ///
-/// A mixed file is the realistic shape — a checkpoint where some entries were
-/// stored and some deflated — and the two paths share nothing but the source,
+/// A mixed file is the realistic shape, a checkpoint where some entries were
+/// stored and some deflated. The two paths share nothing but the source,
 /// so this is where a mistake in that sharing would show.
 #[test]
 fn mapped_and_opaque_tensors_are_read_side_by_side() {
@@ -165,7 +165,7 @@ fn mapped_and_opaque_tensors_are_read_side_by_side() {
     }
 }
 
-/// A source built on one thread and used on another, with no `Arc` at all —
+/// A source built on one thread and used on another, with no `Arc` at all.
 /// the `Send` half of the claim, which sharing alone does not exercise.
 #[test]
 fn a_source_can_be_moved_to_another_thread() {

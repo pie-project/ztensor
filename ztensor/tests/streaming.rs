@@ -1,8 +1,8 @@
 //! Writing an object a chunk at a time.
 //!
 //! The property that matters: a streamed write and a slice write produce the
-//! same file. A producer that cannot hold a tensor in memory — one copying a
-//! weight off a device in chunks — should not thereby produce a different
+//! same file. A producer that cannot hold a tensor in memory, such as one
+//! copying a weight off a device in chunks, should not produce a different
 //! artifact.
 //!
 //! The sink is a token rather than a borrow of the writer, which is what lets
@@ -213,7 +213,7 @@ fn bytes_and_length_do_not_mix() {
 }
 
 /// A layout's metadata rules are checked when the object is declared, before
-/// any bytes move — a producer streaming gigabytes should learn its object is
+/// any bytes move, so a producer streaming gigabytes learns its object is
 /// malformed at the start, not at the end.
 #[test]
 fn layout_rules_are_checked_before_the_first_chunk() {

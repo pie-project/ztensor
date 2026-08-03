@@ -12,7 +12,7 @@ license = "MIT"
 repository = "https://github.com/pie-project/ztensor"
 
 # Members reference each other through here, so a version bump is one edit
-# and no path dependency can go out without a version requirement — which
+# and no path dependency can go out without a version requirement, which
 # is what `cargo package` refuses to do.
 [workspace.dependencies]
 ztensor = { version = "2.0.0", path = "ztensor" }

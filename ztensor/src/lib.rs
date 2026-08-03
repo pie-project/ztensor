@@ -1,4 +1,4 @@
-//! zTensor v2 — an aligned, verifiable container format for tensor data.
+//! zTensor v2: an aligned, verifiable container format for tensor data.
 //!
 //! The format is specified in `spec/ztensor-v2-spec.md` (Draft 2), which
 //! separates three layers:
@@ -21,7 +21,7 @@
 //!
 //! let src = Source::open("model.zt")?;
 //! let t = src.tensor("weights")?;
-//! let bytes = t.map()?;              // borrowed, or an error — never a hidden copy
+//! let bytes = t.map()?;              // borrowed, or an error; never a copy
 //! # Ok::<(), ztensor::Error>(())
 //! ```
 //!
@@ -30,7 +30,7 @@
 //! Three methods, one per intent: [`bytes`](Part::bytes) gives the best the
 //! source can do and says which it gave, [`map`](Part::map) insists on a
 //! borrow, and [`locate`](Part::locate) gives the address so the caller can do
-//! the I/O itself. What each will do is reported, per part, by [`Caps`] —
+//! the I/O itself. [`Caps`] reports per part what each will do, and
 //! whose fields are named after those very methods.
 //!
 //! # Two layers of description

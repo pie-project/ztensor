@@ -3,7 +3,7 @@
 //! Measures what a weight loader actually does, on a synthetic model whose
 //! shape mirrors a transformer checkpoint (many medium tensors, a few
 //! large ones). Every number is wall-clock over the whole operation,
-//! median of N runs, with the page cache dropped or warmed explicitly —
+//! median of N runs, with the page cache dropped or warmed explicitly:
 //! whichever the scenario is about.
 //!
 //! Usage: `cargo run --release -p benchmark -- [--size-mb N] [--runs N]`
@@ -35,7 +35,7 @@ impl Model {
         let mut layer = 0usize;
 
         // Every tensor gets distinct bytes. Identical tensors would be
-        // deduplicated into one blob by canonical form — a real feature,
+        // deduplicated into one blob by canonical form. That is a real feature,
         // but it would make a size comparison meaningless here.
         let fill = |seed: u64, len: usize| -> Vec<u8> {
             let mut x = seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1;
@@ -116,7 +116,7 @@ impl Model {
     }
 }
 
-/// Sums every byte. The point is to fault and touch the whole mapping —
+/// Sums every byte, to fault and touch the whole mapping:
 /// anything that skips bytes measures address arithmetic, not I/O.
 fn checksum(bytes: &[u8]) -> u64 {
     bytes
@@ -273,7 +273,7 @@ fn main() {
 
     // ---- copying read ---------------------------------------------------
     rows.push(bench(
-        "copy .zt into owned buffers (warm, memcpy — not comparable to the \
+        "copy .zt into owned buffers (warm, memcpy; not comparable to the \
          traversals above, which sum every byte)",
         runs,
         payload,
@@ -318,7 +318,7 @@ fn main() {
         median(times)
     };
     // A cold read that is not slower than the warm one means the cache
-    // drop did not take (tmpfs, an overlay, or a pinned mapping) — report
+    // drop did not take (tmpfs, an overlay, or a pinned mapping), so report
     // nothing rather than a fabricated bandwidth.
     let warm = rows
         .iter()
@@ -335,7 +335,7 @@ fn main() {
     } else {
         eprintln!(
             "note: cold-cache read ({:.1} ms) is not meaningfully slower than warm \
-             ({:.1} ms) — the page-cache drop had no effect on this filesystem, so \
+             ({:.1} ms). The page-cache drop had no effect on this filesystem, so \
              the cold number is omitted",
             cold_zt.as_secs_f64() * 1e3,
             warm.as_secs_f64() * 1e3

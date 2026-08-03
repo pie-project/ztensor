@@ -25,12 +25,12 @@
   </style>
   <rect x="104" y="20" width="552" height="100" rx="3" class="fill-alt edge" stroke-width="1" />
   <text class="mono fg" x="122.0" y="44.0" font-size="12" font-weight="600" xml:space="preserve">model.zt</text>
-  <text class="mono dim" x="638.0" y="44.0" font-size="10" text-anchor="end" xml:space="preserve">the root — a manifest, and no tensor bytes</text>
+  <text class="mono dim" x="638.0" y="44.0" font-size="10" text-anchor="end" xml:space="preserve">the root: a manifest, and no tensor bytes</text>
   <text class="mono fg" x="122.0" y="68.0" font-size="11" xml:space="preserve">"layer.9.w"</text>
   <text class="mono dim" x="194.8" y="68.0" font-size="11" xml:space="preserve">  blob: [65536, 8388608]  shard: </text>
   <text class="mono accent" x="413.3" y="68.0" font-size="11" xml:space="preserve">"00001"</text>
   
-  <text class="dim" x="471.7" y="68.0" font-size="11" xml:space="preserve">— no shard field means this file</text>
+  <text class="dim" x="471.7" y="68.0" font-size="11" xml:space="preserve">no shard field means this file</text>
   <rect x="124" y="84" width="248" height="24" rx="3" fill="none" class="edge" stroke-width="1" />
   <text class="mono accent" x="136.0" y="101.0" font-size="11" xml:space="preserve">"00001"</text>
   <text class="mono fg" x="196.0" y="101.0" font-size="10.5" xml:space="preserve">size 4.0 GiB · xxh3:a91f7c…</text>
@@ -70,6 +70,6 @@
   <rect x="612.0" y="192" width="18" height="22" rx="2" fill="none" class="edge" stroke-width="1" />
   <text class="mono dim" x="406.0" y="226.0" font-size="9.5" xml:space="preserve">magic · blobs · footer, no manifest</text>
   <text class="dim" x="104.0" y="262.0" font-size="11.5" xml:space="preserve">A name is a label the producer chose. No path appears anywhere in the format.</text>
-  <text class="dim" x="104.0" y="279.0" font-size="11.5" xml:space="preserve">Where a shard lives is the transport’s question — by name (model-00001.zt),</text>
-  <text class="dim" x="104.0" y="296.0" font-size="11.5" xml:space="preserve">by content, or by scanning for the size and digest — so a rename cannot break it.</text>
+  <text class="dim" x="104.0" y="279.0" font-size="11.5" xml:space="preserve">Where a shard lives is the transport’s question: by name (model-00001.zt),</text>
+  <text class="dim" x="104.0" y="296.0" font-size="11.5" xml:space="preserve">by content, or by scanning for the size and digest, so a rename cannot break it.</text>
 </svg>

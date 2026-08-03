@@ -1,7 +1,7 @@
 //! Foreign tensor formats, projected into the zTensor object model.
 //!
-//! Every format here builds a [`Catalog`](ztensor::Catalog) — names, shapes,
-//! types, and where the bytes are — and hands back an ordinary
+//! Every format here builds a [`Catalog`](ztensor::Catalog) of names, shapes,
+//! types and byte locations, then hands back an ordinary
 //! [`Source`](ztensor::Source). There is no per-format type in the public API,
 //! because after projection there is nothing per-format left to say:
 //!
@@ -13,8 +13,8 @@
 //! ```
 //!
 //! Projections are read-only and honest. A part's payload says which of the
-//! three shapes it has — a raw addressable range, something stored under an
-//! encoding, or bytes only the format's own reader can produce — and
+//! three shapes it has: a raw addressable range, something stored under an
+//! encoding, or bytes only the format's own reader can produce. It also
 //! [`Caps`](ztensor::Caps) is a direct reading of that. Nothing is silently
 //! reinterpreted or dequantized, and nothing degrades quietly to a copy.
 //!

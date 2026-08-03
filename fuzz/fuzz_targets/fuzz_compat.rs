@@ -1,7 +1,7 @@
 //! Every foreign-format parser, on arbitrary bytes: opening must never panic.
 //!
 //! One corpus reaches all of them because detection is by magic, and the
-//! projections are no longer separate types to call — so this drives the same
+//! projections are no longer separate types to call, so this drives the same
 //! door every caller uses, then reads everything behind it. Opening writes
 //! nothing, so a temp file per iteration is the only way in.
 

@@ -4,7 +4,8 @@
 
 OCP Microscaling (MX) block formats: a vector of low-precision elements
 sharing one power-of-two scale per fixed-size block. Covers MXFP4, MXFP6,
-MXFP8, and MXINT8 with one profile — they differ only in the element type.
+MXFP8, and MXINT8 with one profile, since they differ only in the element
+type.
 
 ## Parts
 
@@ -19,7 +20,7 @@ MXFP8, and MXINT8 with one profile — they differ only in the element type.
 | --- | --- | --- | --- |
 | `block_size` | uint | Yes | Elements per block. MUST be 32 for OCP MX formats; other values are permitted but are not OCP-conformant. |
 | `axis` | uint | No | Dimension the blocks run along. Defaults to the last dimension (`rank − 1`). |
-| `scale_form` | text | Yes | MUST be `"e8m0_exponent"`. Stated rather than implied because a reader must not learn a scale's meaning from its dtype or from the block size — the same mistake that made a 32-element group mean "MXFP4" elsewhere. |
+| `scale_form` | text | Yes | MUST be `"e8m0_exponent"`. Stated rather than implied because a reader must not learn a scale's meaning from its dtype or from the block size. That is the mistake that made a 32-element group mean "MXFP4" elsewhere. |
 
 ## Derived quantities
 
@@ -83,5 +84,5 @@ element type's own rules require.
 Blackwell-class GPUs consume `data` and `scales` as separate buffers in
 exactly this form. Because each part is its own 64 KiB-aligned blob, a
 canonical `.zt` file can be memory-mapped and uploaded to such a device
-without dequantizing or repacking — which is the reason this profile keeps
+without dequantizing or repacking, which is why this profile keeps
 the two parts separate rather than interleaving scales into the data.

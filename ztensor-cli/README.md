@@ -1,6 +1,6 @@
 # ztensor-cli
 
-`zt` — inspect, verify, convert and diff tensor files.
+`zt`: inspect, verify, convert and diff tensor files.
 
 ```console
 $ cargo install ztensor-cli
@@ -17,7 +17,7 @@ exactly one format, canonical `.zt`.
 Two details worth knowing:
 
 - `ls` on a `.zt` root reads only that file, so it still answers when the shard
-  files are not beside it — listing is a question about this file.
+  files are not beside it. Listing is a question about this file.
 - `diff` compares by content, not by bytes, so the same tensors in two
   different formats compare equal.
 

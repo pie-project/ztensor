@@ -114,7 +114,7 @@ fn an_unregistered_layout_is_written_and_stays_structural() {
 // registering a profile of your own
 // =======================================================================
 
-/// A layout that insists on a `"scales"` part alongside the data — the shape a
+/// A layout that insists on a `"scales"` part alongside the data, the shape a
 /// downstream quantization profile has.
 struct Grouped;
 
@@ -240,7 +240,7 @@ mod zstd_seekable {
         assert!(tensor.verify().unwrap().checked()); // digest over decoded bytes
 
         // An encoded part has no address and no borrow: the stored range is
-        // not the tensor, and saying so is the whole point.
+        // not the tensor, and the message says so.
         let caps = tensor.caps().unwrap();
         assert!(!caps.map && !caps.locate);
         assert!(matches!(tensor.map(), Err(Error::Unsupported(_))));

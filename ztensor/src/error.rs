@@ -32,7 +32,7 @@ pub enum Rule {
     CborDeterminism,
     /// A CBOR map repeats a key (§3.1).
     CborDuplicateKey,
-    /// CBOR nesting beyond the depth limit — the bound that keeps a hostile
+    /// CBOR nesting beyond the depth limit, the bound that keeps a hostile
     /// manifest from exhausting the stack.
     CborDepth,
     /// The manifest parses but is not the shape the schema describes: a
@@ -47,7 +47,7 @@ pub enum Rule {
     BlobAlignment,
     /// A blob runs past the end of the file's data region (§2.4).
     BlobBounds,
-    /// Two blobs in one file overlap partially — sharing is identical-or
+    /// Two blobs in one file overlap partially. Sharing is identical-or
     /// -disjoint, never in between (§2.4).
     BlobOverlap,
     /// A part names a shard the manifest's table does not declare (§7.1).
@@ -96,7 +96,7 @@ impl Error {
     /// Rejects a file under a spec rule.
     ///
     /// Public because a profile registered from another crate has to be able
-    /// to refuse a file exactly as a built-in one does — a validator that can
+    /// to refuse a file exactly as a built-in one does. A validator that can
     /// only say `InvalidInput` is a second-class validator.
     pub fn reject(rule: Rule, detail: impl Into<String>) -> Self {
         Error::Reject {

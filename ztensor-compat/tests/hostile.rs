@@ -37,7 +37,7 @@ mod hdf5 {
         b
     }
 
-    /// C1: heap address `u64::MAX` — `pos + 4` wrapped past the guard.
+    /// C1: heap address `u64::MAX`, where `pos + 4` wrapped past the guard.
     #[test]
     fn heap_address_wraparound() {
         let path = tmp("c1.h5");
@@ -184,7 +184,7 @@ mod npz {
             &[("t", npy("<f8", "(536870864,)", &[0u8; 8]), true)],
         );
         // Either the size equation rejects it at open, or the read is
-        // bounded — never an unbounded reservation.
+        // bounded, never an unbounded reservation.
         if let Ok(n) = ztensor_compat::open(&path) {
             assert!(n.tensor("t").unwrap().bytes().is_err());
         }
@@ -192,7 +192,7 @@ mod npz {
 
     /// M5: an archive whose entries collide on a tensor name must never
     /// yield two different meanings for that name. (The ZIP writer refuses
-    /// literal duplicates, so the second entry is renamed in the bytes —
+    /// literal duplicates, so the second entry is renamed in the bytes:
     /// what a hostile producer would do. The ZIP *reader* then collapses
     /// them, so the projection sees one entry; the guard in `open` covers
     /// the case where it does not.)
@@ -270,7 +270,7 @@ mod pt {
 
         let path = write_pt("h3.pt", &p);
         let start = std::time::Instant::now();
-        let _ = ztensor_compat::open(&path); // errs: no tensors — the point is it returns
+        let _ = ztensor_compat::open(&path); // errs: no tensors; the point is it returns
         assert!(
             start.elapsed().as_secs() < 5,
             "pickle memo blow-up: {:?}",

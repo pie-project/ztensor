@@ -136,7 +136,7 @@ fn rejects_bad_geometry() {
     assert!(ztensor_compat::open(&path).is_err());
 }
 
-/// The conversion path: HF checkpoint in, canonical tier-3 `.zt` out —
+/// The conversion path: HF checkpoint in, canonical tier-3 `.zt` out, with
 /// bit-reproducibly.
 #[test]
 fn convert_to_canonical_zt() {

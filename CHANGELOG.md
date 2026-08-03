@@ -20,18 +20,18 @@ in the wild uses the old spelling.
 - **Shards are named, not numbered.** The shard table is keyed by a name
   chosen by the producer rather than by an integer index. It was the only
   integer-keyed map in a manifest whose objects, parts and attributes are all
-  keyed by name — and an index has to be renumbered when a shard is added or
+  keyed by name. An index also has to be renumbered when a shard is added or
   dropped, while a name does not. A name is a **label**: identity is still
   `(size, digest)`, still never a path.
 - **A name is constrained** to `[A-Za-z0-9._-]`, no leading `.`, at most 64
   bytes. The conventional resolvers use a name as a single path component,
   so the format is what prevents a manifest from expressing `../../etc/passwd`
-  — rather than every consumer having to sanitize it, and one of them
+  instead of leaving every consumer to sanitize it, with one of them
   eventually forgetting.
 - **A blob reference is `[offset, length]`**, and the shard moved to its own
   optional `shard` field. Absent means the containing file. Every other
   optional part field already works this way, and it means a single-file
-  manifest — the overwhelmingly common case — never mentions sharding at all.
+  manifest, which is the common case, never mentions sharding at all.
   The spec claimed the single file was the degenerate case; now the bytes say
   so too.
 
@@ -44,14 +44,14 @@ checkpoints already ship with.
 ### Added
 
 - **`DirectoryResolver`** scans a directory and matches shards by size and
-  whole-file digest, ignoring names entirely — the one convention that keeps
-  working after an arbitrary rename.
+  whole-file digest, ignoring names entirely. It is the one convention that
+  keeps working after an arbitrary rename.
 
 ### Changed
 
-- **One reader type.** `Reader`, `Model` and `Composite` — three types with
-  the same five methods and no common trait — became `Source`, built three
-  ways (`open`, `open_all`, `merge`). What separated them was a conflation:
+- **One reader type.** `Reader`, `Model` and `Composite` were three types
+  with the same five methods and no common trait. They became `Source`, built
+  three ways (`open`, `open_all`, `merge`). What separated them was a conflation:
   a manifest is what one file says, and a consumer needs an index it can
   query. Those are now `schema::Manifest` and `Catalog`.
 - **`Source` is a struct, not a trait.** Foreign formats build a `Catalog`
@@ -60,8 +60,8 @@ checkpoints already ship with.
 - **Three ways to get bytes, one per intent.** `bytes()` gives the best the
   source can do and says whether it borrowed or copied; `map()` insists on a
   borrow; `locate()` gives the address so a caller can do its own I/O.
-- **`Caps` fields are named after the operations they gate** — `map`,
-  `locate`, `evict`, `verify` — and each is computed by that operation's own
+- **`Caps` fields are named after the operations they gate**: `map`,
+  `locate`, `evict` and `verify`. Each is computed by that operation's own
   precondition, so the report cannot drift from the behaviour.
 - **One writer entry point.** `add_dense`, `add_object`,
   `add_external_object`, `link_object` and `stream_object` became
@@ -72,24 +72,24 @@ checkpoints already ship with.
 - **`verify` returns `Verified`**, not `bool`: a checked digest and "there is
   no digest" are different answers, and a mismatch is still a rejection.
 - Layouts are plain strings in the schema; `Layout` as an enum is gone.
-  `Part::ltype` is now `Part::logical` — the manifest key is unchanged.
+  `Part::ltype` is now `Part::logical`; the manifest key is unchanged.
 - `Error` and `Rule` are `#[non_exhaustive]`.
 - Python: tensors are handles, sources are mappings and context managers.
   `ztensor.numpy` remains as a documented safetensors-shaped shim.
 
 ### Added
 
-- **`Source::index`** — open without mapping. Answers where every tensor
+- **`Source::index`** opens without mapping. It answers where every tensor
   lives for the cost of a header read, which is what a planner wants.
-- **`Part::locate`** — the exact byte range of the decoded bytes, for
+- **`Part::locate`** gives the exact byte range of the decoded bytes, for
   io_uring, cuFile, or a staged host-to-device copy.
-- **`Writer::publish`** — writes beside the destination and renames into
+- **`Writer::publish`** writes beside the destination and renames into
   place on `finish`; a writer dropped without finishing leaves nothing.
 - **`Vocabulary` is a value.** Layouts, encodings and logical types can be
   registered from another crate and are then validated exactly like the
   built-ins. `Error::reject` is public so those profiles can refuse a file.
 - **DLPack and the buffer protocol** in Python, so numpy, torch and jax read
-  tensors zero-copy without this package knowing they exist — and DLPack
+  tensors zero-copy without this package knowing they exist, and DLPack
   carries `bfloat16`, which the numpy dtype table cannot. The versioned
   protocol is supported, which is what lets these tensors be marked
   **read-only**: legacy DLPack cannot say it, and a framework that believes
@@ -115,7 +115,7 @@ checkpoints already ship with.
 ### Removed
 
 - `Caps::tier()`. It flattened four independent facts onto one ordinal that
-  did not match the operations it claimed to gate — tier 3 demanded a digest
+  did not match the operations it claimed to gate: tier 3 demanded a digest
   before admitting a part could be evicted, which eviction never needed.
   Nothing in the library branched on it.
 - The per-format types (`Safetensors`, `Gguf`, `Npz`, `Pt`, `Hdf5`, `Onnx`).

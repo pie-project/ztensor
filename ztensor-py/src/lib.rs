@@ -9,8 +9,8 @@
 //! Tensors export the buffer protocol and DLPack, so `np.from_dlpack(t)`,
 //! `torch.from_dlpack(t)` and `memoryview(t)` all work without this crate
 //! knowing anything about numpy or torch. That is why there is no per-framework
-//! module: DLPack is the interchange, and it can say `bfloat16` — which the
-//! numpy dtype table never could.
+//! module: DLPack is the interchange, and it can express `bfloat16`, which
+//! the numpy dtype table cannot.
 
 use std::os::raw::{c_char, c_int, c_void};
 use std::sync::Arc;
@@ -32,7 +32,7 @@ fn err(e: ztensor::Error) -> PyErr {
 // Source
 // =======================================================================
 
-/// A tensor file — or several read as one — of any supported format.
+/// A tensor file of any supported format, or several read as one.
 #[pyclass(unsendable)]
 struct Source {
     /// Shared, because a zero-copy export outlives the handle it came from.
@@ -194,9 +194,9 @@ impl TensorIter {
 /// One tensor, or one part of one. Holding it has read nothing.
 ///
 /// A dense tensor has a single part named `"data"`, and the byte methods here
-/// address it. A quantized one has more — `t["scales"]` is the same class
-/// pointed at another part, which is why parts answer every question tensors
-/// do.
+/// address it. A quantized tensor has more parts, and `t["scales"]` returns
+/// this same class pointed at one of them. Parts therefore answer every
+/// question tensors do.
 #[pyclass(unsendable)]
 struct Tensor {
     source: Py<Source>,
@@ -262,8 +262,8 @@ impl Tensor {
         with_part(py, self, |p| Ok(p.dtype().as_str().to_string()))
     }
 
-    /// Logical type laid over the storage type — `"bool"`, `"f8_e4m3fn"`,
-    /// `"f4_e2m1"` — or `None`.
+    /// Logical type laid over the storage type, such as `"bool"`,
+    /// `"f8_e4m3fn"` or `"f4_e2m1"`. `None` when there is none.
     #[getter]
     fn logical(&self, py: Python<'_>) -> PyResult<Option<String>> {
         with_part(py, self, |p| Ok(p.logical().map(str::to_string)))
@@ -433,8 +433,8 @@ impl Tensor {
             (*view).suboffsets = std::ptr::null_mut();
             // `internal` is the exporter's to use: it carries the reference
             // that keeps this memory mapped, which the release below drops.
-            // Holding only the Python object would not be enough — closing a
-            // source unmaps it while the object is still alive.
+            // Holding only the Python object would not be enough, because
+            // closing a source unmaps it while the object is still alive.
             (*view).internal = Box::into_raw(Box::new(owner)) as *mut c_void;
             let obj: Py<Self> = slf.into();
             (*view).obj = obj.into_ptr();
@@ -455,8 +455,8 @@ impl Tensor {
 
     /// DLPack export: `np.from_dlpack(t)`, `torch.from_dlpack(t)`.
     ///
-    /// Zero-copy, and typed — DLPack can say `bfloat16`, which is the dtype
-    /// most of these files are actually in.
+    /// Zero-copy and typed. DLPack can express `bfloat16`, which is the dtype
+    /// most of these files are in.
     ///
     /// A consumer that asks for the versioned protocol (`max_version`) gets
     /// it, which matters here for one reason: only the versioned struct can
@@ -498,8 +498,8 @@ impl Tensor {
 
         // `copy=True` means the consumer intends to own (and may write) the
         // result; `copy=False` means it must not pay for one. Neither is the
-        // default, which leaves the choice here — and the choice is a borrow
-        // whenever the file allows it.
+        // default, so the choice is made here: borrow whenever the file
+        // allows it.
         let (data, held, dtype) = with_part(py, &this, |p| {
             let dtype = dl_dtype(p.dtype(), p.logical())?;
             if copy != Some(true) {
@@ -556,7 +556,7 @@ impl Tensor {
             // SAFETY: `raw` is live and uniquely owned; every pointer written
             // into it points into that same allocation. The capsule carries
             // the address of the ABI *field*, since that is the struct the
-            // consumer casts to — this wrapper has no layout guarantee.
+            // consumer casts to. This wrapper has no layout guarantee.
             unsafe {
                 (*raw).held = held;
                 (*raw).tensor.dl_tensor.shape = (*raw).shape.as_mut_ptr();
@@ -606,7 +606,7 @@ impl Tensor {
         capsule.downcast_into::<PyCapsule>().map_err(Into::into)
     }
 
-    /// `(device_type, device_id)` — always CPU here.
+    /// `(device_type, device_id)`. Always CPU here.
     fn __dlpack_device__(&self) -> (c_int, c_int) {
         (DL_CPU, 0)
     }
@@ -1060,7 +1060,7 @@ fn open_paths(paths: &Bound<'_, PyAny>, map: bool) -> PyResult<(ztensor::Source,
     Ok((src, label))
 }
 
-/// Opens a tensor file of any supported format — or several, read as one name
+/// Opens a tensor file of any supported format, or several read as one name
 /// space.
 #[pyfunction]
 #[pyo3(name = "open")]

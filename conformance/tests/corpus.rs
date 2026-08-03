@@ -71,7 +71,7 @@ fn corpus_files_in_sync() {
     let corpus = Path::new(env!("CARGO_MANIFEST_DIR")).join("corpus");
     assert!(
         corpus.is_dir(),
-        "corpus/ missing — run `cargo run -p conformance --bin gen`"
+        "corpus/ missing; run `cargo run -p conformance --bin gen`"
     );
     let mut expected: std::collections::BTreeSet<PathBuf> = Default::default();
     for case in all_cases() {
@@ -81,20 +81,20 @@ fn corpus_files_in_sync() {
         };
         let path = corpus.join(dir).join(format!("{}.zt", case.name));
         let on_disk = fs::read(&path)
-            .unwrap_or_else(|_| panic!("{} missing — regenerate corpus", path.display()));
+            .unwrap_or_else(|_| panic!("{} missing; regenerate corpus", path.display()));
         assert_eq!(on_disk, case.bytes, "{} out of sync", case.name);
         expected.insert(path);
     }
 
     // Nothing else may live here. Without this check a stale golden file
-    // from a renamed case — or a fuzzer that mistook this for its own
-    // corpus directory — ships as if it were normative.
+    // from a renamed case, or from a fuzzer that mistook this for its own
+    // corpus directory, ships as if it were normative.
     for dir in ["valid", "reject"] {
         for entry in fs::read_dir(corpus.join(dir)).unwrap() {
             let path = entry.unwrap().path();
             assert!(
                 expected.contains(&path),
-                "{} is not a corpus case — regenerate the corpus",
+                "{} is not a corpus case; regenerate the corpus",
                 path.display()
             );
         }

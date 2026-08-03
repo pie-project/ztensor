@@ -19,8 +19,8 @@ with ztensor.open("model.safetensors") as src:   # or open([shard1, shard2])
     t["scales"]                   # parts are tensors too
 ```
 
-Reads `.zt`, `.safetensors`, `.gguf`, `.npz`, PyTorch `.pt`, HDF5 and ONNX —
-detected by magic — and writes exactly one format: canonical `.zt`, where every
+Reads `.zt`, `.safetensors`, `.gguf`, `.npz`, PyTorch `.pt`, HDF5 and ONNX,
+detected by magic. Writes exactly one format: canonical `.zt`, where every
 tensor starts on a 64 KiB page and carries an XXH3 digest.
 
 ## No framework modules
@@ -34,7 +34,7 @@ torch.from_dlpack(t)
 memoryview(t)
 ```
 
-DLPack also carries `bfloat16`, which the numpy dtype table cannot — so the
+DLPack also carries `bfloat16`, which the numpy dtype table cannot, so the
 dtype most checkpoints are actually in survives the trip.
 
 A zero-copy export keeps the mapping alive on its own: an array stays valid

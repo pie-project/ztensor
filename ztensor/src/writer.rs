@@ -5,10 +5,10 @@
 //! 64 KiB placement, sorted insertion, per-part xxh3 digests, and blob sharing
 //! for byte-identical parts.
 //!
-//! One way in. [`Writer::object`] builds any object — dense or not, one part
-//! or several, bytes in hand or streamed a chunk at a time, local or a
-//! reference into another file — and [`Writer::add`] is the one-liner over it
-//! for the case that is almost all of them.
+//! There is one way in. [`Writer::object`] builds any object: dense or not,
+//! one part or several, bytes in hand or streamed a chunk at a time, local or
+//! a reference into another file. [`Writer::add`] is a shorthand over it for
+//! the common case.
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
@@ -95,7 +95,7 @@ impl Options {
     }
 
     /// Writes to a sibling partial file and moves it into place on
-    /// [`Writer::finish`] — see [`Writer::publish`].
+    /// [`Writer::finish`]. See [`Writer::publish`].
     pub fn publish(self, path: impl AsRef<Path>) -> Result<Writer> {
         let final_path = path.as_ref().to_path_buf();
         let partial = partial_path(&final_path);
@@ -246,15 +246,16 @@ impl Writer {
     ///
     /// The name is a label you choose, and the only thing parts use to refer
     /// to this shard; it is never a path. It must match `[A-Za-z0-9._-]`, not
-    /// start with `.`, and fit in 64 bytes (spec §7.1) — narrow enough that a
-    /// resolver can use it as a single path component without sanitizing it.
+    /// start with `.`, and fit in 64 bytes (spec §7.1). That is narrow enough
+    /// for a resolver to use as a single path component without sanitizing
+    /// it.
     ///
     /// Registering the same name twice is accepted when the identity matches
     /// and rejected when it does not: one name means one file.
     ///
-    /// The identity is one value, and the two things that produce it —
+    /// The identity is a single value. Both things that produce one,
     /// [`DataShardWriter::finish`] and
-    /// [`shard_identity`](crate::shard_identity) — hand back exactly this.
+    /// [`shard_identity`](crate::shard_identity), hand back exactly this.
     /// Canonical form is single-file (spec §6.3), so this needs
     /// `.canonical(false)`.
     pub fn add_shard(&mut self, name: impl Into<String>, shard: &Shard) -> Result<()> {
@@ -286,8 +287,8 @@ impl Writer {
     /// Overlay convenience: references every part of `object` (taken from
     /// another file's manifest) through the shard registered under `shard`,
     /// writing nothing. Parts must be local in the source manifest, and
-    /// `shard` must already be registered — [`add_shard`](Self::add_shard)
-    /// first.
+    /// `shard` must already be registered with
+    /// [`add_shard`](Self::add_shard).
     pub fn link(&mut self, name: impl Into<String>, object: &Object, shard: &str) -> Result<()> {
         let name = name.into();
         let mut builder = self
@@ -310,8 +311,8 @@ impl Writer {
         builder.add()
     }
 
-    /// Copies every tensor of a [`Source`] into this file — the universal
-    /// conversion path.
+    /// Copies every tensor of a [`Source`] into this file. This is the
+    /// conversion path for every supported format.
     ///
     /// Reads decoded bytes and writes them raw, so a canonical writer turns
     /// *any* source (a foreign format, another `.zt`, a merged snapshot) into
@@ -353,8 +354,8 @@ impl Writer {
         Ok(())
     }
 
-    /// Writes the manifest blob and footer, flushes, and — when this writer
-    /// publishes — fsyncs and renames into place. Returns the file size.
+    /// Writes the manifest blob and footer, then flushes. A publishing writer
+    /// also fsyncs and renames into place. Returns the file size.
     pub fn finish(mut self) -> Result<u64> {
         if self.streaming {
             return Err(Error::InvalidInput(
@@ -415,7 +416,7 @@ impl Writer {
 
     /// Writes a blob, or shares an existing one when the bytes are identical.
     /// §6.3 requires *byte-identical* sharing, so a hash match is confirmed by
-    /// reading the candidate back — a collision must never alias two different
+    /// reading the candidate back, since a collision must never alias two different
     /// tensors onto one blob.
     fn write_or_share_blob(&mut self, data: &[u8]) -> Result<u64> {
         let key = (xxh3_128(data), data.len() as u64);
@@ -448,7 +449,7 @@ impl Writer {
         Ok(target)
     }
 
-    /// Advances to the next aligned offset without writing anything — where a
+    /// Advances to the next aligned offset without writing anything, which is where a
     /// streamed blob will begin.
     fn reserve_blob(&mut self) -> Result<u64> {
         let target = align_up(self.offset, self.align)?;
@@ -901,8 +902,8 @@ impl<'w, 'd> ObjectBuilder<'w, 'd> {
     /// Parts are written in name order, each receiving exactly the byte count
     /// it declared. The returned [`Sink`] is a token, not a borrow: it is
     /// passed back to [`Sink::write`] and consumed by [`Sink::close`], so a
-    /// producer driven from outside — one chunk per call, holding both the
-    /// writer and the open object in one structure — can exist at all.
+    /// producer driven from outside can exist at all, feeding one chunk per
+    /// call while holding both the writer and the open object.
     pub fn stream(mut self) -> Result<Sink> {
         let (object, drafts) = self.build()?;
         if !drafts
@@ -1097,7 +1098,7 @@ impl Sink {
 // =======================================================================
 
 /// Writes a data shard (spec §7.2): magic, aligned blobs, and a footer with no
-/// manifest. `finish` returns the shard's identity — exactly what
+/// manifest. `finish` returns the shard's identity, which is exactly what
 /// [`Writer::add_shard`] wants.
 ///
 /// The whole-file digest is computed while writing, so producing a shard costs
@@ -1135,7 +1136,7 @@ impl DataShardWriter {
         Ok(())
     }
 
-    /// Writes one blob at the next aligned offset and returns that offset —
+    /// Writes one blob at the next aligned offset and returns that offset,
     /// the caller records it for the root's blob references.
     pub fn add_blob(&mut self, data: &[u8]) -> Result<u64> {
         const ZEROS: [u8; 4096] = [0u8; 4096];

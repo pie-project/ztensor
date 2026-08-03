@@ -4,7 +4,7 @@
 //! operation's own precondition. The test that matters here is the one that
 //! holds them together: for every part of every file, the report and the
 //! outcome agree. A capability report that is a hand-written summary of the
-//! real rules is a report that drifts, and the last one did — it demanded a
+//! real rules is a report that drifts, and the last one did: it demanded a
 //! digest before admitting a part could be evicted, which eviction never
 //! needed.
 
@@ -152,8 +152,8 @@ fn an_absent_tensor_is_not_found() {
     assert!(src.contains("a.weight"));
 }
 
-/// Hand-assembles a file whose single part carries no digest — the writer
-/// always writes one, so this shape has to be built directly.
+/// Hand-assembles a file whose single part carries no digest. The writer
+/// always writes one, so this shape has to be built by hand.
 fn no_digest_file() -> PathBuf {
     let path = tmp("no-digest.zt");
     let offset = ALIGN_CANONICAL;

@@ -1,7 +1,7 @@
-# zTensor v2 — Implementation Plan
+# zTensor v2 implementation plan
 
 Fresh start on the `v2` orphan branch. No compatibility with the v1 codebase
-(kept on `main` as reference material only — the pickle VM and gguf/npz
+(kept on `main` as reference material only; the pickle VM and gguf/npz
 parsers are worth porting into the compat crate later).
 
 ## Confirmed decisions
@@ -38,31 +38,31 @@ Core dependencies: `memmap2`, `xxhash-rust` only.
 
 ## Milestones
 
-- **M1 — Core round-trip** (dense + raw, single file): mini-CBOR codec,
+- **M1: Core round-trip** (dense + raw, single file): mini-CBOR codec,
   models, writer (canonical placement default, dedup of identical parts),
   reader (mmap MAP_SHARED, §3.6 core validation), `minimal_reader` example.
   Exit: write→read round-trip; determinism test (same input twice →
   bit-identical files); tied-weight dedup test.
-- **M2 — Validation hardening + conformance corpus**: every §3.6 MUST as a
+- **M2: Validation hardening + conformance corpus**: every §3.6 MUST as a
   rule-tagged error; handcrafted must-reject corpus (partial overlap,
   duplicate keys, truncation, bad UTF-8, nonzero odd nibble, …);
   cargo-fuzz on reader + manifest parser. Exit: corpus runner is a CI gate.
-- **M3 — Capability ladder API**: `Source` trait, `caps()`, page-exclusivity
+- **M3: Capability ladder API**: `Source` trait, `caps()`, page-exclusivity
   detection, madvise/eviction helpers. Exit: pie-consumable surface frozen.
-- **M4 — L2 framework**: `LayoutProfile`/`EncodingProfile` traits,
+- **M4: L2 framework**: `LayoutProfile`/`EncodingProfile` traits,
   `zt.sparse_csr/1`, `zt.zstd-seekable/1` (feature-gated), logical-type
   size functions incl. `f4_e2m1`.
-- **M5 — Sharding + overlays**: shard table, resolver trait (positional /
+- **M5: Sharding + overlays**: shard table, resolver trait (positional /
   CAS / custom), verification ladder, LoRA-overlay integration test.
-- **M6 — Compat crate**: safetensors → gguf (quant blocks as `gguf.*`
+- **M6: Compat crate**: safetensors → gguf (quant blocks as `gguf.*`
   profiles, tier 0/1) → npz → pt (pickle VM port; `allow_pickle` call-site
   gate, default off) → onnx/hdf5 backlog. Foreign golden files join the
   corpus.
-- **M7 — CLI**: ls (prints expected shard list), verify (ladder tier
+- **M7: CLI**: ls (prints expected shard list), verify (ladder tier
   select), convert (→ canonical), diff (digest-based); `open_cached()`
   repack helper for pie.
-- **M8 — Python bindings.**
-- **M9 — pie integration**: weight streaming on tier 3 (canonical check →
+- **M8: Python bindings.**
+- **M9: pie integration**: weight streaming on tier 3 (canonical check →
   64 KiB mmap → per-tensor eviction), convert-cache fallback.
 
 Ordering rationale: corpus (M2) lands before compat (M6) so the core's

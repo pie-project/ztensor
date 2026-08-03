@@ -141,7 +141,7 @@ impl<'a> Cursor<'a> {
                 let elem_type = self.u32()?;
                 let count = self.u64()?;
                 // Even a 1-byte element type needs a byte on disk, so a
-                // count beyond the remaining bytes is a lie — and the
+                // count beyond the remaining bytes is a lie, and the
                 // materialized `Value`s are far larger than their encoding,
                 // so this bound is what keeps the projection proportional
                 // to the file.
@@ -176,7 +176,7 @@ fn int_value(v: i64) -> Value {
 /// Reads the header, growing the window until it fits.
 ///
 /// A GGUF header is metadata KVs plus tensor infos, and its size is only known
-/// once it has been parsed — a tokenizer table can be megabytes. So the window
+/// once it has been parsed, and a tokenizer table can be megabytes. So the window
 /// doubles until the parse stops running off the end, which for a mapped file
 /// costs nothing and for an indexed one reads the header and not the 100 GB
 /// behind it.

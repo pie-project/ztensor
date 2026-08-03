@@ -2,8 +2,8 @@
 //!
 //! An `.npz` is a ZIP of `.npy` entries. A stored (uncompressed) entry is a
 //! plain range of the file, so it gets an address and a borrow like any other.
-//! A deflated entry has neither — its bytes do not exist until something
-//! inflates them — so it is an opaque payload: readable, and honest that
+//! A deflated entry has neither, since its bytes do not exist until something
+//! inflates them. It becomes an opaque payload: readable, and honest that
 //! reading costs a decompression.
 //!
 //! Refusals (never reinterpret): big-endian descrs, `fortran_order: True`
@@ -154,7 +154,7 @@ enum Where {
 }
 
 /// Inflates deflated entries on demand. Keeps the archive open because the
-/// bytes cannot be addressed — there is nowhere to point at.
+/// bytes cannot be addressed, because there is nowhere to point at.
 struct Deflated {
     archive: std::sync::Mutex<zip::ZipArchive<File>>,
     /// Keyed by the `key` in [`Payload::Opaque`]: (zip index, header length).
@@ -302,7 +302,7 @@ pub(crate) fn project(store: &Store) -> Result<Projection> {
     }
 
     // A ZIP packs entries back to back behind local headers, so this file
-    // cannot say which bytes are free — occupancy stays unknown and page
+    // cannot say which bytes are free, so occupancy stays unknown and page
     // exclusivity is never claimed.
     let projection = Projection::new(catalog);
     Ok(if deflated.is_empty() {

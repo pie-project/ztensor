@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Checks the hand-authored SVG figures for the two ways they go wrong.
+"""Checks the hand-authored SVG figures for the three ways they go wrong.
 
-Both of these have happened, and neither is visible in the source:
+All three have happened, and none is visible in the source:
 
 1. **Text past the frame.** The figures place text by computing its width, and
-   a width computed for a monospace font is wrong for the sans one next to it —
-   on a wide system font (DejaVu Sans, say) a caption then runs off the canvas.
+   a width computed for a monospace font is wrong for the sans one next to it,
+   so on a wide system font (DejaVu Sans, say) a caption runs off the canvas.
    One figure was 175 px past its own edge.
 
 2. **Text painted over.** SVG has no z-index: later elements cover earlier
@@ -14,7 +14,7 @@ Both of these have happened, and neither is visible in the source:
 
 3. **Text running into text.** The code listings are assembled from runs
    placed at computed x positions, so editing one run's content without
-   moving the next leaves them overlapping — two strings printed on top of
+   moving the next leaves them overlapping: two strings printed on top of
    each other, which reads as garbage rather than as a mistake.
 
 Widths here are deliberate overestimates, so a figure that passes has room on
@@ -70,14 +70,14 @@ def check(path: str) -> list[str]:
     found = []
     for pos, x0, y0, x1, y1, body, _, _ in texts:
         if x1 > vw - EDGE or y1 > vh - EDGE or x0 < 0 or y0 < 0:
-            found.append(f"{path}: runs past the frame — {body[:44]!r}")
+            found.append(f"{path}: runs past the frame: {body[:44]!r}")
         for spos, sx0, sy0, sx1, sy1 in shapes:
             if spos > pos and x0 < sx1 and x1 > sx0 and y0 < sy1 and y1 > sy0:
-                found.append(f"{path}: hidden behind a later shape — {body[:44]!r}")
+                found.append(f"{path}: hidden behind a later shape: {body[:44]!r}")
                 break
 
     # Runs sharing a baseline are one line of text; consecutive ones must not
-    # collide. Only left-anchored runs take part — a centred or right-anchored
+    # collide. Only left-anchored runs take part: a centred or right-anchored
     # label is positioned against something else, not against its neighbour.
     lines = {}
     for _, x0, _, x1, _, body, anchor, base in texts:
@@ -96,7 +96,7 @@ def check(path: str) -> list[str]:
 def main() -> None:
     files = sorted(glob.glob("website/static/diagrams/*.svg"))
     if not files:
-        sys.exit("no diagrams found — run this from the repository root")
+        sys.exit("no diagrams found; run this from the repository root")
     problems = [p for f in files for p in check(f)]
     for f in files:
         texts, shapes = boxes(open(f).read())

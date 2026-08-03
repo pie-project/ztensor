@@ -2,7 +2,7 @@
 //!
 //! Everything here is the on-disk structure, unresolved. A [`BlobRef`]'s
 //! `shard` indexes *this file's* shard table, and an offset means an offset
-//! into whichever file that index names — the manifest is a claim about one
+//! into whichever file that index names. The manifest is a claim about one
 //! container, not an address a consumer can use directly.
 //!
 //! Turning those claims into addresses is [`Catalog`](crate::Catalog)'s job,
@@ -40,7 +40,7 @@ pub const MIN_FILE_LEN: u64 = MAGIC.len() as u64 + FOOTER_LEN;
 
 /// Storage types: the closed set of 12 primitives (spec §4.1).
 ///
-/// Closed by design — a new *interpretation* of bytes is a logical type in the
+/// Closed by design: a new interpretation of bytes is a logical type in the
 /// vocabulary, not a new storage type. So this one enum is not
 /// `#[non_exhaustive]`: matching all twelve arms stays correct.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -124,10 +124,10 @@ impl std::fmt::Display for DType {
 /// somewhere else (spec §3.4).
 ///
 /// `shard` names an entry in the containing manifest's shard table. `None`
-/// means the containing file — the common case, and the one that costs nothing
-/// to say.
+/// means the containing file, which is the common case and the one that costs
+/// nothing to say.
 ///
-/// A name is a label, not a location. Turning it into bytes is the transport's
+/// A name is only a label. Turning it into bytes is the transport's
 /// job, and only after that is there a [`StoreId`](crate::StoreId); the two are
 /// unrelated until then.
 #[derive(Debug, Clone, PartialEq, Eq)]

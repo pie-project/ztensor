@@ -108,7 +108,7 @@ def test_dlpack_array_outlives_the_handle(simple):
     """A zero-copy export holds the mapping itself.
 
     Closing the source it came from must not pull the memory out from under an
-    array that was already handed over — the reference has to be to the
+    array that was already handed over. The reference has to be to the
     mapping, not to the Python object that produced it.
     """
     with ztensor.open(str(simple)) as src:
@@ -297,7 +297,7 @@ def test_another_device_is_refused_not_quietly_served(simple):
 
 @pytest.fixture
 def encoded(tmp_path):
-    """A tensor whose bytes have to be decoded — no range to point at."""
+    """A tensor whose bytes have to be decoded, so there is no range to point at."""
     path = tmp_path / "encoded.zt"
     with ztensor.Writer(str(path), canonical=False, align=4096) as w:
         w.add(

@@ -1,6 +1,6 @@
 # zTensor
 
-An aligned, verifiable container format for tensor data — and one loader
+An aligned, verifiable container format for tensor data, and one loader
 that reads every other tensor format into the same object model.
 
 **Crates 2.0.0 · Format `.zt` version 2 · Spec Draft 3**
@@ -12,7 +12,7 @@ move together.*
 // Read anything: .zt, .safetensors, .gguf, .npz, .pt, .h5, .onnx
 let src = ztensor_compat::open("model.safetensors")?;
 let t = src.tensor("layer.weight")?;
-let bytes = t.map()?;                  // borrowed, or an error — never a hidden copy
+let bytes = t.map()?;                  // borrowed, or an error; never a copy
 
 // Write one thing: a canonical, digest-carrying .zt file
 let mut w = ztensor::Writer::create("model.zt")?;
@@ -31,7 +31,7 @@ zt diff a.safetensors b.zt          # compare across formats
 
 - **64 KiB placement** in canonical files, so every tensor starts on a page
   boundary on every platform in use (4 KiB, 16 KiB, 64 KiB pages). Each
-  tensor can be mapped, registered, and evicted independently — which is
+  tensor can be mapped, registered and evicted independently, which is
   what makes weight streaming possible without disturbing neighbours.
 - **Verifiability**: an XXH3 digest per tensor, plus one over the manifest
   itself. Corruption is an error, not a wrong answer.
@@ -80,7 +80,7 @@ the problem, but none solve it cleanly:
 - **Pickle-based formats** (`.pt`, `.bin`) execute arbitrary code on load; a
   model file can run anything on the reader's machine.
 - **SafeTensors** is safe but packs tensors back to back, so essentially none of
-  them begin on a page — a weight cannot be mapped, registered, or evicted
+  them begin on a page, so a weight cannot be mapped, registered or evicted
   without dragging its neighbours along.
 - **GGUF** handles quantization but bakes each scheme into the dtype enum,
   coupling the format to one ecosystem.
@@ -110,11 +110,11 @@ manifest, and is byte-reproducible. Read the full
 | **.h5** | **6.13 GB/s** | 5.96 GB/s | 0.28 GB/s |
 
 *Three workloads at 512 MB: Large (few big matrices), Mixed (realistic model
-shapes), Small (many ~10 KB parameters). zTensor writes canonical form here —
+shapes), Small (many ~10 KB parameters). zTensor writes canonical form here,
 64 KiB placement, a digest per tensor, and a file that is byte-identical across
 runs. On `Small` that means 51k tiny tensors each rounded up to a page: the file
 is 6.4× the payload and the write pays for all of it. Writing the same workload
-at the 4 KiB floor gives 1.32 GB/s into 1.21× — see
+at the 4 KiB floor gives 1.32 GB/s into 1.21×; see
 [Benchmarks](website/docs/benchmarks.md#alignment-is-a-tradeoff).*
 
 ## Format comparison
@@ -140,12 +140,12 @@ at the 4 KiB floor gives 1.32 GB/s into 1.21× — see
 Developed and tested on **Linux and macOS**, which is what CI runs. The crate
 carries no unix-only dependency and its non-unix code path is compiled on every
 push (against `wasm32-wasip1`, the cheapest non-unix target) and its behaviour
-tested on unix against the platform path it replaces — but **Windows is not
+tested on unix against the platform path it replaces, but **Windows is not
 tested**, and until it is, treat it as unverified rather than supported.
 
 Two capabilities are unix-only by nature and simply do not exist elsewhere:
 `prefetch` (`madvise(WILLNEED)`) and `evict` (`madvise(DONTNEED)`). Everything
-else — reading, writing, mapping, addressing, verification — is portable.
+else is portable: reading, writing, mapping, addressing and verification.
 
 ## Layout of this repository
 
@@ -162,12 +162,12 @@ else — reading, writing, mapping, addressing, verification — is portable.
 | `website/docs/` | Documentation sources |
 
 The core crate's entire dependency list is `memmap2`, `xxhash-rust`,
-`unicode-normalization`, and `libc` — plus optional `zstd` for the
+`unicode-normalization` and `libc`, plus optional `zstd` for the
 seekable-compression profile. The CBOR codec is 418 lines in-tree
 (excluding its tests),
 because the spec restricts CBOR hard enough (no tags, 8 value types,
 deterministic encoding mandatory) that owning it is smaller than depending
-on a general one — and it lets determinism be structural rather than
+on a general one, and it lets determinism be structural rather than
 optional.
 
 ## Three layers, three lifetimes
@@ -176,11 +176,11 @@ The format separates what must never change from what is expected to:
 
 | Layer | Contents | Contract |
 | --- | --- | --- |
-| **L0 — Container** | Magic, 40-byte footer, aligned blob heap, byte order | **Frozen** |
-| **L1 — Manifest** | Deterministic-CBOR schema | Gated by the footer's version integer |
-| **L2 — Vocabulary** | Layouts, logical types, encodings, digests | **Deliberately mortal**, registry-managed |
+| **L0: Container** | Magic, 40-byte footer, aligned blob heap, byte order | **Frozen** |
+| **L1: Manifest** | Deterministic-CBOR schema | Gated by the footer's version integer |
+| **L2: Vocabulary** | Layouts, logical types, encodings, digests | **Deliberately mortal**, registry-managed |
 
-A minimal conforming reader is `ztensor/examples/minimal_reader.rs` — 68
+A minimal conforming reader is `ztensor/examples/minimal_reader.rs`, at 68
 lines, needing only a CBOR decoder and XXH3.
 
 ## The capability ladder
@@ -191,12 +191,12 @@ pretending otherwise:
 | Tier | Guarantee | Where |
 | --- | --- | --- |
 | `bytes()` | decoded bytes, and it says whether they were borrowed or copied | every format |
-| `map()` | a borrow, or an error — never a hidden copy | mapped raw parts |
+| `map()` | a borrow, or an error; never a copy | mapped raw parts |
 | `locate()` | the exact range of one file, for a caller doing its own I/O | raw parts |
 | `verify()` | a digest check | `.zt` |
 | `evict()` | drops these pages without touching a neighbour's | page-exclusive parts |
 
-`caps()` reports, per part, which of those will work — and every field is
+`caps()` reports, per part, which of those will work. Every field is
 named after the method it gates, computed by that method's own precondition,
 so the report cannot drift from the behaviour. Converting a foreign checkpoint
 is how you get the ones it cannot offer.
@@ -205,7 +205,7 @@ is how you get the ones it cannot offer.
 
 | Format | Cargo feature | Notes |
 | --- | --- | --- |
-| `.zt` | — | Native, including sharded models and overlays |
+| `.zt` | n/a | Native, including sharded models and overlays |
 | `.safetensors` | `safetensors` (default) | Exact-tiling validation defuses header aliasing |
 | `.gguf` | `gguf` (default) | Quantized blocks kept verbatim as `gguf.<type>/1` |
 | `.npz` / `.npy` | `npz` | Big-endian and Fortran-order arrays are refused, not reinterpreted |
@@ -223,7 +223,7 @@ surface than anything else here.
 
 79 tests, a 70-file conformance corpus that is the CI gate, and three
 fuzz targets. The parsers consume untrusted files, so the contract they
-are held to is explicit: hostile input yields an error — never a panic, an
+are held to is explicit: hostile input yields an error, never a panic, an
 unbounded allocation, or a fabricated tensor. `ztensor-compat/tests/hostile.rs`
 pins that with the reproducers behind each hardening fix.
 

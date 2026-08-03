@@ -1,4 +1,4 @@
-# Runtime globals — set by main() via `import config; config.BACKEND = ...`
+# Runtime globals, set by main() via `import config; config.BACKEND = ...`
 # Other modules must access as `config.BACKEND`, NOT `from config import BACKEND`.
 
 BACKEND = "numpy"

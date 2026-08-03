@@ -8,14 +8,14 @@ let bytes = src.tensor("layer.weight")?.map()?;
 # Ok::<(), ztensor::Error>(())
 ```
 
-Reads `.safetensors`, `.gguf`, `.npz`, PyTorch `.pt`, HDF5 and ONNX — detected
+Reads `.safetensors`, `.gguf`, `.npz`, PyTorch `.pt`, HDF5 and ONNX, detected
 by magic, returned as an ordinary [`ztensor::Source`]. There is no per-format
 type to learn, because after projection there is nothing per-format left to
 say.
 
 Projections are read-only and honest. Each part's payload is one of three
-shapes — a raw addressable range, something stored under an encoding, or bytes
-only the format's own reader can produce — and the capability report is a
+shapes: a raw addressable range, something stored under an encoding, or bytes
+only the format's own reader can produce. The capability report is a
 direct reading of which. Nothing is silently reinterpreted, dequantized, or
 degraded to a copy.
 

@@ -9,7 +9,7 @@
         t = src["model.layers.0.mlp.w"]
         t.location                    # (path, offset, nbytes) for your own I/O
         memoryview(t)                 # zero-copy bytes
-        # np.from_dlpack(t) / torch.from_dlpack(t) — zero-copy, and DLPack can
+        # np.from_dlpack(t) / torch.from_dlpack(t): zero-copy, and DLPack can
         # say bfloat16, which the numpy dtype table cannot.
         t["scales"]                   # parts are tensors too
 

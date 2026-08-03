@@ -1,16 +1,17 @@
-//! The one thing you read from.
+//! Reading tensors.
 //!
 //! A [`Source`] is a catalog over one or more [`Store`]s. One `.zt` file, a
-//! `.zt` root plus its shards, a foreign checkpoint, or a snapshot spread over
-//! N files that never heard of each other — all the same type, because the
-//! only thing that differs is how the catalog got built.
+//! `.zt` root plus its shards, a foreign checkpoint and a set of unrelated
+//! files all come back as this same type. Only the way the catalog was built
+//! differs.
 //!
-//! Bytes come out three ways, one per intent:
+//! There are three ways to get at the bytes:
 //!
-//! - [`bytes`](Part::bytes) — the best available, and it says which it gave.
-//! - [`map`](Part::map) — borrowed or an error; never a hidden copy.
-//! - [`locate`](Part::locate) — the address, so the caller can do the I/O
-//!   itself (io_uring, cuFile, a staged host-to-device copy).
+//! - [`bytes`](Part::bytes) gives the best the source can do, and says
+//!   whether it borrowed or copied.
+//! - [`map`](Part::map) gives a borrow or an error, never a hidden copy.
+//! - [`locate`](Part::locate) gives the address, so the caller can do its own
+//!   I/O with io_uring, cuFile or a staged host-to-device copy.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -32,10 +33,10 @@ use crate::vocab::Vocabulary;
 
 /// What can be done with one part's bytes.
 ///
-/// Every field is named after the operation it gates and is computed by that
-/// operation's own precondition, so the report and the behaviour cannot drift
-/// apart. `evict` implies `map` implies `locate`, but that is a consequence of
-/// the predicates, not an order anyone has to memorize.
+/// Each field is named after the operation it gates, and is computed from
+/// that operation's own precondition, so the report cannot disagree with the
+/// behaviour. `evict` implies `map` implies `locate`, but that falls out of
+/// the predicates rather than being a rule to remember.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Caps {
     /// [`Part::map`] will succeed: the bytes are raw and the file is mapped.
@@ -49,16 +50,17 @@ pub struct Caps {
     /// [`Part::verify`] will check a digest rather than report that there is
     /// none to check.
     pub verify: bool,
-    /// Largest power of two dividing the part's file offset. A fact, not an
-    /// operation: the pointer alignment of a mapping is `min(this, page)`.
+    /// Largest power of two dividing the part's file offset. This describes
+    /// the data rather than gating an operation: the pointer alignment of a
+    /// mapping is `min(this, page)`.
     pub alignment: u64,
 }
 
 /// Bytes, and whether they were borrowed or copied.
 ///
-/// Dereferences to `[u8]`, so most callers never look inside. The ones that
-/// care — a loader deciding whether it just paid for a copy — ask
-/// [`is_mapped`](Bytes::is_mapped).
+/// Dereferences to `[u8]`, so most callers never look inside. A caller that
+/// does care, such as a loader checking whether it just paid for a copy, can
+/// ask [`is_mapped`](Bytes::is_mapped).
 #[derive(Debug)]
 pub enum Bytes<'a> {
     /// Borrowed from a file mapping.
@@ -183,13 +185,13 @@ impl ShardResolver for CasResolver {
 /// Finds shards by identity: scans a directory once and matches each file by
 /// size and whole-file digest, ignoring what anything is called.
 ///
-/// This is the resolver for a set whose names nobody agreed on — a directory
-/// someone handed you, files renamed on the way. It is the one convention
-/// that keeps working after a rename, because it never consults a name.
+/// Use this when nobody agreed on the names: a directory someone handed you,
+/// or files that were renamed on the way. Because it never looks at a name,
+/// it still works after a rename.
 pub struct DirectoryResolver {
-    /// Digest -> (size, path). Keyed by digest alone, so a lookup needs no
-    /// allocation and a file whose digest matches but whose size does not can
-    /// be reported as the corruption it is, rather than as a missing file.
+    /// Digest -> (size, path). Keying on the digest alone means a lookup
+    /// needs no allocation, and lets a file whose digest matches but whose
+    /// size does not be reported as corrupt instead of missing.
     by_digest: BTreeMap<String, (u64, PathBuf)>,
 }
 
@@ -438,8 +440,8 @@ fn resolve_manifest(manifest: &Manifest, store_of: &BTreeMap<&str, StoreId>) -> 
 pub struct Source {
     stores: Vec<Store>,
     catalog: Catalog,
-    /// The root manifest — `Some` only when this source is one `.zt` root,
-    /// because only then did anything write one.
+    /// The root manifest. `Some` only when this source is a single `.zt`
+    /// root, since that is the only case where one was written.
     manifest: Option<Manifest>,
     data_shard: bool,
     vocab: Arc<Vocabulary>,
@@ -456,8 +458,8 @@ impl std::fmt::Debug for Source {
 }
 
 impl Source {
-    /// Opens a `.zt` file — including a sharded model, whose shards are found
-    /// with the positional convention.
+    /// Opens a `.zt` file, including a sharded model. Shards are found with
+    /// the positional convention.
     ///
     /// Foreign formats go through `ztensor_compat::open`, which detects the
     /// format and hands back one of these.
@@ -472,8 +474,8 @@ impl Source {
 
     /// Opens without mapping: metadata and addresses only.
     ///
-    /// This is what a planner wants — it answers where every tensor lives, and
-    /// costs two reads rather than a mapping of the whole checkpoint.
+    /// This is what a planner needs. It answers where every tensor lives and
+    /// costs two reads instead of mapping the whole checkpoint.
     pub fn index(path: impl AsRef<Path>) -> Result<Source> {
         Options::default().map(false).open(path)
     }
@@ -515,11 +517,11 @@ impl Source {
 
     /// Reads several sources as one name space.
     ///
-    /// This is the shape every foreign snapshot arrives in: N files that each
+    /// Every foreign snapshot arrives in this shape: N files that each
     /// describe themselves completely, with nothing binding them but the
-    /// caller's list. Nothing is verified across the set, because there is
-    /// nothing to verify it against — no root, no digests, no sizes anyone
-    /// promised. What is checked is that the names do not collide, since a
+    /// caller's list. There is no root, no digest and no size anyone
+    /// promised, so nothing is verified across the set. What is checked is
+    /// that the names do not collide, since a
     /// tensor in two files is a broken set and picking a winner would load
     /// half a model and say nothing.
     pub fn merge(sources: Vec<Source>) -> Result<Source> {
@@ -613,8 +615,8 @@ impl Source {
         self.catalog.attributes()
     }
 
-    /// The root manifest, when this source is a single `.zt` root. `None` for
-    /// foreign formats and for merged sets — neither has one.
+    /// The root manifest, when this source is a single `.zt` root. Foreign
+    /// formats and merged sets do not have one, so they return `None`.
     pub fn manifest(&self) -> Option<&Manifest> {
         self.manifest.as_ref()
     }
@@ -656,10 +658,10 @@ impl Source {
             return Ok(());
         };
         // `open` pushes the root first, then one store per shard in the
-        // manifest's own (name) order — so position `k + 1` is shard `k`.
-        // That is an invariant of this file rather than a checked fact, so it
-        // is checked here: getting it wrong would silently hash the wrong file
-        // and report a mismatch against a shard that is perfectly fine.
+        // manifest's own (name) order, so position `k + 1` is shard `k`.
+        // Nothing enforces that, so check it here. Getting it wrong would
+        // hash the wrong file and report a mismatch against a shard that is
+        // fine.
         if self.stores.len() != manifest.shards.len() + 1 {
             return Err(Error::reject(
                 Rule::ShardIdentity,
@@ -873,8 +875,9 @@ impl<'a> Part<'a> {
             .then_some(at)
     }
 
-    /// What can be done with these bytes. Each field is the predicate the
-    /// matching method checks — the same code, not a parallel summary.
+    /// What can be done with these bytes. Each field runs the same predicate
+    /// the matching method runs, so this is not a summary kept in step by
+    /// hand.
     pub fn caps(&self) -> Caps {
         Caps {
             map: self.mappable().is_some(),
@@ -889,8 +892,9 @@ impl<'a> Part<'a> {
 
     /// The address of the decoded bytes: exactly this range of this file.
     ///
-    /// Errors when the bytes are not one contiguous raw range — an encoded
-    /// part or an archive entry — because then no address would be the tensor.
+    /// Errors when the bytes are not one contiguous raw range, as with an
+    /// encoded part or an archive entry. There is no address in that case
+    /// that would give the caller the tensor.
     pub fn locate(&self) -> Result<Location> {
         self.addressable().ok_or_else(|| {
             Error::Unsupported(format!(
@@ -911,7 +915,7 @@ impl<'a> Part<'a> {
                 format!("its bytes are {}", self.shape_of_payload())
             };
             return Err(Error::Unsupported(format!(
-                "{}: no zero-copy view — {detail}",
+                "{}: no zero-copy view; {detail}",
                 self.label()
             )));
         };
@@ -968,8 +972,9 @@ impl<'a> Part<'a> {
     /// Checks this part's digest (if it has one) and the content rules of its
     /// logical type (if it is registered).
     ///
-    /// A mismatch is `Err(Reject { rule: Digest, .. })` — a rejected file, not
-    /// a value. `Ok(NoDigest)` means there was nothing to check.
+    /// A mismatch comes back as `Err(Reject { rule: Digest, .. })`, since the
+    /// file has failed a rule. `Ok(NoDigest)` means there was nothing to
+    /// check.
     pub fn verify(&self) -> Result<Verified> {
         let entry = self
             .src
@@ -1013,13 +1018,13 @@ impl<'a> Part<'a> {
 
     /// Drops these pages from the page cache.
     ///
-    /// Requires page exclusivity — this never touches a page another blob
-    /// occupies, which is what makes per-tensor eviction safe.
+    /// Requires page exclusivity, so this never touches a page another blob
+    /// occupies, which is what per-tensor eviction depends on.
     #[cfg(unix)]
     pub fn evict(&self) -> Result<()> {
         let at = self.evictable().ok_or_else(|| {
             Error::Unsupported(format!(
-                "{}: not evictable — {}",
+                "{}: not evictable; {}",
                 self.label(),
                 if self.mappable().is_some() {
                     "it shares an OS page with another blob"
@@ -1044,8 +1049,8 @@ impl<'a> Part<'a> {
     }
 }
 
-/// The identity of a `.zt` container — its size and whole-file digest, which
-/// is exactly what [`Writer::add_shard`](crate::Writer::add_shard) records.
+/// The identity of a `.zt` container: its size and whole-file digest. This is
+/// exactly what [`Writer::add_shard`](crate::Writer::add_shard) records.
 ///
 /// The frame is checked first, so a file that is not a container is an error
 /// rather than a digest of something else.

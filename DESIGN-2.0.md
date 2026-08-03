@@ -1,4 +1,4 @@
-# zTensor 2.0 — API redesign
+# zTensor 2.0 API redesign
 
 The file format does not change. `spec/ztensor-v2-spec.md` (Draft 2), the
 container, the CBOR manifest, digests, canonical form: all identical. Every
@@ -10,17 +10,17 @@ crate surface.
 Three things were conflated.
 
 **1. What a file says vs. what a consumer asks.** `Manifest` is the L1
-structure literally written on disk — `blob: [offset, length]` plus an
+structure literally written on disk: `blob: [offset, length]` plus an
 optional `shard`, which names an entry in *that file's* shard table. `Source::manifest()` also used it as
 the lookup index a consumer queries. Because one type served both, a set of N
 self-describing files could not be a `Source` (merging manifests would rewrite
 blob references against a shard table nobody wrote), so there were three reader
-types — `Reader`, `Model`, `Composite` — with the same five methods and no
+types (`Reader`, `Model`, `Composite`) with the same five methods and no
 common trait. Splitting the two roles dissolves all three into one.
 
 **2. Asking for a capability vs. receiving one.** `caps()` answered, `view()`
 and `read()` served, and every caller wrote the `if caps.zero_copy { view }
-else { read }` bridge by hand — including this library, three times over
+else { read }` bridge by hand, including this library, three times over
 (`verify`, the numpy layer, and every downstream planner).
 
 **3. Vocabulary declared open, implemented closed.** The spec calls L2
@@ -34,7 +34,7 @@ was only reachable by reaching into `part.blob` and reconstructing which file
 the shard name meant.
 
 `tier()` is gone. It flattened four independent facts onto one ordinal that did
-not match the operations it claimed to gate — `evict()` requires page
+not match the operations it claimed to gate: `evict()` requires page
 exclusivity and *not* a digest, yet tier 3 demanded both, so a part that could
 be evicted reported tier 2. Nothing in the library ever branched on it.
 
@@ -62,8 +62,8 @@ Three ways to get bytes, one per intent:
 
 ```rust
 t.bytes()?     // -> Bytes<'_>   best available; says which it gave (Deref<[u8]>)
-t.map()?       // -> &[u8]       borrowed or error — never a hidden copy
-t.locate()?    // -> Location    { store, offset, len } — I will read it myself
+t.map()?       // -> &[u8]       borrowed or error; never a hidden copy
+t.locate()?    // -> Location    { store, offset, len }; I read it myself
 ```
 
 Parts are addressed the same way; the tensor methods are sugar for `"data"`:
@@ -73,7 +73,7 @@ t.part("scales")?.map()?;
 t.parts();                       // names
 ```
 
-### Caps — one field per operation, computed by that operation's own predicate
+### Caps: one field per operation, computed by that operation's own predicate
 
 ```rust
 pub struct Caps {
@@ -101,7 +101,7 @@ schema::{Manifest, Object, Part, BlobRef, Shard}   what a .zt file literally say
 Catalog { name -> Entry }                          the resolved, process-local index
 ```
 
-A projection of a foreign format produces a `Catalog`, never a `Manifest` — it
+A projection of a foreign format produces a `Catalog`, never a `Manifest`. It
 never had one. `Source::manifest()` returns `Some` only when the source is a
 single `.zt` root, because only then is there a manifest that something actually
 wrote.
@@ -188,7 +188,7 @@ safetensors-shaped shim for migration, not the API.
 | `cbor` | deterministic CBOR codec (unchanged) |
 | `schema` | `Manifest`, `Object`, `Part`, `BlobRef`, `Shard`, `DType`, constants, CBOR mapping |
 | `vocab` | `Vocabulary`, `Layout`, `Encoding`, `LogicalType`, the standard set |
-| `store` | `Store`, `StoreId` — one file, mapped or merely indexed |
+| `store` | `Store`, `StoreId`: one file, mapped or merely indexed |
 | `catalog` | `Catalog`, `Entry`, `PartEntry`, `Payload`, `Location` |
 | `source` | `Source`, `Tensor`, `Part`, `Caps`, `Bytes`, `Verified` |
 | `validate` | the §3.6 / §8 rules over a `.zt` image |

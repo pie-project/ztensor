@@ -2,7 +2,7 @@
 //!
 //! Detection is by magic bytes wherever the format has them; ONNX (protobuf,
 //! magic-less) falls back to the file extension. Formats whose feature is
-//! disabled are reported as such — never misdetected as something else.
+//! disabled are reported as such, never misdetected as something else.
 //!
 //! What comes back is an ordinary [`Source`]. There is no per-format type to
 //! learn: a projected safetensors file and a canonical `.zt` file answer the
@@ -16,8 +16,8 @@ use ztensor::{Error, Result, Source, Store, Vocabulary};
 
 /// Every label [`detect`] can return.
 ///
-/// Enumerable because a consumer usually has a table keyed by these — a
-/// display name, an enum of its own — and a table that is missing a row says
+/// Enumerable because a consumer usually has a table keyed by these, such as a
+/// display name or an enum of its own. A table that is missing a row says
 /// nothing when the list grows. Checking against this turns that silence into
 /// a failing test.
 pub const FORMATS: &[&str] = &["gguf", "hdf5", "npz", "onnx", "pt", "safetensors", "zt"];
@@ -154,7 +154,7 @@ impl Open {
     /// What a sharded snapshot is: `model-00001-of-00003.safetensors` and its
     /// siblings are each a whole file that describes itself, and the index
     /// beside them is a naming convention outside the format. So this is a
-    /// list of paths and nothing more — the caller decides which files belong
+    /// list of paths and nothing more. The caller decides which files belong
     /// together, because the files themselves never said.
     ///
     /// The set may mix formats. Nothing here requires them to match: what

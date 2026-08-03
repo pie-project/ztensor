@@ -87,7 +87,7 @@ jobs:
       # about this code. `-malloc_limit_mb` catches the bug worth catching:
       # a single allocation driven by a declared length. `-rss_limit_mb`
       # watches the whole process, which in a long run means libFuzzer's own
-      # bookkeeping as much as ours — a 240s cbor run reaches 2 GB of RSS
+      # bookkeeping as much as ours: a 240s cbor run reaches 2 GB of RSS
       # while the code under test holds a flat 3.5 MB across half a million
       # executions, so the default 2048 would fail this job for a reason
       # that has nothing to do with zTensor.
@@ -108,8 +108,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # The bindings are not abi3 — the buffer protocol is not in the
-        # limited API — so a wheel is per-version. CI covers the floor and
+        # The bindings are not abi3, because the buffer protocol is not in
+        # the limited API, so a wheel is per-version. CI covers the floor and
         # the current release; publishing covers every version in between.
         python: ["3.9", "3.13"]
     steps:

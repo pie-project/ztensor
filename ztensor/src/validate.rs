@@ -3,7 +3,7 @@
 //! Two entry points onto the same rules: [`crate::validate_bytes`] over a
 //! complete in-memory image, which is what the conformance corpus and the fuzz
 //! targets drive, and an internal reader over a [`Store`], which reads only the
-//! footer and the manifest blob — so opening a 100 GB checkpoint to plan
+//! footer and the manifest blob, so opening a 100 GB checkpoint to plan
 //! against it touches two ranges, not a hundred gigabytes.
 
 use xxhash_rust::xxh3::xxh3_64;
@@ -32,8 +32,8 @@ pub(crate) struct Parsed {
     pub occupied: Vec<(u64, u64)>,
 }
 
-/// Checks the frame every container shares — minimum size, header magic,
-/// footer magic, supported version — and returns the footer slice.
+/// Checks the frame every container shares (minimum size, header magic,
+/// footer magic, supported version) and returns the footer slice.
 /// (Reserved footer bytes are written as zero and ignored on read.)
 pub(crate) fn check_container(buf: &[u8]) -> Result<&[u8]> {
     if (buf.len() as u64) < MIN_FILE_LEN {

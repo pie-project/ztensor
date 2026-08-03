@@ -1,5 +1,5 @@
 //! Multi-file models (spec §7): the shard table, resolution, and the overlay
-//! story — a LoRA root that references the base model's blobs directly.
+//! story, where a LoRA root references the base model's blobs directly.
 //!
 //! This is the shape a `Source` gets by *verification*: the root states each
 //! shard's size and digest, so opening one checks that the files on disk are
@@ -73,8 +73,8 @@ fn lora_overlay() {
         &delta[..]
     );
 
-    // The address names the file it came from, which is the whole point of a
-    // store id: two tensors of one model, two different files.
+    // The address names the file it came from, which is what a store id is
+    // for: two tensors of one model, living in two different files.
     let base_at = model.tensor("base.weight").unwrap().locate().unwrap();
     let lora_at = model
         .tensor("base.weight.lora_a")
@@ -86,7 +86,7 @@ fn lora_overlay() {
     assert_eq!(model.store(lora_at.store).path(), lora_path);
 
     // The base is itself a manifest-carrying container, so its occupancy is
-    // known and page exclusivity is a fact rather than a guess — a tensor in
+    // known and page exclusivity is a fact rather than a guess, so a tensor in
     // another file is as evictable as one at home.
     let caps = model.tensor("base.weight").unwrap().caps().unwrap();
     assert!(caps.map && caps.locate && caps.verify);
@@ -258,7 +258,7 @@ fn a_single_file_is_the_degenerate_case() {
 }
 
 /// A name is a label, so the resolver is free to ignore it and match on
-/// identity instead — which is the only thing that survives a rename.
+/// identity instead, which is the only thing that survives a rename.
 #[test]
 fn shards_found_by_identity_after_a_rename() {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("byid");
@@ -328,7 +328,7 @@ fn a_shard_name_cannot_be_a_path() {
             .create(tmp("badname.zt"))
             .unwrap();
         // The writer reports reader rules as InvalidInput, carrying the
-        // rule's own message — see `writer::invalid`.
+        // rule's own message. See `writer::invalid`.
         let err = w.add_shard(name, &identity).unwrap_err();
         assert!(
             matches!(err, Error::InvalidInput(_)),
@@ -339,7 +339,7 @@ fn a_shard_name_cannot_be_a_path() {
 }
 
 /// Registering the same name twice is fine if it means the same file, and an
-/// error if it does not — silently keeping one of two identities would make
+/// error if it does not. Silently keeping one of two identities would make
 /// the manifest a claim nobody checked.
 #[test]
 fn a_name_means_one_shard() {
@@ -364,7 +364,7 @@ fn a_name_means_one_shard() {
 
 #[test]
 fn resolver_trait_objects() {
-    // The CAS path shape (no file IO — just the mapping).
+    // The CAS path shape (no file IO, just the mapping).
     let cas = ztensor::CasResolver {
         store: PathBuf::from("/store"),
     };

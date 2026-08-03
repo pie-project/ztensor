@@ -1,12 +1,13 @@
 //! ONNX → zTensor object model projection.
 //!
 //! Extracts graph initializers (the model weights) from the protobuf
-//! stream with a minimal hand-written wire-format parser — no protobuf
+//! stream with a minimal hand-written wire-format parser, so no protobuf
 //! dependency. A `raw_data` tensor is a plain range of the file, so it gets an
 //! address and a borrow; the typed repeated fields (`float_data`,
 //! `int32_data`, ...) have to be converted to little-endian bytes per the ONNX
 //! storage rules (small types are stored one element per int32), so they exist
-//! only once this reader has built them — an opaque payload, and it says so.
+//! only once this reader has built them, so they are an opaque payload and
+//! report as much.
 //!
 //! Graphs, nodes, and attributes are out of scope: this reads weights,
 //! not computation. External data files are refused, not resolved.

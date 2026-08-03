@@ -11,7 +11,7 @@ w.finish()?;
 
 let src = Source::open("model.zt")?;
 let t = src.tensor("weights")?;
-let bytes = t.map()?;      // borrowed, or an error — never a hidden copy
+let bytes = t.map()?;      // borrowed, or an error; never a copy
 # Ok::<(), ztensor::Error>(())
 ```
 
@@ -31,12 +31,12 @@ Three ways to get at a part's bytes, one per intent:
 `caps()` reports which will work, per part, and each of its fields is computed
 by the very precondition the matching method checks.
 
-- **Foreign formats** — safetensors, GGUF, `.npz`, `.pt`, HDF5, ONNX — are read
+- **Foreign formats** (safetensors, GGUF, `.npz`, `.pt`, HDF5, ONNX) are read
   through [`ztensor-compat`](https://crates.io/crates/ztensor-compat), which
   projects each into this same object model.
-- **Command line** — [`ztensor-cli`](https://crates.io/crates/ztensor-cli)
+- **Command line**: [`ztensor-cli`](https://crates.io/crates/ztensor-cli)
   installs `zt`, for inspecting, verifying, converting and diffing.
-- **Specification** — the normative rules live in
+- **Specification**: the normative rules live in
   [`spec/ztensor-v2-spec.md`](https://github.com/pie-project/ztensor/blob/main/spec/ztensor-v2-spec.md).
 
 Features: `zstd` enables the `zt.zstd-seekable/1` encoding profile.

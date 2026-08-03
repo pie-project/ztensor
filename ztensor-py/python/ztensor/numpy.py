@@ -13,7 +13,7 @@ those questions of.
 
 Zero-copy arrays are views onto the file's mapping and stay valid as long as
 the array (or anything derived from it) is alive, because each one holds a
-reference back through DLPack. They are read-only — writing to a file you did
+reference back through DLPack. They are read-only: writing to a file you did
 not open for writing is not something a loader should let you do by accident.
 """
 
@@ -38,7 +38,7 @@ _FROM_NUMPY = {
 }
 
 # numpy's bool_ is one byte per element, which is the storage the `bool`
-# logical type pins — the logical type is what keeps 0/1 a promise.
+# logical type pins. The logical type is what keeps 0/1 a promise.
 _BOOL = np.dtype(np.bool_)
 
 _ELEMENT_BYTES = {
@@ -53,7 +53,7 @@ def _as_array(tensor, copy: bool):
     dtype for it.
 
     Types numpy cannot express (bf16 without ``ml_dtypes``, fp8, fp4) come back
-    as ``uint8`` with the element boundary kept as a trailing axis — the shape
+    as ``uint8`` with the element boundary kept as a trailing axis, so the shape
     is never silently dropped, because a flat byte array that used to be a
     matrix is the kind of thing that is noticed three bugs later.
     """
@@ -83,7 +83,7 @@ def load_file(path, copy: bool = False, dense_only: bool = True) -> dict:
     """Loads every tensor of a file of any supported format.
 
     With ``copy=False`` (the default) arrays are zero-copy views where the
-    source allows it, and copies where it does not — the per-tensor answer is
+    source allows it, and copies where it does not. The per-tensor answer is
     ``src[name].caps.map``.
 
     ``dense_only=False`` includes non-dense layouts, whose parts have no single

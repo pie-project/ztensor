@@ -31,6 +31,6 @@ bytes on disk are not the bytes the part denotes.
 
 A single zstd stream would make the part decodable only from its start,
 which turns a tensor-parallel slice into a full inflate. The equal-frame
-rule is what makes the seek table an index rather than a list to scan, and
+rule makes the seek table an index rather than a list to scan, and
 the checksum is what keeps a corrupt frame from decoding into plausible
 garbage.

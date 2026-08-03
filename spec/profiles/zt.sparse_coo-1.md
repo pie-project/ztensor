@@ -47,7 +47,8 @@ Data rules (checked when the object is assembled):
 
 - Every coordinate in dimension `d` MUST be `< shape[d]`.
 - Coordinates MUST be unique: no two elements may name the same cell.
-  (Ordering is otherwise unconstrained — COO is a set, not a sequence.)
+  (Ordering is otherwise unconstrained, since COO is a set rather than a
+  sequence.)
 
 ## Attributes
 

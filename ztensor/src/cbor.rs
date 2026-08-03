@@ -541,7 +541,7 @@ mod tests {
 
     #[test]
     fn rejects_unsorted_and_dup_on_decode() {
-        // {"b": 0, "a": 0} — wrong order
+        // {"b": 0, "a": 0}, which is the wrong order
         let bytes = [0xa2, 0x61, b'b', 0x00, 0x61, b'a', 0x00];
         assert!(matches!(
             decode(&bytes),
@@ -579,7 +579,7 @@ mod tests {
         assert!(decode(&[0xf9, 0x7e, 0x00]).is_ok()); // canonical NaN
     }
 
-    /// Regression: fuzz_cbor crash — a map with two distinct NaN-payload
+    /// Regression: fuzz_cbor crash on a map with two distinct NaN-payload
     /// float keys decoded fine but re-encoded into duplicate keys.
     /// A declared length never drives an allocation.
     ///

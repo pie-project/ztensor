@@ -2,7 +2,7 @@
 //!
 //! `valid/` holds files a conforming reader must accept (including data
 //! shards and files that are only structurally readable); `reject/` holds
-//! files it must reject — the expected rule for each lives in
+//! files it must reject. The expected rule for each lives in
 //! `conformance::all_cases()`, which is the source of truth.
 
 use std::fs;
@@ -15,8 +15,8 @@ fn main() {
     let valid = root.join("valid");
     let reject = root.join("reject");
     // The corpus directory is generated output, so it is rebuilt from
-    // scratch: a file left behind by a renamed case — or written into it
-    // by another tool — would otherwise ship as if it were a golden file.
+    // scratch. A file left behind by a renamed case, or written into it by
+    // another tool, would otherwise ship as if it were a golden file.
     let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(&valid).unwrap();
     fs::create_dir_all(&reject).unwrap();

@@ -63,7 +63,7 @@ fn an_indexed_source_locates_without_mapping() {
     let mapped = Source::open(&path).unwrap();
     let indexed = Source::index(&path).unwrap();
 
-    // The same address either way — that is what makes it an address.
+    // The same address either way.
     let here = mapped.tensor("x").unwrap().locate().unwrap();
     let there = indexed.tensor("x").unwrap().locate().unwrap();
     assert_eq!(here.offset, there.offset);
@@ -268,7 +268,7 @@ fn manifest_of(objs: Vec<(&str, Value)>) -> Value {
 #[test]
 fn reject_partial_overlap() {
     let path = tmp("overlap.zt");
-    // blob A: [4096, 12288), blob B: [8192, 8200) — inside A.
+    // blob A: [4096, 12288), blob B: [8192, 8200), which is inside A.
     let m = manifest_of(vec![
         ("a", dense_obj("f32", &[2048], 4096, 8192)),
         ("b", dense_obj("f32", &[2], 8192, 8)),

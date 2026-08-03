@@ -7,7 +7,7 @@
 //!
 //! A contiguous dataset is a plain range of the file, so it gets an address
 //! and a borrow. A chunked one is scattered across the file behind filters, so
-//! it is reassembled once at open and served as an opaque payload — there is
+//! it is reassembled once at open and served as an opaque payload. There is
 //! no range of this file that holds those bytes in order, and pretending
 //! otherwise would be the one lie this crate does not tell.
 //!
@@ -122,7 +122,7 @@ impl Ctx {
         uint(data, pos, self.l)
     }
     /// The "undefined address" sentinel is all-ones *in this file's offset
-    /// width* — `0xFFFFFFFF` in a 4-byte-offset file, not `u64::MAX`.
+    /// width*: `0xFFFFFFFF` in a 4-byte-offset file, rather than `u64::MAX`.
     fn is_undef(&self, addr: u64) -> bool {
         addr == u64::MAX >> ((8 - self.o.min(8)) * 8)
     }
@@ -201,7 +201,7 @@ pub(crate) fn project(store: &Store) -> Result<Projection> {
         ..
     } = walker;
 
-    // Skipped datasets are recorded in the projection, not just behind an
+    // Skipped datasets are recorded in the projection rather than only behind an
     // accessor: a consumer that only sees the tensors would otherwise have no
     // way to notice they exist.
     if !skipped.is_empty() {
@@ -213,7 +213,7 @@ pub(crate) fn project(store: &Store) -> Result<Projection> {
 
     // Contiguous datasets are the only ranges we can account for, and an HDF5
     // file has object headers and B-trees between them that we have not
-    // mapped — so occupancy is not claimed and neither is exclusivity.
+    // mapped, so occupancy is not claimed and neither is exclusivity.
     let _ = occupied;
     let projection = Projection::new(catalog);
     Ok(if chunked.is_empty() {
@@ -644,7 +644,7 @@ fn parse_dataspace(data: &[u8], pos: usize) -> Result<Vec<u64>> {
 }
 
 /// Returns `Ok(None)` for datatype classes without a projection (strings,
-/// compounds — the dataset is skipped); errors for numeric-but-unreadable
+/// compounds, where the dataset is skipped); errors for numeric-but-unreadable
 /// (big-endian) data.
 fn parse_datatype(data: &[u8], pos: usize) -> Result<Option<DType>> {
     let class = u8_at(data, pos)? & 0x0f;

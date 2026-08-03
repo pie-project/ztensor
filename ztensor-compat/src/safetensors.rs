@@ -7,12 +7,12 @@
 //! This is a deliberately strict reader. safetensors headers are JSON, and
 //! JSON parsers resolve duplicate keys silently (the classic safetensors
 //! aliasing attack); we defuse that class entirely by requiring the tensor
-//! ranges to tile the data section exactly — sorted, gap-free, overlap-free,
+//! ranges to tile the data section exactly: sorted, gap-free, overlap-free,
 //! ending at EOF. A file that fails any of it is rejected.
 //!
 //! Every tensor is a raw range of the file, so every one of them gets a
-//! [`Payload::At`]: addressable, mappable, and — where the ranges happen to
-//! land on pages — evictable. What they never get is a digest, because the
+//! [`Payload::At`]: addressable, mappable, and evictable where the ranges
+//! happen to land on pages. What they never get is a digest, because the
 //! format carries none.
 
 use serde_json::Value as Json;
@@ -49,7 +49,7 @@ fn map_dtype(st: &str) -> Result<(DType, Option<&'static str>)> {
         "F8_E4M3" => (DType::U8, Some("f8_e4m3fn")),
         "F8_E5M2" => (DType::U8, Some("f8_e5m2")),
         // Sub-byte and exponent-only tags. Both ride on `U8` storage, and the
-        // logical type is what keeps them readable: `f4_e2m1` is what makes the
+        // logical type is what keeps them readable: `f4_e2m1` gives the
         // header's byte range half the element count rather than equal to it,
         // and `f8_e8m0` is the difference between a scale a consumer can apply
         // and a byte it would have to guess about.
@@ -181,7 +181,7 @@ pub(crate) fn project(store: &Store) -> Result<Projection> {
     }
 
     // The header occupies everything before the first tensor, and the tensors
-    // tile the rest — so the occupancy map is exact, and page exclusivity is a
+    // tile the rest, so the occupancy map is exact and page exclusivity is a
     // fact about this file rather than an assumption.
     let mut occupied = vec![(0, data_start)];
     occupied.extend(

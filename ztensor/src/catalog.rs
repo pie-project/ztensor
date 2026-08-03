@@ -4,7 +4,7 @@
 //! [`Manifest`](crate::schema::Manifest). A manifest is one file's own claim,
 //! addressed through that file's shard table. A catalog is process-local: its
 //! addresses are [`StoreId`]s, so it can span files that never heard of each
-//! other — a sharded snapshot, a mixed set, a single foreign file — without
+//! other: a sharded snapshot, a mixed set, or a single foreign file, without
 //! anyone having to claim an identity nobody wrote down.
 //!
 //! Every projection in the compat crate produces one of these. None of them
@@ -53,7 +53,7 @@ pub enum Payload {
         encoding: String,
         decoded_len: u64,
     },
-    /// Only the projection that opened the file can produce these bytes — a
+    /// Only the projection that opened the file can produce these bytes, as with a
     /// deflated archive entry, a chunked dataset. Readable, nothing more.
     Opaque {
         store: StoreId,
@@ -106,7 +106,7 @@ pub struct PartEntry {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Entry {
     pub shape: Vec<u64>,
-    /// Layout profile id — `"dense"` for anything with a single `"data"` part.
+    /// Layout profile id. `"dense"` for anything with a single `"data"` part.
     pub layout: String,
     pub attributes: Option<Value>,
     pub parts: BTreeMap<String, PartEntry>,
