@@ -17,12 +17,10 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use xxhash_rust::xxh3::{xxh3_64, Xxh3};
-
 use crate::catalog::{Catalog, Entry, Location, PartEntry, Payload};
 use crate::cbor::Value;
 use crate::error::{Error, Result, Rule};
-use crate::schema::{parse_xxh3, DType, Manifest, Shard};
+use crate::schema::{digest_matches, DType, DigestAlgorithm, Hasher, Manifest, Shard};
 use crate::store::{Store, StoreId};
 use crate::validate;
 use crate::vocab::Vocabulary;
@@ -674,14 +672,14 @@ impl Source {
         }
         for (position, (name, shard)) in manifest.shards.iter().enumerate() {
             let store = &self.stores[position + 1];
-            let mut hasher = Xxh3::new();
+            let mut hasher = Hasher::new(DigestAlgorithm::of_digest(&shard.digest)?);
             let mut at = 0u64;
             while at < store.len() {
                 let n = (store.len() - at).min(1 << 20);
                 hasher.update(&store.read(at, n)?);
                 at += n;
             }
-            if hasher.digest() != parse_xxh3(&shard.digest)? {
+            if hasher.finish() != shard.digest {
                 return Err(Error::reject(
                     Rule::ShardIdentity,
                     format!("shard {name:?}: digest mismatch"),
@@ -997,7 +995,7 @@ impl<'a> Part<'a> {
         match &self.entry.digest {
             None => Ok(Verified::NoDigest),
             Some(digest) => {
-                if xxh3_64(&bytes) != parse_xxh3(digest)? {
+                if !digest_matches(digest, &bytes)? {
                     return Err(Error::reject(
                         Rule::Digest,
                         format!("digest mismatch for {}", self.label()),
@@ -1055,9 +1053,19 @@ impl<'a> Part<'a> {
 /// The frame is checked first, so a file that is not a container is an error
 /// rather than a digest of something else.
 pub fn shard_identity(path: impl AsRef<Path>) -> Result<Shard> {
+    shard_identity_with(path, DigestAlgorithm::Xxh3)
+}
+
+/// The identity of a `.zt` container, digested with `algo`.
+///
+/// Use [`DigestAlgorithm::Sha256`] for anything that will be signed or
+/// distributed: the root manifest then commits to every shard byte, so one
+/// signature over the root covers the whole model (§6.5). `Xxh3` is faster and
+/// is what a local, unsigned set wants.
+pub fn shard_identity_with(path: impl AsRef<Path>, algo: DigestAlgorithm) -> Result<Shard> {
     let store = Store::index(path.as_ref(), "zt")?;
     validate::read(&store, &Vocabulary::shared())?;
-    let mut hasher = Xxh3::new();
+    let mut hasher = Hasher::new(algo);
     let mut at = 0u64;
     while at < store.len() {
         let n = (store.len() - at).min(1 << 20);
@@ -1066,6 +1074,6 @@ pub fn shard_identity(path: impl AsRef<Path>) -> Result<Shard> {
     }
     Ok(Shard {
         size: store.len(),
-        digest: format!("xxh3:{:016x}", hasher.digest()),
+        digest: hasher.finish(),
     })
 }

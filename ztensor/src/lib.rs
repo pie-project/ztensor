@@ -54,13 +54,13 @@ pub mod writer;
 pub use catalog::{Catalog, Entry, Location, PartEntry, Payload};
 pub use error::{Error, Result, Rule};
 pub use schema::{
-    check_shard_name, BlobRef, DType, Manifest, Object, Shard, ALIGN_CANONICAL, ALIGN_FLOOR,
-    FOOTER_LEN, MAGIC, MAX_MANIFEST_LEN, MAX_NAME_LEN, MAX_RANK, MAX_SHARD_NAME, MIN_FILE_LEN,
-    VERSION,
+    check_shard_name, BlobRef, DType, DigestAlgorithm, Manifest, Object, Shard, ALIGN_CANONICAL,
+    ALIGN_FLOOR, FOOTER_LEN, MAGIC, MAX_MANIFEST_LEN, MAX_NAME_LEN, MAX_RANK, MAX_SHARD_NAME,
+    MIN_FILE_LEN, VERSION,
 };
 pub use source::{
-    shard_identity, Bytes, Caps, CasResolver, DirectoryResolver, Part, PositionalResolver,
-    ShardResolver, Source, Tensor, Verified,
+    shard_identity, shard_identity_with, Bytes, Caps, CasResolver, DirectoryResolver, Part,
+    PositionalResolver, ShardResolver, Source, Tensor, Verified,
 };
 pub use store::{page_size, Opaque, Store, StoreId};
 pub use validate::{image as validate_bytes, manifest_of};

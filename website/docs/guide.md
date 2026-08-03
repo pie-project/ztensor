@@ -73,7 +73,8 @@ w.finish()?;
 ```
 
 Two canonical writes of the same tensors produce byte-identical files, so a
-file's hash is a stable identity for the model.
+canonical file's hash is a stable identity for that artifact. For an identity
+that survives being re-aligned or split, see the content digest below.
 
 ### Building anything else
 
@@ -135,6 +136,44 @@ let mut w = Writer::publish("model.zt")?;   // writes beside it, renames at the 
 
 Nothing appears at the path until `finish`, and a writer dropped without
 finishing leaves nothing behind.
+
+### Is it canonical?
+
+Canonical form is the recommended distribution format, and a file carries no
+mark saying it is one. It does not need to: all six rules of the spec are
+decidable from the bytes.
+
+```bash
+zt verify model.zt --canonical
+```
+
+```text
+model.zt: ok. 3 part(s) digest-verified, 0 without digests
+  canonical form: no
+    rule 2: "t"/"data" is at offset 4096, which is not a multiple of 65536
+```
+
+A non-canonical file is still fully conforming; this answers a different
+question from "is it valid".
+
+### What model is this?
+
+A file's hash identifies the *file*. Two files holding the same tensors have
+different hashes if they were aligned or split differently. The content digest
+identifies the *model*:
+
+```bash
+zt id model.zt
+```
+
+It is computed from the manifest alone, so it costs nothing on a 100 GB
+checkpoint, and it is the same whether the model is one file or fifty.
+
+```rust
+let digest = ztensor::manifest_of("model.zt")?
+    .unwrap()
+    .content_digest(ztensor::DigestAlgorithm::Sha256)?;
+```
 
 ## Converting
 
@@ -205,6 +244,17 @@ w.add_shard("base", &ztensor::shard_identity("base.zt")?)?;
 w.link("base.weight", &object, "base")?;
 w.add("base.weight.lora_a", [64u64], DType::F32, &delta)?;
 w.finish()?;
+```
+
+### Signing a sharded model
+
+A root records each shard's size and digest, so a root whose digests are
+`sha256` commits to every shard byte. One signature over the root then covers
+the whole model.
+
+```rust
+let id = ztensor::shard_identity_with("model-00001.zt", DigestAlgorithm::Sha256)?;
+w.add_shard("00001", &id)?;
 ```
 
 ### Files that were not written together

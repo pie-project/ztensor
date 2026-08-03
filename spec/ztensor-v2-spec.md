@@ -1,6 +1,6 @@
 # zTensor Container Format, Version 2
 
-**Status:** Draft 3 · **File extension:** `.zt` · **Footer version integer:** `2`
+**Status:** Draft 4 · **File extension:** `.zt` · **Footer version integer:** `2`
 
 ---
 
@@ -407,8 +407,10 @@ Cheapest first; each rung is independent:
    (on whenever the encoding is used).
 4. **Content**: per-part `digest` over decoded bytes (optional; verify
    mode).
-5. **Model identity / provenance**: whole-file hash of a canonical file,
-   optionally signed (§6.4).
+5. **Artifact identity**: whole-file hash of a canonical file, optionally
+   signed (§6.5).
+6. **Model identity**: content digest (§6.4), which is the same for a model
+   however it was laid out or split.
 
 ### 6.2 What is deliberately not protected
 
@@ -451,7 +453,65 @@ and evicted (`madvise`) with exact page ranges, on every platform, with no
 fallback path. Average cost is 32 KiB per tensor, which is noise at weight-file
 scale.
 
-### 6.4 Signing
+### 6.4 Content digest
+
+The whole-file hash of §6.1 rung 5 identifies an *artifact*: these bytes, this
+layout, this file. Two files holding the same tensors have different hashes if
+they were aligned differently, split differently, or written in a different
+order. That is what canonical form exists to pin down, and it is why canonical
+form is single-file (§6.3 rule 6): once a model is split, there is no fixed
+layout to hash.
+
+The **content digest** identifies the *model* instead, and is defined so that
+layout cannot reach it. It is computed over this CBOR value, encoded with the
+deterministic rules of §3.1:
+
+```text
+[
+  "zt.content/1",
+  {
+    "<object name>": {
+      "shape":   [u64, ...],
+      "layout":  "<layout id>",
+      "attributes": <the object's attributes, or omitted>,
+      "parts": {
+        "<part name>": {
+          "dtype":  "<dtype>",
+          "type":   "<logical type>",   ; omitted when absent
+          "digest": "<algo>:<hex>"      ; the part's digest, over decoded bytes
+        }
+      }
+    }
+  }
+]
+```
+
+The value is a two-element array: a version tag, and the manifest's `objects`
+map reduced to the fields above. Map keys are sorted by §3.1, so the object and
+part order is fixed. The digest of the whole is
+`"<algo>:<hex>"` for whichever algorithm the caller chose.
+
+What is deliberately absent is every fact about layout: offsets, lengths,
+alignment, padding, blob sharing, encodings, the shard table, shard names,
+shard digests, and how many files there are. A part's `digest` covers
+**decoded** bytes (§3.4), so re-encoding a blob does not reach the content
+digest either.
+
+Consequences:
+
+- The same tensors give the same content digest whether they are in one file
+  or fifty, at 4 KiB or 64 KiB placement, raw or compressed.
+- It is computable from the manifest alone. A reader that has fetched a root
+  and nothing else can compute it, at no I/O cost proportional to the model.
+- It is defined only when **every part carries a digest**. Where one does not,
+  there is nothing to stand for that part's content, and the content digest is
+  undefined rather than approximated. Canonical form guarantees the digests
+  (§6.3 rule 4).
+
+The content digest MUST NOT be stored in the file. A stored value is a claim
+that can be false; a computed one cannot be.
+
+### 6.5 Signing
 
 Signing is out-of-band: a detached signature over the bytes (or a
 cryptographic hash) of a canonical file. For multi-file models, signing the
@@ -487,7 +547,7 @@ the blob reference, with the single file as the degenerate case.
 - Every entry MUST carry `size` (exact file size in bytes) and `digest`
   (whole-file). Because a name is only a label, the digest **is** the shard's
   identity; it is therefore required, not optional. `xxh3` is the minimum;
-  distribution files intended for signing SHOULD use `sha256` (§6.4).
+  distribution files intended for signing SHOULD use `sha256` (§6.5).
 - When `shards` is absent, no part may carry a `shard` field.
 
 A shard name is a **label**, not a **location**: no paths or URLs appear

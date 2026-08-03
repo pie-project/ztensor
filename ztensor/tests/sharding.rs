@@ -375,3 +375,198 @@ fn resolver_trait_objects() {
     let path = cas.resolve("anything", &shard).unwrap();
     assert_eq!(path, PathBuf::from("/store/blobs/xxh3/00ff00ff00ff00ff"));
 }
+
+/// A sha256 shard identity, produced and then checked.
+///
+/// §6.4 makes this the basis of signing: a root whose shard digests are
+/// cryptographic commits to every shard byte, so one signature over the root
+/// covers the model. That only holds if the digest can be *verified*, which is
+/// why generating one without being able to check it would be worse than not
+/// generating it at all.
+#[test]
+fn a_sha256_shard_identity_round_trips() {
+    use ztensor::DigestAlgorithm;
+
+    let shard_path = tmp("sha-shard.zt");
+    let payload = vec![3u8; 4096];
+    let mut ds = DataShardWriter::create_with(&shard_path, 4096, DigestAlgorithm::Sha256).unwrap();
+    let offset = ds.add_blob(&payload).unwrap();
+    let from_writer = ds.finish().unwrap();
+
+    assert!(
+        from_writer.digest.starts_with("sha256:"),
+        "{}",
+        from_writer.digest
+    );
+    assert_eq!(from_writer.digest.len(), "sha256:".len() + 64);
+
+    // Reading the finished file back must give the same identity.
+    let scanned = ztensor::shard_identity_with(&shard_path, DigestAlgorithm::Sha256).unwrap();
+    assert_eq!(scanned, from_writer);
+    // And the default is still xxh3, over the same bytes.
+    let default = ztensor::shard_identity(&shard_path).unwrap();
+    assert!(default.digest.starts_with("xxh3:"));
+    assert_eq!(default.size, from_writer.size);
+
+    // A root that records it, and a deep verify that checks it.
+    let root_path = tmp("sha-root.zt");
+    let mut w = Writer::options()
+        .canonical(false)
+        .align(4096)
+        .create(&root_path)
+        .unwrap();
+    w.add_shard("data", &from_writer).unwrap();
+    w.object("t")
+        .shape([4096u64])
+        .part("data")
+        .dtype(DType::U8)
+        .external(schema::Part {
+            dtype: DType::U8,
+            logical: None,
+            blob: BlobRef {
+                shard: Some("data".into()),
+                offset,
+                length: payload.len() as u64,
+            },
+            encoding: None,
+            decoded_length: None,
+            digest: None,
+        })
+        .add()
+        .unwrap();
+    w.finish().unwrap();
+
+    let model = open_with_shard_at(&root_path, shard_path.clone()).unwrap();
+    assert_eq!(&*model.tensor("t").unwrap().bytes().unwrap(), &payload[..]);
+    model.verify_shards().unwrap();
+
+    // A corrupted shard is caught by the sha256 path, not waved through.
+    let mut bytes = fs::read(&shard_path).unwrap();
+    bytes[4096] ^= 0xff;
+    let corrupted = tmp("sha-shard-corrupt.zt");
+    fs::write(&corrupted, &bytes).unwrap();
+    let model = open_with_shard_at(&root_path, corrupted).unwrap();
+    let err = model.verify_shards().unwrap_err();
+    assert_eq!(err.rule(), Some(Rule::ShardIdentity), "{err}");
+}
+
+/// A part digest in any algorithm this build knows is checked, not waved
+/// through.
+///
+/// The writer always writes `xxh3` part digests, which is what canonical form
+/// requires (§6.3 rule 4) and what corruption detection wants. Verification is
+/// the other half: a file from elsewhere may use `sha256`, and reading it must
+/// check that digest rather than report "unsupported" or, worse, skip it.
+#[test]
+fn a_sha256_part_digest_is_verified() {
+    use xxhash_rust::xxh3::xxh3_64;
+    use ztensor::cbor::{self, Value};
+    use ztensor::DigestAlgorithm;
+
+    let data = vec![0xabu8; 256];
+    let text = |s: &str| Value::Text(s.to_string());
+
+    // Builds a file whose one part claims `digest`, over filler bytes that the
+    // real payload matches.
+    let build = |name: &str, digest: String| -> PathBuf {
+        let manifest = Value::Map(vec![(
+            text("objects"),
+            Value::Map(vec![(
+                text("t"),
+                Value::Map(vec![
+                    (text("shape"), Value::Array(vec![Value::Uint(256)])),
+                    (text("layout"), text("dense")),
+                    (
+                        text("parts"),
+                        Value::Map(vec![(
+                            text("data"),
+                            Value::Map(vec![
+                                (text("dtype"), text("u8")),
+                                (
+                                    text("blob"),
+                                    Value::Array(vec![Value::Uint(4096), Value::Uint(256)]),
+                                ),
+                                (text("digest"), text(&digest)),
+                            ]),
+                        )]),
+                    ),
+                ]),
+            )]),
+        )]);
+        let encoded = cbor::encode(&manifest).unwrap();
+        let mut bytes = vec![0u8; 8192];
+        bytes[..8].copy_from_slice(&ztensor::MAGIC);
+        bytes[4096..4096 + data.len()].copy_from_slice(&data);
+        bytes.extend_from_slice(&encoded);
+        let mut footer = [0u8; 40];
+        footer[0..8].copy_from_slice(&8192u64.to_le_bytes());
+        footer[8..16].copy_from_slice(&(encoded.len() as u64).to_le_bytes());
+        footer[16..24].copy_from_slice(&xxh3_64(&encoded).to_le_bytes());
+        footer[24..28].copy_from_slice(&2u32.to_le_bytes());
+        footer[32..40].copy_from_slice(&ztensor::MAGIC);
+        bytes.extend_from_slice(&footer);
+        let path = tmp(name);
+        fs::write(&path, &bytes).unwrap();
+        path
+    };
+
+    let good = build("sha-part-ok.zt", DigestAlgorithm::Sha256.digest(&data));
+    assert!(
+        Source::open(&good)
+            .unwrap()
+            .tensor("t")
+            .unwrap()
+            .verify()
+            .unwrap()
+            .checked(),
+        "a sha256 part digest must be checked, not skipped"
+    );
+
+    // The same file, claiming the digest of different bytes.
+    let bad = build(
+        "sha-part-bad.zt",
+        DigestAlgorithm::Sha256.digest(&[0u8; 256]),
+    );
+    let err = Source::open(&bad)
+        .unwrap()
+        .tensor("t")
+        .unwrap()
+        .verify()
+        .unwrap_err();
+    assert_eq!(err.rule(), Some(Rule::Digest), "{err}");
+}
+
+/// The digests are the ones the rest of the world computes.
+///
+/// A digest that is merely self-consistent would pass every round-trip test in
+/// this file and still be useless: the point of `sha256` here is that a tool
+/// which has never seen this crate can check a signature over it.
+#[test]
+fn the_digests_match_the_published_vectors() {
+    use ztensor::DigestAlgorithm;
+
+    assert_eq!(
+        DigestAlgorithm::Sha256.digest(b""),
+        "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    );
+    assert_eq!(
+        DigestAlgorithm::Sha256.digest(b"abc"),
+        "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    );
+    // A whole-file digest is computed a chunk at a time, so that path has to
+    // produce a real sha256 too, not just a self-consistent one.
+    let long = vec![0x5au8; 1 << 20];
+    let path = tmp("sha-chunked.zt");
+    let mut w = Writer::create(&path).unwrap();
+    w.add("t", [long.len() as u64], DType::U8, &long).unwrap();
+    w.finish().unwrap();
+
+    let streamed = ztensor::shard_identity_with(&path, DigestAlgorithm::Sha256).unwrap();
+    let whole_file = fs::read(&path).unwrap();
+    assert_eq!(
+        streamed.digest,
+        DigestAlgorithm::Sha256.digest(&whole_file),
+        "the chunked digest must equal the one-shot digest of the same bytes"
+    );
+    assert_eq!(streamed.size, whole_file.len() as u64);
+}

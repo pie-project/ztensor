@@ -149,6 +149,21 @@ A canonical write hashes every byte, pads to 64 KiB and shares blobs between
 identical tensors. You pay that once when the artifact is written, not on
 each load.
 
+## Two kinds of identity
+
+A file's hash answers "did I get this exact artifact". It changes if the same
+tensors are re-aligned or split across files, which is what canonical form
+exists to pin down, and why canonical form is single-file.
+
+The **content digest** answers "is this the same model". Layout is left out of
+it, so one file and fifty shards of the same tensors give the same value, and
+it is computed from the manifest alone at no cost proportional to the model.
+
+```bash
+zt id model.zt          # sha256:4811d499...
+zt verify model.zt --canonical
+```
+
 ## The capability ladder
 
 Different files support different operations, and the API reports which:

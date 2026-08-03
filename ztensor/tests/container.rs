@@ -97,6 +97,60 @@ fn canonical_is_deterministic() {
     assert_eq!(fs::read(&p1).unwrap(), fs::read(&p2).unwrap());
 }
 
+/// Writing the same thing twice gives the same bytes outside canonical form
+/// too, which is the path every sharded model takes.
+///
+/// Nothing in the non-canonical writer reads the clock or the environment, so
+/// this holds by construction. It is pinned here because "holds by
+/// construction" is a claim about code as it stands, and this is the path
+/// sharding uses: canonical form is single-file by rule 6, so any model split
+/// across files is written by the code this covers and by nothing else.
+#[test]
+fn non_canonical_writes_are_reproducible_too() {
+    let write = |path: &PathBuf| {
+        let mut w = Writer::options()
+            .canonical(false)
+            .align(4096)
+            .create(path)
+            .unwrap();
+        // Deliberately unsorted, encoded, multi-part, attribute-carrying: the
+        // freedoms canonical form removes are exactly what is exercised here.
+        w.object("z.later")
+            .shape([2u64, 2])
+            .attr("note", "written first")
+            .part("data")
+            .dtype(DType::F32)
+            .bytes(&f32_bytes(&[1.0, 2.0, 3.0, 4.0]))
+            .add()
+            .unwrap();
+        w.object("a.earlier")
+            .shape([64u64])
+            .layout("zt.mx/1")
+            .attr("block_size", 32u64)
+            .part("data")
+            .dtype(DType::U8)
+            .logical("f4_e2m1")
+            .bytes(&[0xabu8; 32])
+            .part("scales")
+            .dtype(DType::U8)
+            .logical("f8_e8m0")
+            .bytes(&[7u8; 2])
+            .add()
+            .unwrap();
+        w.add("shared", [2u64], DType::U8, &[9, 9]).unwrap();
+        w.finish().unwrap();
+    };
+    let p1 = tmp("nondet1.zt");
+    let p2 = tmp("nondet2.zt");
+    write(&p1);
+    write(&p2);
+    assert_eq!(
+        fs::read(&p1).unwrap(),
+        fs::read(&p2).unwrap(),
+        "two identical non-canonical writes must agree byte for byte"
+    );
+}
+
 #[test]
 fn tied_weights_share_one_blob() {
     let path = tmp("tied.zt");

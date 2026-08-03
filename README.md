@@ -3,7 +3,7 @@
 An aligned, verifiable container format for tensor data, and one loader
 that reads every other tensor format into the same object model.
 
-**Crates 2.1.0 · Format `.zt` version 2 · Spec Draft 3**
+**Crates 2.2.0 · Format `.zt` version 2 · Spec Draft 4**
 
 *The crate version and the format version are not the same number and do not
 move together.*
@@ -235,7 +235,7 @@ cargo +nightly fuzz run fuzz_compat       # foreign-format parsers
 
 ## Status
 
-Pre-1.0 in intent if not in number: the format is Draft 3 and may still
+Pre-1.0 in intent if not in number: the format is Draft 4 and may still
 change.
 
 ## Documentation

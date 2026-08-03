@@ -219,6 +219,60 @@ pub struct Manifest {
     pub objects: BTreeMap<String, Object>,
 }
 
+impl Manifest {
+    /// The content digest of this model (spec §6.4).
+    ///
+    /// A whole-file hash identifies an *artifact*: those bytes, that layout.
+    /// This identifies the *model*, and is defined so that layout cannot reach
+    /// it. Offsets, lengths, alignment, padding, blob sharing, encodings and
+    /// the shard table are all absent, so the same tensors give the same
+    /// answer whether they sit in one file or fifty, packed at 4 KiB or
+    /// 64 KiB, raw or compressed.
+    ///
+    /// Computed from the manifest alone. A reader that has fetched a root and
+    /// nothing else can compute it, whatever the model weighs.
+    ///
+    /// # Errors
+    ///
+    /// `Unsupported` when a part carries no digest. A part's digest is what
+    /// stands for its content here, and with none there is nothing to stand
+    /// for it. Canonical form guarantees they are present (§6.3 rule 4).
+    pub fn content_digest(&self, algo: DigestAlgorithm) -> Result<String> {
+        let mut objects = Vec::with_capacity(self.objects.len());
+        for (name, object) in &self.objects {
+            let mut parts = Vec::with_capacity(object.parts.len());
+            for (pname, part) in &object.parts {
+                let Some(digest) = &part.digest else {
+                    return Err(Error::Unsupported(format!(
+                        "{name:?}/{pname:?} carries no digest, so this model has no content \
+                         digest (spec §6.4)"
+                    )));
+                };
+                let mut fields = vec![(text("dtype"), text(part.dtype.as_str()))];
+                if let Some(logical) = &part.logical {
+                    fields.push((text("type"), text(logical)));
+                }
+                fields.push((text("digest"), text(digest)));
+                parts.push((text(pname), Value::Map(fields)));
+            }
+            let mut fields = vec![
+                (
+                    text("shape"),
+                    Value::Array(object.shape.iter().copied().map(Value::Uint).collect()),
+                ),
+                (text("layout"), text(&object.layout)),
+            ];
+            if let Some(attributes) = &object.attributes {
+                fields.push((text("attributes"), attributes.clone()));
+            }
+            fields.push((text("parts"), Value::Map(parts)));
+            objects.push((text(name), Value::Map(fields)));
+        }
+        let value = Value::Array(vec![text("zt.content/1"), Value::Map(objects)]);
+        Ok(algo.digest(&crate::cbor::encode(&value)?))
+    }
+}
+
 /// Checks a shard name against §7.1.
 ///
 /// The character set is narrow on purpose. A resolver turns a name into a
@@ -293,16 +347,94 @@ pub(crate) fn check_attributes(v: &Value) -> Result<()> {
     Ok(())
 }
 
-/// Parses an `xxh3:` digest string to its expected value. Errors on other
-/// algorithms (Unsupported) or malformed hex (Reject).
-pub(crate) fn parse_xxh3(digest: &str) -> Result<u64> {
-    let hex = digest.strip_prefix("xxh3:").ok_or_else(|| {
-        Error::Unsupported(format!(
-            "digest algorithm in {digest:?} (only xxh3 supported)"
-        ))
-    })?;
-    u64::from_str_radix(hex, 16)
-        .map_err(|_| Error::reject(Rule::Digest, format!("malformed digest {digest:?}")))
+/// A digest algorithm this implementation can compute (spec §3.4).
+///
+/// `Xxh3` is the minimum every reader must have and is what canonical form
+/// uses: it detects corruption at memory speed. `Sha256` costs more and buys
+/// something different: it is not invertible, so a root manifest whose shard
+/// digests are `Sha256` commits to every shard byte, and one signature over
+/// that root covers the whole model (§6.5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DigestAlgorithm {
+    Xxh3,
+    Sha256,
+}
+
+impl DigestAlgorithm {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DigestAlgorithm::Xxh3 => "xxh3",
+            DigestAlgorithm::Sha256 => "sha256",
+        }
+    }
+
+    /// The algorithm named by a `"<algo>:<hex>"` digest.
+    ///
+    /// A digest this build cannot compute is `Unsupported`, never a rejection:
+    /// the file may be perfectly valid and simply newer than the reader.
+    pub fn of_digest(digest: &str) -> Result<Self> {
+        match digest.split_once(':').map(|(algo, _)| algo) {
+            Some("xxh3") => Ok(DigestAlgorithm::Xxh3),
+            Some("sha256") => Ok(DigestAlgorithm::Sha256),
+            _ => Err(Error::Unsupported(format!(
+                "digest algorithm in {digest:?}; this build computes xxh3 and sha256"
+            ))),
+        }
+    }
+
+    /// The full `"<algo>:<hex>"` digest of `bytes`.
+    pub fn digest(self, bytes: &[u8]) -> String {
+        let mut hasher = Hasher::new(self);
+        hasher.update(bytes);
+        hasher.finish()
+    }
+}
+
+/// Computes a digest a chunk at a time, so a whole-file digest never needs the
+/// whole file in memory.
+pub(crate) enum Hasher {
+    Xxh3(Box<xxhash_rust::xxh3::Xxh3>),
+    Sha256(sha2::Sha256),
+}
+
+impl Hasher {
+    pub(crate) fn new(algo: DigestAlgorithm) -> Self {
+        match algo {
+            DigestAlgorithm::Xxh3 => Hasher::Xxh3(Box::default()),
+            DigestAlgorithm::Sha256 => Hasher::Sha256(<sha2::Sha256 as sha2::Digest>::new()),
+        }
+    }
+
+    pub(crate) fn update(&mut self, bytes: &[u8]) {
+        match self {
+            Hasher::Xxh3(h) => h.update(bytes),
+            Hasher::Sha256(h) => sha2::Digest::update(h, bytes),
+        }
+    }
+
+    /// The `"<algo>:<lowercase hex>"` form the manifest stores.
+    pub(crate) fn finish(self) -> String {
+        match self {
+            Hasher::Xxh3(h) => format!("xxh3:{:016x}", h.digest()),
+            Hasher::Sha256(h) => {
+                let out = sha2::Digest::finalize(h);
+                let mut s = String::with_capacity(7 + out.len() * 2);
+                s.push_str("sha256:");
+                for byte in out {
+                    s.push_str(&format!("{byte:02x}"));
+                }
+                s
+            }
+        }
+    }
+}
+
+/// Recomputes `digest` over `bytes` and reports whether it matches.
+///
+/// Digest strings are lowercase hex by §3.4, which `check_digest` enforces, so
+/// comparing the strings is comparing the values.
+pub(crate) fn digest_matches(digest: &str, bytes: &[u8]) -> Result<bool> {
+    Ok(DigestAlgorithm::of_digest(digest)?.digest(bytes) == digest)
 }
 
 /// Digest format (spec §3.4): `"<algorithm>:<lowercase hex>"`.

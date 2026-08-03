@@ -11,8 +11,8 @@ use xxhash_rust::xxh3::xxh3_64;
 use crate::cbor;
 use crate::error::{Error, Result, Rule};
 use crate::schema::{
-    check_name, check_shard_name, Manifest, ALIGN_FLOOR, FOOTER_LEN, MAGIC, MAX_MANIFEST_LEN,
-    MAX_RANK, MIN_FILE_LEN, VERSION,
+    check_name, check_shard_name, Manifest, ALIGN_CANONICAL, ALIGN_FLOOR, FOOTER_LEN, MAGIC,
+    MAX_MANIFEST_LEN, MAX_RANK, MIN_FILE_LEN, VERSION,
 };
 use crate::store::Store;
 use crate::vocab::Vocabulary;
@@ -142,6 +142,156 @@ pub fn image(buf: &[u8], vocab: &Vocabulary) -> Result<Option<Manifest>> {
     )?;
     validate_manifest(&manifest, data_end, (footer.offset, footer.length), vocab)?;
     Ok(Some(manifest))
+}
+
+/// Checks a file against canonical form (spec §6.3) and returns every rule it
+/// breaks, in rule order. An empty list means the file is canonical.
+///
+/// The spec calls canonical form the recommended distribution format, which is
+/// only worth saying if the receiver can tell. Nothing is stored in the file to
+/// say it is canonical, and nothing needs to be: all six rules are decidable
+/// from the bytes.
+///
+/// Blob sharing (rule 3) is judged by digest and length rather than by
+/// comparing payloads, so two parts with the same digest are taken to have the
+/// same content. Rule 4 guarantees every part carries one.
+pub fn canonical_violations(path: impl AsRef<std::path::Path>) -> Result<Vec<String>> {
+    let store = Store::index(path.as_ref(), "zt")?;
+    let parsed = read(&store, &Vocabulary::standard())?;
+    let Some(manifest) = parsed.manifest else {
+        return Ok(vec![
+            "rule 1: a data shard carries no manifest, so it is not a canonical model".into(),
+        ]);
+    };
+    let file_len = store.len();
+    let footer = store.read(file_len - FOOTER_LEN, FOOTER_LEN)?;
+    let manifest_at = u64::from_le_bytes(footer[0..8].try_into().unwrap());
+    let manifest_len = u64::from_le_bytes(footer[8..16].try_into().unwrap());
+
+    let mut bad = Vec::new();
+
+    // Rule 6 first: a shard table means the parts below may point elsewhere,
+    // and the placement walk would be describing the wrong file.
+    if !manifest.shards.is_empty() {
+        bad.push(format!(
+            "rule 6: canonical form is single-file, but the manifest declares {} shard(s)",
+            manifest.shards.len()
+        ));
+    }
+
+    // Rule 5. ASCII is NFC by construction, so only other names pay for this.
+    let mut not_nfc = |what: &str, name: &str| {
+        if !name.is_ascii() && !unicode_normalization::is_nfc(name) {
+            bad.push(format!("rule 5: {what} {name:?} is not in NFC"));
+        }
+    };
+    for (name, object) in &manifest.objects {
+        not_nfc("object name", name);
+        for pname in object.parts.keys() {
+            not_nfc("part name", pname);
+        }
+    }
+
+    // Rules 1-4, in one walk over the parts in the order rule 3 fixes.
+    let mut cursor = MAGIC.len() as u64;
+    let mut placed: std::collections::BTreeMap<u64, (String, u64)> = Default::default();
+    let mut by_content: std::collections::BTreeMap<(String, u64), u64> = Default::default();
+    for (name, object) in &manifest.objects {
+        for (pname, part) in &object.parts {
+            let label = format!("{name:?}/{pname:?}");
+            if part.encoding.is_some() {
+                bad.push(format!("rule 4: {label} is stored under an encoding"));
+            }
+            match &part.digest {
+                None => bad.push(format!("rule 4: {label} carries no digest")),
+                Some(d) if !d.starts_with("xxh3:") => {
+                    bad.push(format!("rule 4: {label} has a {d:?} digest, not xxh3"));
+                }
+                Some(_) => {}
+            }
+            if part.blob.shard.is_some() {
+                continue; // rule 6 already accounts for this file
+            }
+
+            let offset = part.blob.offset;
+            if let Some((_, len)) = placed.get(&offset) {
+                // Sharing an already-placed blob. Legal, and it must be the
+                // same bytes.
+                if *len != part.blob.length {
+                    bad.push(format!(
+                        "rule 3: {label} shares offset {offset} with a blob of a different length"
+                    ));
+                }
+                continue;
+            }
+            if let Some(d) = &part.digest {
+                let key = (d.clone(), part.blob.length);
+                if let Some(&first) = by_content.get(&key) {
+                    bad.push(format!(
+                        "rule 3: {label} repeats the content already at offset {first} \
+                         instead of sharing that blob"
+                    ));
+                } else {
+                    by_content.insert(key, offset);
+                }
+            }
+
+            let expected = match align_up_canonical(cursor) {
+                Some(e) => e,
+                None => {
+                    bad.push(format!("rule 2: {label} places a blob past the end of u64"));
+                    break;
+                }
+            };
+            // Each way of missing the expected offset is a different rule, and
+            // saying which one tells the reader what to do about it.
+            if !offset.is_multiple_of(ALIGN_CANONICAL) {
+                bad.push(format!(
+                    "rule 2: {label} is at offset {offset}, which is not a multiple of \
+                     {ALIGN_CANONICAL}"
+                ));
+            } else if offset > expected {
+                bad.push(format!(
+                    "rule 1: {} bytes before {label} at {offset} belong to nothing; \
+                     canonical form packs blobs with no gaps",
+                    offset - expected
+                ));
+            } else if offset < expected {
+                bad.push(format!(
+                    "rule 3: {label} is at {offset}, before the {expected} that its place in \
+                     (object, part) order gives it"
+                ));
+            }
+            placed.insert(offset, (label, part.blob.length));
+            cursor = offset + part.blob.length;
+        }
+    }
+
+    // Rule 3's tail, which is also rule 1: the manifest comes straight after
+    // the last blob and the footer straight after it. A gap is room for
+    // something unreferenced, which is what rule 1 forbids.
+    if let Some(expected) = align_up_canonical(cursor) {
+        if manifest_at != expected {
+            bad.push(format!(
+                "rule 1: the manifest is at {manifest_at}, but the blobs end at {expected}; \
+                 the space between belongs to nothing"
+            ));
+        }
+    }
+    if manifest_at + manifest_len + FOOTER_LEN != file_len {
+        bad.push(format!(
+            "rule 3: the footer does not immediately follow the manifest \
+             (manifest ends at {}, file is {file_len})",
+            manifest_at + manifest_len
+        ));
+    }
+    Ok(bad)
+}
+
+fn align_up_canonical(offset: u64) -> Option<u64> {
+    offset
+        .checked_add(ALIGN_CANONICAL - 1)
+        .map(|n| n & !(ALIGN_CANONICAL - 1))
 }
 
 /// Reads and validates one container's manifest, resolving nothing.

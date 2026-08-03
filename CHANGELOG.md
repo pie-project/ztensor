@@ -4,7 +4,58 @@ Notable changes to the `ztensor`, `ztensor-compat` and `ztensor-cli` crates
 and the `ztensor` Python package, which are versioned together.
 
 The **file format is versioned separately**: `.zt` is container version 2,
-spec **Draft 3**.
+spec **Draft 4**.
+
+## 2.2.0
+
+### Format (spec Draft 4)
+
+- **A content digest** (§6.4). The whole-file hash of a canonical file
+  identifies an *artifact*: those bytes, that layout. The content digest
+  identifies the *model*, and is defined so that layout cannot reach it.
+  Offsets, lengths, alignment, padding, blob sharing, encodings and the shard
+  table are all absent from it, so the same tensors give the same answer
+  whether they sit in one file or fifty, packed at 4 KiB or 64 KiB, raw or
+  compressed.
+
+  It is computed from the manifest alone, so a reader that has fetched a root
+  and nothing else can compute it whatever the model weighs. It is defined
+  only where every part carries a digest, and it is never stored in the file:
+  a stored value is a claim that can be false.
+
+  This is also why a canonical multi-file profile stays deferred. The reason
+  to pin a shard-partition policy was to keep identity stable across splits,
+  and identity is now stable without one.
+
+### Added
+
+- **`Manifest::content_digest`** and **`zt id`**, computing the above.
+- **`validate::canonical_violations`** and **`zt verify --canonical`** decide
+  whether a file is in canonical form and name every rule it breaks. The spec
+  calls canonical form the recommended distribution format, which is only
+  worth saying if the receiver can tell; nothing is stored in a file to say
+  it, and nothing needs to be, since all six rules of §6.3 are decidable from
+  the bytes.
+- **`DigestAlgorithm`**, with `sha256` alongside `xxh3`, plus
+  `shard_identity_with` and `DataShardWriter::create_with`. §6.5 makes a
+  cryptographic shard digest the thing that lets one signature over a root
+  cover every shard byte, and that was previously impossible to produce
+  through the API. Verification takes whatever algorithm a file used, so a
+  build cannot write digests it is unable to check.
+
+### Fixed
+
+- **`Writer::append` overwrote the manifest it was replacing.** §2.5 requires
+  that a writer never truncate or overwrite existing bytes: prior manifests
+  stay in the file as unreferenced blobs, and the footer at EOF decides what
+  the file means. Appending now writes past the old end and never truncates,
+  which also makes a crashed append recoverable by truncating back to the old
+  length.
+- **`Writer::append` dropped the file's alignment**, taking the 4 KiB floor
+  regardless of how the file had been written. A 64 KiB model gained tensors
+  on 4 KiB boundaries, losing per-tensor page exclusivity on every host with
+  pages larger than 4 KiB, which the machine that wrote the file would never
+  see. The alignment is now read back from the offsets already in the file.
 
 ## 2.1.0
 

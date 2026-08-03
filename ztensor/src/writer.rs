@@ -21,9 +21,9 @@ use xxhash_rust::xxh3::{xxh3_128, xxh3_64, Xxh3};
 use crate::cbor;
 use crate::error::{Error, Result};
 use crate::schema::{
-    check_attributes, check_digest, check_name, check_shard_name, BlobRef, DType, Manifest, Object,
-    Part, Shard, ALIGN_CANONICAL, ALIGN_FLOOR, FOOTER_LEN, MAGIC, MAX_MANIFEST_LEN, MAX_RANK,
-    MIN_FILE_LEN, VERSION,
+    check_attributes, check_digest, check_name, check_shard_name, BlobRef, DType, DigestAlgorithm,
+    Hasher, Manifest, Object, Part, Shard, ALIGN_CANONICAL, ALIGN_FLOOR, FOOTER_LEN, MAGIC,
+    MAX_MANIFEST_LEN, MAX_RANK, MIN_FILE_LEN, VERSION,
 };
 use crate::source::Source;
 use crate::vocab::Vocabulary;
@@ -1265,7 +1265,7 @@ impl Sink {
 /// one pass.
 pub struct DataShardWriter {
     out: BufWriter<File>,
-    hasher: Xxh3,
+    hasher: Hasher,
     offset: u64,
     align: u64,
 }
@@ -1277,11 +1277,21 @@ impl DataShardWriter {
     }
 
     pub fn create_with_alignment(path: impl AsRef<Path>, align: u64) -> Result<Self> {
+        Self::create_with(path, align, DigestAlgorithm::Xxh3)
+    }
+
+    /// Creates a data shard that digests itself with `algo`.
+    ///
+    /// [`DigestAlgorithm::Sha256`] is what a shard destined for signing or
+    /// distribution wants: a root whose shard digests are cryptographic
+    /// commits to every shard byte, so one signature over the root covers the
+    /// whole model (§6.5).
+    pub fn create_with(path: impl AsRef<Path>, align: u64, algo: DigestAlgorithm) -> Result<Self> {
         check_alignment(align)?;
         let file = File::create(path)?;
         let mut shard = Self {
             out: BufWriter::with_capacity(1 << 20, file),
-            hasher: Xxh3::new(),
+            hasher: Hasher::new(algo),
             offset: 0,
             align,
         };
@@ -1320,7 +1330,7 @@ impl DataShardWriter {
         self.out.flush()?;
         Ok(Shard {
             size: self.offset,
-            digest: format!("xxh3:{:016x}", self.hasher.digest()),
+            digest: self.hasher.finish(),
         })
     }
 }

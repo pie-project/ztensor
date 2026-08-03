@@ -15,7 +15,9 @@ zt: tensor file tool (zTensor v2)
 
 USAGE:
     zt ls <file>                  list tensors, shapes, and layouts
+    zt id <file>                  the model's content digest (§6.4)
     zt verify <file> [--deep]     validate; check digests (--deep: shard digests too)
+              [--canonical]       also report how the file departs from canonical form
     zt convert <in> <out.zt>      convert any supported format to canonical .zt
                [--align <bytes>]  non-canonical placement (power of two >= 4096)
     zt diff <a> <b>               compare two tensor files by content
@@ -26,8 +28,17 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.first().map(String::as_str) {
         Some("ls") if args.len() == 2 => ls(Path::new(&args[1])),
-        Some("verify") if args.len() == 2 || (args.len() == 3 && args[2] == "--deep") => {
-            verify(Path::new(&args[1]), args.len() == 3)
+        Some("id") if args.len() == 2 => id(Path::new(&args[1])),
+        Some("verify") if args.len() >= 2 => {
+            let flags = &args[2..];
+            if flags.iter().any(|f| f != "--deep" && f != "--canonical") {
+                return usage();
+            }
+            verify(
+                Path::new(&args[1]),
+                flags.iter().any(|f| f == "--deep"),
+                flags.iter().any(|f| f == "--canonical"),
+            )
         }
         Some("convert") if args.len() == 3 || (args.len() == 5 && args[3] == "--align") => {
             let align = if args.len() == 5 {
@@ -161,9 +172,38 @@ fn ls(path: &Path) -> Result<ExitCode, Error> {
     Ok(ExitCode::SUCCESS)
 }
 
+// ---- id ---------------------------------------------------------------
+
+/// The model's content digest: the same however the file was laid out or
+/// split, which is what makes it an answer to "is this the same model" rather
+/// than "is this the same file".
+fn id(path: &Path) -> Result<ExitCode, Error> {
+    let format = detect(path)?;
+    if format != "zt" {
+        eprintln!(
+            "error: {} is {format}; a content digest needs the per-part digests \
+             only .zt carries (convert it first)",
+            path.display()
+        );
+        return Ok(ExitCode::FAILURE);
+    }
+    let Some(manifest) = ztensor::manifest_of(path)? else {
+        eprintln!(
+            "error: {} is a data shard and describes no model",
+            path.display()
+        );
+        return Ok(ExitCode::FAILURE);
+    };
+    println!(
+        "{}",
+        manifest.content_digest(ztensor::DigestAlgorithm::Sha256)?
+    );
+    Ok(ExitCode::SUCCESS)
+}
+
 // ---- verify -----------------------------------------------------------
 
-fn verify(path: &Path, deep: bool) -> Result<ExitCode, Error> {
+fn verify(path: &Path, deep: bool, canonical: bool) -> Result<ExitCode, Error> {
     let format = detect(path)?;
     let src = open(path)?;
     if format != "zt" {
@@ -200,6 +240,21 @@ fn verify(path: &Path, deep: bool) -> Result<ExitCode, Error> {
         },
         if deep { ", shard digests verified" } else { "" },
     );
+
+    if canonical {
+        // Not a failure. A non-canonical file is fully conforming (§6.3); the
+        // question this answers is whether you were handed the recommended
+        // distribution form, which is a different question from "is it valid".
+        let bad = ztensor::validate::canonical_violations(path)?;
+        if bad.is_empty() {
+            println!("  canonical form: yes");
+        } else {
+            println!("  canonical form: no");
+            for line in &bad {
+                println!("    {line}");
+            }
+        }
+    }
     Ok(ExitCode::SUCCESS)
 }
 
