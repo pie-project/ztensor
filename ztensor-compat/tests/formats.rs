@@ -580,3 +580,40 @@ mod pt {
         assert!(r.tensor("w").unwrap().verify().unwrap().checked());
     }
 }
+
+/// `FORMATS` must list exactly what `detect` can return — it is only useful to
+/// a consumer building a table from it if it is complete.
+#[test]
+fn every_detected_label_is_listed() {
+    use std::io::Write;
+
+    let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("labels");
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // One file per magic `detect` keys on, built here rather than fetched, so
+    // this stays a test of the sniffer and not of a fixture directory.
+    let heads: &[(&str, &[u8])] = &[
+        ("gguf", b"GGUF\x03\x00\x00\x00"),
+        ("hdf5", b"\x89HDF\r\n\x1a\n"),
+    ];
+    for (expected, head) in heads {
+        let path = dir.join(format!("probe.{expected}"));
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(head).unwrap();
+        f.write_all(&[0u8; 64]).unwrap();
+        drop(f);
+        let got = ztensor_compat::detect(&path).unwrap();
+        assert_eq!(&got, expected);
+        assert!(
+            ztensor_compat::FORMATS.contains(&got),
+            "detect returned {got:?}, which FORMATS does not list"
+        );
+    }
+
+    // The list is sorted and free of duplicates, so a reader can scan it and a
+    // consumer's table can be diffed against it.
+    let mut sorted = ztensor_compat::FORMATS.to_vec();
+    sorted.sort_unstable();
+    sorted.dedup();
+    assert_eq!(sorted.as_slice(), ztensor_compat::FORMATS);
+}

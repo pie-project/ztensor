@@ -45,4 +45,4 @@ mod hdf5;
 #[cfg(feature = "onnx")]
 mod onnx;
 
-pub use detect::{detect, index, index_all, open, open_all, options, Open};
+pub use detect::{detect, index, index_all, open, open_all, options, Open, FORMATS};

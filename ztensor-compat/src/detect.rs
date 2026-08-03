@@ -14,8 +14,15 @@ use std::path::Path;
 
 use ztensor::{Error, Result, Source, Store, Vocabulary};
 
-/// Sniffs the format of a tensor file. Returns a stable label:
-/// `"zt"`, `"safetensors"`, `"gguf"`, `"npz"`, `"pt"`, `"hdf5"`, `"onnx"`.
+/// Every label [`detect`] can return.
+///
+/// Enumerable because a consumer usually has a table keyed by these — a
+/// display name, an enum of its own — and a table that is missing a row says
+/// nothing when the list grows. Checking against this turns that silence into
+/// a failing test.
+pub const FORMATS: &[&str] = &["gguf", "hdf5", "npz", "onnx", "pt", "safetensors", "zt"];
+
+/// Sniffs the format of a tensor file. Returns one of [`FORMATS`].
 pub fn detect(path: impl AsRef<Path>) -> Result<&'static str> {
     let path = path.as_ref();
     // A single read() may return fewer bytes than asked for; fill the buffer
