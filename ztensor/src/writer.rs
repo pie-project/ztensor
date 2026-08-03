@@ -102,6 +102,76 @@ impl Options {
         self.build(partial, Some(final_path))
     }
 
+    /// Adds to an existing `.zt` without rewriting the blobs already in it.
+    ///
+    /// The file's objects and shard table are loaded, and everything written
+    /// from here is added to them. Existing blobs are not read, moved, or
+    /// copied, so the cost is the size of what you add rather than the size
+    /// of the file.
+    ///
+    /// # This is not atomic
+    ///
+    /// New bytes start at the old manifest, so the moment one is written the
+    /// file on disk is invalid until [`finish`](Writer::finish) puts a footer
+    /// at the new end. A crash in that window leaves a file no reader will
+    /// open and no recovery will fix, because `.zt` finds its manifest through
+    /// a footer at EOF and has no second copy to fall back on.
+    ///
+    /// [`publish`](Self::publish) is the atomic alternative: it costs a full
+    /// rewrite, and a reader either sees the old file or the new one. Prefer
+    /// it whenever the file is worth more than the rewrite. Appending earns
+    /// its risk on files large enough that copying them is the problem.
+    ///
+    /// Canonical form is byte-reproducible placement (spec §6.3), which an
+    /// append cannot honour, so this needs `.canonical(false)`.
+    pub fn append(self, path: impl AsRef<Path>) -> Result<Writer> {
+        if self.canonical {
+            return Err(Error::InvalidInput(
+                "canonical form is written in one pass; add .canonical(false)".into(),
+            ));
+        }
+        let path = path.as_ref().to_path_buf();
+        let vocab = self.vocab.clone().unwrap_or_else(Vocabulary::shared);
+        let store = crate::store::Store::index(&path, "zt")?;
+        let parsed = crate::validate::read(&store, &vocab)?;
+        let (Some(manifest), Some(start)) = (parsed.manifest, parsed.manifest_at) else {
+            return Err(Error::InvalidInput(format!(
+                "{}: a data shard carries no manifest, so there is nothing to add to",
+                path.display()
+            )));
+        };
+        drop(store);
+
+        let align = match self.align {
+            Some(a) => {
+                check_alignment(a)?;
+                a
+            }
+            None => ALIGN_FLOOR,
+        };
+        let file = File::options().read(true).write(true).open(&path)?;
+        let mut out = BufWriter::with_capacity(1 << 20, file);
+        out.seek(SeekFrom::Start(start))?;
+        Ok(Writer {
+            out: Some(out),
+            path,
+            publish_to: None,
+            offset: start,
+            align,
+            canonical: false,
+            manifest,
+            // Deliberately empty: sharing a blob with one already in the file
+            // would mean hashing every existing blob, which is the whole cost
+            // an append exists to avoid. Blobs added in this session still
+            // share with each other.
+            dedup: HashMap::new(),
+            last_name: None,
+            streaming: false,
+            vocab: self.vocab.unwrap_or_else(Vocabulary::shared),
+            truncate: true,
+        })
+    }
+
     fn build(self, path: PathBuf, publish_to: Option<PathBuf>) -> Result<Writer> {
         let align = match (self.canonical, self.align) {
             (true, None) => ALIGN_CANONICAL,
@@ -133,6 +203,7 @@ impl Options {
             last_name: None,
             streaming: false,
             vocab: self.vocab.unwrap_or_else(Vocabulary::shared),
+            truncate: false,
         })
     }
 }
@@ -166,6 +237,11 @@ pub struct Writer {
     /// Whether a [`Sink`] is open. Every other object-adding method refuses
     /// while one is: their bytes would land in the middle of the streamed part.
     streaming: bool,
+    /// Set when appending. The file already had bytes past the point writing
+    /// resumed, and any of them left beyond the new footer would put the
+    /// footer somewhere other than EOF, which is the one thing a reader cannot
+    /// forgive.
+    truncate: bool,
     vocab: Arc<Vocabulary>,
 }
 
@@ -194,6 +270,12 @@ impl Writer {
     /// without finishing removes the partial.
     pub fn publish(path: impl AsRef<Path>) -> Result<Self> {
         Options::default().publish(path)
+    }
+
+    /// Adds to an existing `.zt`. See [`Options::append`], which explains why
+    /// this is not atomic and when to prefer [`publish`](Self::publish).
+    pub fn append(path: impl AsRef<Path>) -> Result<Self> {
+        Options::default().canonical(false).append(path)
     }
 
     pub fn options() -> Options {
@@ -381,6 +463,15 @@ impl Writer {
 
         let out = self.out.take().expect("writer is open");
         let file = out.into_inner().map_err(|e| Error::Io(e.into_error()))?;
+        if self.truncate {
+            // An append cannot currently shrink a file: adding to a CBOR map
+            // only makes it longer, and new blobs push the manifest further
+            // out. So this is a guard rather than a fix, and it costs one
+            // syscall. It is here because the failure it prevents is a footer
+            // that is not at EOF, which no reader will open and nothing in
+            // the writer would catch.
+            file.set_len(self.offset)?;
+        }
         file.sync_all().or_else(|e| {
             // Durability is only promised by publish(); a plain create() on a
             // filesystem that cannot sync is not a failure to write.
@@ -401,9 +492,27 @@ impl Writer {
     /// Abandons the file: a publishing writer removes its partial, a plain one
     /// removes what it has written.
     pub fn abandon(mut self) {
+        if self.truncate {
+            // Appending, so `path` is the caller's file rather than a partial
+            // this writer owns. Drop the buffered bytes without flushing them
+            // and leave the file alone.
+            self.discard_buffer();
+            return;
+        }
         self.out = None;
         let _ = std::fs::remove_file(&self.path);
         self.publish_to = None;
+    }
+
+    /// Drops whatever is still buffered instead of writing it.
+    ///
+    /// `BufWriter` flushes when it is dropped, which for an append would put
+    /// more bytes into a file this writer is giving up on. `into_parts` is the
+    /// way to let go of the buffer without that.
+    fn discard_buffer(&mut self) {
+        if let Some(out) = self.out.take() {
+            let (_file, _buffered) = out.into_parts();
+        }
     }
 
     // ---- blob placement ----
@@ -535,6 +644,12 @@ impl Drop for Writer {
         if self.publish_to.is_some() {
             self.out = None;
             let _ = std::fs::remove_file(&self.path);
+            return;
+        }
+        // An append that never finished writes nothing more. What already
+        // reached the disk cannot be taken back, but the buffer can.
+        if self.truncate {
+            self.discard_buffer();
         }
     }
 }

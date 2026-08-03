@@ -6,6 +6,35 @@ and the `ztensor` Python package, which are versioned together.
 The **file format is versioned separately**: `.zt` is container version 2,
 spec **Draft 3**.
 
+## 2.1.0
+
+The format is unchanged; this adds one thing to the writer.
+
+### Added
+
+- **`Writer::append`** adds objects and shards to a finished `.zt` without
+  rewriting the blobs already in it. Writing resumes at the old manifest, so
+  the cost is the size of what you add rather than the size of the file:
+  adding a 4 KiB tensor to a 512 MiB file takes 55 µs against 303 ms to
+  rewrite it.
+
+  It is **not atomic**. From the first byte written until `finish` puts a
+  footer at the new end, the file on disk is invalid, and a crash in that
+  window leaves nothing a reader can open. `.zt` finds its manifest through a
+  footer at EOF and keeps no second copy, so there is no recovery. Use
+  `Writer::publish` when the file is worth more than the rewrite; appending
+  earns its risk on files large enough that copying them is the problem.
+
+  Canonical form is byte-reproducible placement, which an append cannot
+  honour, so this needs `.canonical(false)`.
+
+### Fixed
+
+- `Writer::abandon` deleted the file it was given. That was right for a
+  writer that created the file and wrong for one appending to a file it did
+  not own. Abandoning or dropping an append now discards the buffered bytes
+  instead of flushing them, and leaves the file alone.
+
 ## 2.0.0
 
 A rewrite of the crate surface, and one change to the L1 manifest schema made

@@ -30,6 +30,9 @@ pub(crate) struct Footer {
 pub(crate) struct Parsed {
     pub manifest: Option<Manifest>,
     pub occupied: Vec<(u64, u64)>,
+    /// Where the manifest blob starts. `Writer::append` writes from here, so
+    /// the bytes it replaces are the ones it has just finished reading.
+    pub manifest_at: Option<u64>,
 }
 
 /// Checks the frame every container shares (minimum size, header magic,
@@ -170,6 +173,7 @@ pub(crate) fn read(store: &Store, vocab: &Vocabulary) -> Result<Parsed> {
         return Ok(Parsed {
             manifest: None,
             occupied: frame_ranges(Vec::new(), file_len),
+            manifest_at: None,
         });
     };
     let (_, data_end) = manifest_bounds(&footer, file_len)?;
@@ -178,6 +182,7 @@ pub(crate) fn read(store: &Store, vocab: &Vocabulary) -> Result<Parsed> {
     Ok(Parsed {
         manifest: Some(manifest),
         occupied: frame_ranges(occupied, file_len),
+        manifest_at: Some(footer.offset),
     })
 }
 

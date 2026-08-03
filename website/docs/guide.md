@@ -103,6 +103,25 @@ Alignment and canonical form are separate options. Asking for an alignment
 while leaving canonical form on is an error, and the message says how to mean
 what you probably meant.
 
+### Adding to a finished file
+
+`append` adds objects and shards to a `.zt` that already exists, without
+rewriting the blobs in it:
+
+```rust
+let mut w = ztensor::Writer::append("model.zt")?;
+w.add("extra.weight", [1024u64], DType::F32, &data)?;
+w.finish()?;
+```
+
+Writing resumes at the old manifest, so the cost is the size of what you add.
+Adding a 4 KiB tensor to a 512 MiB file takes about 55 µs, against 303 ms to
+rewrite the file.
+
+This is not atomic. From the first byte written until `finish` puts a footer
+at the new end, the file is invalid, and a crash in that window leaves nothing
+a reader can open. Use `publish` when the file is worth more than the rewrite.
+
 ### Publishing atomically
 
 To publish where readers are watching, let the writer do the dance:
