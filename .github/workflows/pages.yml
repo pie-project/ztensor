@@ -40,33 +40,37 @@ jobs:
           pip install markdown
           python website/build.py
       # A dead link is the one defect a static site can ship silently, so it
-      # is checked here rather than found by a reader.
-      - name: Every local link resolves
+      # is checked here rather than found by a reader. Anchors are checked
+      # too: the pages link into each other's sections, and a renamed heading
+      # breaks that without breaking anything a file-existence check sees.
+      - name: Every local link and anchor resolves
         run: |
           python - <<'EOF'
           import pathlib, re, sys
           root = pathlib.Path("website/_site")
           files = {p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_file()}
+          ids = {
+              p.relative_to(root).as_posix(): set(re.findall(r'id="([^"]+)"', p.read_text()))
+              for p in root.rglob("*.html")
+          }
           bad = []
           for page in root.rglob("*.html"):
+              here = page.relative_to(root).as_posix()
               text = page.read_text()
-              refs = re.findall(r'(?:href|src)="([^"]+)"', text)
-              for ref in refs:
-                  if ref.startswith(("http", "mailto:", "#", "data:")):
+              for ref in re.findall(r'(?:href|src)="([^"]+)"', text):
+                  if ref.startswith(("http", "mailto:", "data:")):
                       continue
-                  target = (page.parent / ref.split("#")[0]).resolve()
-                  try:
-                      rel = target.relative_to(root.resolve()).as_posix()
-                  except ValueError:
-                      bad.append(f"{page.relative_to(root)} -> {ref} (escapes the site)")
-                      continue
-                  if rel not in files:
-                      bad.append(f"{page.relative_to(root)} -> {ref}")
-              bad += [f"{page.relative_to(root)} -> {m}" for m in re.findall(r'href="[^"]*\.md"', text)]
+                  target, _, frag = ref.partition("#")
+                  page_ref = here if not target else target
+                  if target and target not in files:
+                      bad.append(f"{here} -> {ref}")
+                  elif frag and frag not in ids.get(page_ref, set()):
+                      bad.append(f"{here} -> {ref} (no such anchor)")
+              bad += [f"{here} -> {m}" for m in re.findall(r'href="[^"]*\.md"', text)]
           if bad:
               print("\n".join(f"::error::dead link: {b}" for b in bad))
               sys.exit(1)
-          print(f"{len(list(root.rglob('*.html')))} pages, every local link resolves")
+          print(f"{len(ids)} pages, every local link and anchor resolves")
           EOF
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3

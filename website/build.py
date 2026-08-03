@@ -138,6 +138,23 @@ a:hover { text-decoration: underline; }
 .sidebar a:hover { background: var(--bg-alt); color: var(--fg); text-decoration: none; }
 .sidebar a[aria-current="page"] { background: var(--bg-alt); color: var(--link); font-weight: 500; }
 
+/* The current page's sections, one level in. A rule rather than a bullet:
+   the indent already says "inside", and a marker would be noise at this
+   density. */
+.sidebar .sections {
+  margin: 0.15rem 0 0.4rem;
+  padding-left: 0.6rem;
+  border-left: 1px solid var(--border);
+  display: grid;
+  gap: 0;
+}
+.sidebar .sections a {
+  padding: 0.2rem 0.6rem;
+  font-size: 0.85rem;
+  color: var(--fg-dim);
+}
+.sidebar .sections a:hover { color: var(--fg); }
+
 main { padding: 2rem 1.25rem 4rem; min-width: 0; }
 article { max-width: 46rem; margin-inline: auto; }
 article > * + * { margin-top: 1rem; }
@@ -223,6 +240,32 @@ def first_paragraph(text: str) -> str:
     return "zTensor documentation."
 
 
+SECTION = re.compile(r'<h2 id="([^"]+)"[^>]*>(.*?)</h2>', re.S)
+
+
+def sections(html: str) -> list[tuple[str, str]]:
+    """The `##` headings of a page, as `(id, text)`.
+
+    Only `##`. A sidebar that listed every `###` would be longer than the page
+    it navigates — the spec alone has dozens — and the point of the nesting is
+    to show a page's shape, not to reproduce it.
+    """
+    return [
+        (anchor, re.sub(r"<[^>]+>", "", text).strip())
+        for anchor, text in SECTION.findall(html)
+    ]
+
+
+def nested(items: list[tuple[str, str]]) -> str:
+    """The current page's sections, as a list inside its sidebar entry."""
+    if not items:
+        return ""
+    links = "".join(
+        f'<li><a href="#{anchor}">{text}</a></li>' for anchor, text in items
+    )
+    return f'<ul class="sections">{links}</ul>'
+
+
 def build() -> None:
     if OUT.exists():
         shutil.rmtree(OUT)
@@ -232,18 +275,20 @@ def build() -> None:
     # Pages would otherwise run Jekyll over this and eat `_`-prefixed paths.
     (OUT / ".nojekyll").write_text("")
 
-    sidebar = "\n".join(
-        f'      <li><a href="{slug}"{{current_{i}}}>{name}</a></li>'
-        for i, (_, name, slug) in enumerate(PAGES)
-    )
-
-    for i, (md_name, title, slug) in enumerate(PAGES):
+    # Render every page first: the sidebar nests the current page's sections
+    # under it, so it cannot be built until the headings are known.
+    rendered = []
+    for md_name, title, slug in PAGES:
         path = md_name if isinstance(md_name, Path) else DOCS / md_name
         source = FRONTMATTER.sub("", path.read_text())
         html = markdown.markdown(
             source,
             extensions=["tables", "fenced_code", "toc", "attr_list", "sane_lists"],
         )
+        rendered.append((source, html, sections(html)))
+
+    for i, (md_name, title, slug) in enumerate(PAGES):
+        source, html, _ = rendered[i]
         # Cross-doc links are written as `./other.md`; here they are pages.
         # A page may be reached by its source filename or by its slug — the
         # spec is written as `./spec.md` but lives in `spec/` under its own
@@ -266,12 +311,20 @@ def build() -> None:
         )
 
         marks = {f"current_{j}": ' aria-current="page"' if j == i else "" for j in range(len(PAGES))}
+        nav = "\n".join(
+            f'      <li><a href="{page_slug}"'
+            + (' aria-current="page"' if j == i else "")
+            + f">{name}</a>"
+            + (nested(rendered[j][2]) if j == i else "")
+            + "</li>"
+            for j, (_, name, page_slug) in enumerate(PAGES)
+        )
         (OUT / slug).write_text(
             SHELL.format(
                 title=f"{title} · zTensor" if i else "zTensor",
                 description=first_paragraph(source).replace('"', "&quot;"),
                 css=CSS,
-                sidebar=sidebar.format(**marks),
+                sidebar=nav,
                 body=html,
                 prev=f'<a href="{PAGES[i - 1][2]}">← {PAGES[i - 1][1]}</a>' if i else "",
                 next=(

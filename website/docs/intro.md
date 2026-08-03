@@ -51,6 +51,8 @@ large models:
 - **Verifiability.** None of them carry per-tensor digests, so a corrupt
   byte surfaces as a wrong answer rather than an error.
 
+### What `.zt` does instead
+
 `.zt` fixes those without inventing a new problem: 64 KiB placement in
 canonical files, a vocabulary of versioned profiles instead of built-in
 quantization, no code execution anywhere, and an XXH3 digest per tensor
@@ -72,6 +74,8 @@ the rest with them:
 A manifest entry says where a tensor *is* by naming a byte range in L0, and
 what it *is* by naming a profile in L2 — so the layer that is allowed to
 change never touches the layer that is not.
+
+### A name is checked, not interpreted
 
 What zTensor does with an L2 name is check it and hand it over. Deciding
 that `zt.quant_group/1` with an `f4_e2m1` payload and `f8_e8m0` scales
@@ -96,8 +100,53 @@ moving or renaming the files cannot break or silently change a model.
 
 ![A root manifest naming shards by size and digest; the shards are containers with no manifest of their own](../static/diagrams/sharding.svg)
 
+### Overlays
+
 The same mechanism is how an overlay works: a LoRA stores only its deltas
 and points at the base model's blobs, without copying them.
+
+## Performance
+
+*Llama 3.2 1B shapes (~2.8 GB), Linux, i9-13900K, NVMe SSD, median of 5 runs.
+[Benchmarks](./benchmarks.md) has the method, the charts and the analysis.*
+
+### Reading
+
+One mmap-backed API across every format, against each format's own library.
+
+| Source format | zTensor | zTensor (zc off) | Reference impl. |
+|---|---|---|---|
+| **.zt** | **2.27 GB/s** | 0.96 GB/s | n/a |
+| **.safetensors** | **2.47 GB/s** | 1.00 GB/s | 1.57 GB/s / 1.59 GB/s† ([`safetensors`](https://github.com/huggingface/safetensors)) |
+| **.pt** | **2.29 GB/s** | 0.83 GB/s | 1.60 GB/s ([`torch`](https://github.com/pytorch/pytorch)) |
+| **.npz** | **2.33 GB/s** | 0.94 GB/s | 0.80 GB/s ([`numpy`](https://github.com/numpy/numpy)) |
+| **.gguf** | 2.37 GB/s | 0.92 GB/s | 1.57 GB/s / **2.52 GB/s**† ([`gguf`](https://github.com/ggml-org/ggml)) |
+| **.onnx** | **2.30 GB/s** | 0.82 GB/s | 0.81 GB/s ([`onnx`](https://github.com/onnx/onnx)) |
+| **.h5** | **2.36 GB/s** | 0.95 GB/s | 1.47 GB/s ([`h5py`](https://github.com/h5py/h5py)) |
+
+*ONNX measured at 1 GB (protobuf caps a message at 2 GB). †Native zero-copy
+where available (GGUF mmap, SafeTensors `safe_open`).*
+
+### Writing
+
+Each format written by its own reference implementation, three workloads at
+512 MB: **Large** (few big matrices), **Mixed** (realistic model shapes),
+**Small** (many ~10 KB parameters).
+
+| Format | Large | Mixed | Small |
+|---|---|---|---|
+| **ztensor** | 3.29 GB/s | 3.62 GB/s | 0.80 GB/s |
+| safetensors | 5.18 GB/s | **6.27 GB/s** | 2.62 GB/s |
+| pickle | 5.91 GB/s | 6.03 GB/s | **2.86 GB/s** |
+| npz | 1.10 GB/s | 1.15 GB/s | 0.54 GB/s |
+| gguf | 4.78 GB/s | 6.25 GB/s | 1.30 GB/s |
+| onnx | 0.29 GB/s | 0.30 GB/s | 0.35 GB/s |
+| hdf5 | **6.13 GB/s** | 5.96 GB/s | 0.28 GB/s |
+
+zTensor is not the fastest writer, because it is not writing the same file: a
+canonical write hashes every byte, pads to 64 KiB, and shares blobs between
+identical tensors. That cost is paid once per artifact rather than on every
+load.
 
 ## The capability ladder
 
@@ -118,11 +167,15 @@ checkpoint cannot offer, convert it — that is what `ingest` is for.
 
 ## Getting started
 
+### Install
+
 ```bash
 cargo add ztensor            # the format
 cargo add ztensor-compat     # foreign-format projections
 pip install ztensor          # Python bindings
 ```
+
+### Command line
 
 ```bash
 zt ls model.gguf                    # inspect anything

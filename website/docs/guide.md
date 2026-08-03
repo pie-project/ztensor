@@ -23,11 +23,15 @@ let view = t.map()?;        // a borrow, or an error
 let at = t.locate()?;       // (store, offset, len) — read it yourself
 ```
 
+### Three ways to get bytes
+
 Three methods because there are three intents. `bytes()` serves the caller who
 just wants the data and would rather not write the branch; `map()` serves the
 one whose plan is invalid without a borrow, and errors instead of quietly
 copying; `locate()` serves the one doing its own I/O — io_uring, cuFile, a
 staged host-to-device copy — and wants the address, not the bytes.
+
+### Asking what a part supports
 
 Ask what a part supports before relying on it:
 
@@ -40,6 +44,8 @@ if caps.evict {
 
 Every `Caps` field is named after the method it gates and is computed by that
 method's own precondition, so the report and the behaviour cannot drift apart.
+
+### Metadata without mapping
 
 When only the metadata is wanted — a planner deciding what to load — open
 without mapping:
@@ -67,6 +73,8 @@ w.finish()?;
 Two canonical writes of the same tensors produce **byte-identical files**, so a
 file's hash is a stable identity for the model.
 
+### Building anything else
+
 `add` is the one-liner over `object`, which builds anything else — several
 parts, a layout profile, attributes, or a part streamed a chunk at a time:
 
@@ -80,6 +88,8 @@ w.object("q")
     .add()?;
 ```
 
+### Leaving canonical form
+
 For non-distribution files — smaller alignment, compression, sharding — say so:
 
 ```rust
@@ -88,6 +98,8 @@ let mut w = Writer::options().canonical(false).align(4096).create("scratch.zt")?
 
 Alignment and canonical form are separate questions, and asking for one while
 meaning the other is refused rather than obeyed.
+
+### Publishing atomically
 
 To publish where readers are watching, let the writer do the dance:
 
@@ -125,7 +137,9 @@ src.verify_shards()?;                // whole-file digests of every shard
 `Err(Reject { rule: Digest, .. })`, because that is a rejected file rather than
 an answer.
 
-The ladder is cheapest-first: structure and the manifest hash are checked at
+### The ladder is cheapest-first
+
+Structure and the manifest hash are checked at
 open, per-part digests when you ask, whole-shard digests only in
 `verify_shards`. Hashing 100 GB on every load would be a tax nobody pays, so it
 is opt-in.
@@ -140,6 +154,8 @@ model cannot break or change it.
 let model = ztensor::Source::open("model.zt")?;   // positional resolver
 ```
 
+### Finding the shards
+
 A resolver turns a name into bytes, and can ignore the name entirely:
 
 ```rust
@@ -148,6 +164,8 @@ let model = ztensor::Source::options()
     .resolver(ztensor::DirectoryResolver::scan("checkpoint/")?)
     .open("checkpoint/model.zt")?;
 ```
+
+### Overlays
 
 Because a part may name a shard, a file can reference another model's blobs.
 That is how an overlay works: a LoRA stores only its deltas and points at the
@@ -163,6 +181,8 @@ w.link("base.weight", &object, "base")?;
 w.add("base.weight.lora_a", [64u64], DType::F32, &delta)?;
 w.finish()?;
 ```
+
+### A set nobody wrote together
 
 A set of files that were *not* written for each other — a sharded safetensors
 snapshot — is the other shape, and it is not the same claim:

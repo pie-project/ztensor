@@ -18,20 +18,11 @@ through one mmap-backed API. The results below load a Llama 3.2 1B-shaped model
 
 ![Cross-format read throughput](../static/charts/cross_format_read.svg)
 
-| Source format | zTensor | zTensor (zc off) | Reference impl. |
-|---|---|---|---|
-| **.zt** | **2.27 GB/s** | 0.96 GB/s | n/a |
-| **.safetensors** | **2.47 GB/s** | 1.00 GB/s | 1.57 GB/s / 1.59 GB/s† ([`safetensors`](https://github.com/huggingface/safetensors)) |
-| **.pt** | **2.29 GB/s** | 0.83 GB/s | 1.60 GB/s ([`torch`](https://github.com/pytorch/pytorch)) |
-| **.npz** | **2.33 GB/s** | 0.94 GB/s | 0.80 GB/s ([`numpy`](https://github.com/numpy/numpy)) |
-| **.gguf** | 2.37 GB/s | 0.92 GB/s | 1.57 GB/s / **2.52 GB/s**† ([`gguf`](https://github.com/ggml-org/ggml)) |
-| **.onnx** | **2.30 GB/s** | 0.82 GB/s | 0.81 GB/s ([`onnx`](https://github.com/onnx/onnx)) |
-| **.h5** | **2.36 GB/s** | 0.95 GB/s | 1.47 GB/s ([`h5py`](https://github.com/h5py/h5py)) |
+*The table is on the [introduction](./intro.md#reading); the analysis is here.*
 
-*ONNX measured at 1 GB (protobuf caps a message at 2 GB). †Native zero-copy
-where available (GGUF mmap, SafeTensors `safe_open`).*
+### Zero-copy versus copy
 
-**Zero-copy vs. copy.** By default (`copy=False`) zTensor returns
+By default (`copy=False`) zTensor returns
 mmap-backed arrays with no memory copy; `copy=True` reads into owned arrays.
 The spread between the two columns is the memcpy, and it is most of the cost:
 once the bytes have to be copied, every format converges on what memory
@@ -39,13 +30,17 @@ bandwidth allows. The formats with real serialization overhead — pickle for
 `.pt`, zip for `.npz`, protobuf for `.onnx` — stay slower in both modes because
 that work does not go away.
 
-**Where zTensor does not win.** GGUF's own reader is faster on its own files
+### Where zTensor does not win
+
+GGUF's own reader is faster on its own files
 (2.52 vs 2.37 GB/s): it maps the file and hands back block pointers, which is
 the same thing zTensor does with one more layer of indirection. Reading is not
 where a container format earns its keep; the columns above are close because
 they are all measuring the same mmap.
 
-**Safety.** For `.pt`, zTensor runs a restricted pickle VM that recognizes only
+### Safety
+
+For `.pt`, zTensor runs a restricted pickle VM that recognizes only
 tensor-reconstruction opcodes and extracts metadata without executing anything,
 unlike `torch.load()`, which calls `pickle.load()`. It also refuses
 non-contiguous tensors rather than reading a transposed tensor's storage as if
@@ -61,15 +56,7 @@ Each format written by its own reference implementation, three workloads at
 
 ![Write throughput by workload](../static/charts/write_throughput.svg)
 
-| Format | Large | Mixed | Small |
-|---|---|---|---|
-| **ztensor** | 3.29 GB/s | 3.62 GB/s | 0.80 GB/s |
-| safetensors | 5.18 GB/s | **6.27 GB/s** | 2.62 GB/s |
-| pickle | 5.91 GB/s | 6.03 GB/s | **2.86 GB/s** |
-| npz | 1.10 GB/s | 1.15 GB/s | 0.54 GB/s |
-| gguf | 4.78 GB/s | 6.25 GB/s | 1.30 GB/s |
-| onnx | 0.29 GB/s | 0.30 GB/s | 0.35 GB/s |
-| hdf5 | **6.13 GB/s** | 5.96 GB/s | 0.28 GB/s |
+*The table is on the [introduction](./intro.md#writing).*
 
 zTensor is not the fastest writer, and the reason is that it is not writing the
 same file. Canonical form places every tensor on a 64 KiB boundary, computes an
@@ -96,7 +83,9 @@ ARM64 distributions). For a model made of many tiny tensors it is ruinous: 51k
 tensors each rounded to a page turn 512 MB into 3.4 GB, and every read then
 pays for the padding too.
 
-**This is a known limitation of canonical form as specified.** Blanket
+### A known limitation
+
+Blanket
 alignment is the wrong default for small-tensor models, and the fix is to align
 *selectively* — only tensors large enough that a page of padding is noise
 against them. Until the spec says so, use
@@ -104,7 +93,7 @@ against them. Until the spec says so, use
 (`zt convert --align 4096`, `ztensor.numpy.save_file(..., align=4096)`) for
 checkpoints of that shape.
 
-## What the alignment buys
+### What the alignment buys
 
 - Each tensor can be memory-mapped, registered, and evicted independently.
 - `madvise(MADV_DONTNEED)` on one tensor cannot drop a neighbour's pages, so a
@@ -138,7 +127,9 @@ exceeded 70%, since what is being timed is the kernel's writeback rather than
 the writer. At 512 MiB, where the spread falls to about ±5%, the two trees are
 indistinguishable (2.02–2.23 GB/s canonical write on both).
 
-**If you re-run this, pin `ZTENSOR_BENCH_DIR` for every tree you compare.** It
+### Pin the benchmark directory
+
+`ZTENSOR_BENCH_DIR` matters for every tree you compare. It
 defaults to `target/bench` beside the manifest, so two checkouts can easily
 land on different filesystems — measuring one on tmpfs and one on NVMe
 produced an apparent 40% write regression that was entirely the storage.
