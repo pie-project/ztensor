@@ -13,20 +13,25 @@ The format is unchanged; this adds one thing to the writer.
 ### Added
 
 - **`Writer::append`** adds objects and shards to a finished `.zt` without
-  rewriting the blobs already in it. Writing resumes at the old manifest, so
-  the cost is the size of what you add rather than the size of the file:
-  adding a 4 KiB tensor to a 512 MiB file takes 55 µs against 303 ms to
-  rewrite it.
+  rewriting the blobs already in it, the way spec §2.5 describes: new blobs, a
+  new manifest and a new footer go past the old end, and nothing already in
+  the file is moved, overwritten or truncated. The cost is the size of what
+  you add rather than the size of the file. Adding a 4 KiB tensor to a
+  512 MiB file takes 55 µs against 303 ms to rewrite it.
+
+  The alignment the file was written at is carried forward, worked out from
+  the offsets it already has. A 64 KiB file stays a 64 KiB file, so the
+  per-tensor page exclusivity that placement buys is not lost on the tensors
+  added later. `.align()` overrides it.
 
   It is **not atomic**. From the first byte written until `finish` puts a
-  footer at the new end, the file on disk is invalid, and a crash in that
-  window leaves nothing a reader can open. `.zt` finds its manifest through a
-  footer at EOF and keeps no second copy, so there is no recovery. Use
-  `Writer::publish` when the file is worth more than the rewrite; appending
-  earns its risk on files large enough that copying them is the problem.
+  footer at the new end, the footer is not at EOF and no reader will open the
+  file. Every original byte is still there, so a crashed append is undone by
+  truncating the file back to its old length. Use `Writer::publish` when the
+  file is worth more than the rewrite.
 
-  Canonical form is byte-reproducible placement, which an append cannot
-  honour, so this needs `.canonical(false)`.
+  Canonical form forbids unreferenced blobs (§6.3 rule 1), which an append
+  leaves behind, so this needs `.canonical(false)`.
 
 ### Fixed
 

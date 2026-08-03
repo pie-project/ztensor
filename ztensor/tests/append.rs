@@ -1,8 +1,10 @@
 //! Adding to a finished `.zt` without rewriting it.
 //!
 //! The interesting cases are not "does it round-trip" but the ones where the
-//! file on disk could end up subtly wrong: a new manifest smaller than the one
-//! it replaced, an append onto an append, and a name that is already taken.
+//! file ends up subtly wrong: an original byte moved, an alignment quietly
+//! dropped, an append onto an append, a name already taken. The first two are
+//! bugs this code shipped with, and both are invisible on the machine that
+//! wrote the file.
 
 use std::fs;
 use std::path::PathBuf;
@@ -17,28 +19,41 @@ fn f32s(vals: &[f32]) -> Vec<u8> {
     vals.iter().flat_map(|v| v.to_le_bytes()).collect()
 }
 
-/// The blobs already in the file are neither moved nor rewritten.
+/// Spec §2.5: "Writers MUST NOT truncate or overwrite existing bytes."
+///
+/// The strong form of that is what this checks: the original file is a
+/// *prefix* of the appended one, byte for byte, including its old manifest and
+/// old footer. Anything weaker would let an append reclaim the old manifest,
+/// which is what makes a crashed append unrecoverable.
 #[test]
-fn appending_leaves_the_existing_bytes_where_they_were() {
+fn the_original_file_is_a_prefix_of_the_appended_one() {
     let path = tmp("append-basic.zt");
     let a = f32s(&[1.0, 2.0, 3.0, 4.0]);
     let mut w = Writer::options().canonical(false).create(&path).unwrap();
     w.add("a", [4u64], DType::F32, &a).unwrap();
     w.finish().unwrap();
 
-    let before = Source::open(&path).unwrap();
-    let a_at = before.tensor("a").unwrap().locate().unwrap();
-    let (a_off, a_len) = (a_at.offset, a_at.len);
-    drop(before);
-    let head = fs::read(&path).unwrap()[..(a_off + a_len) as usize].to_vec();
+    let original = fs::read(&path).unwrap();
+    let a_off = Source::open(&path)
+        .unwrap()
+        .tensor("a")
+        .unwrap()
+        .locate()
+        .unwrap()
+        .offset;
 
     let b = f32s(&[9.0; 8]);
     let mut w = Writer::append(&path).unwrap();
     w.add("b", [8u64], DType::F32, &b).unwrap();
     w.finish().unwrap();
 
-    // Every byte up to the end of the original data region is untouched.
-    assert_eq!(&fs::read(&path).unwrap()[..head.len()], &head[..]);
+    let after = fs::read(&path).unwrap();
+    assert!(after.len() > original.len(), "an append only extends");
+    assert_eq!(
+        &after[..original.len()],
+        &original[..],
+        "every original byte, including the old manifest and footer, must survive"
+    );
 
     let src = Source::open(&path).unwrap();
     assert_eq!(src.names().collect::<Vec<_>>(), vec!["a", "b"]);
@@ -47,13 +62,85 @@ fn appending_leaves_the_existing_bytes_where_they_were() {
     assert_eq!(src.tensor("a").unwrap().locate().unwrap().offset, a_off);
 }
 
-/// The footer ends the file, whatever the manifest did.
+/// A crashed append is undone by truncating back to the old length, which only
+/// works because the old footer is still sitting there untouched.
+#[test]
+fn a_half_finished_append_is_undone_by_truncating() {
+    let path = tmp("append-crash.zt");
+    let mut w = Writer::options().canonical(false).create(&path).unwrap();
+    w.add("a", [4u64], DType::F32, &f32s(&[1.0; 4])).unwrap();
+    w.finish().unwrap();
+    let original = fs::read(&path).unwrap();
+
+    // Simulate a crash: bytes written, no footer.
+    let mut w = Writer::append(&path).unwrap();
+    w.add("b", [4096u64], DType::F32, &vec![9u8; 16384])
+        .unwrap();
+    drop(w); // never finished
+
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_len(original.len() as u64)
+        .unwrap();
+
+    assert_eq!(fs::read(&path).unwrap(), original);
+    let src = Source::open(&path).unwrap();
+    assert_eq!(src.names().collect::<Vec<_>>(), vec!["a"]);
+}
+
+/// The alignment the file was written at is carried forward.
 ///
-/// An append rewrites the manifest in place over the old one. That is only
-/// safe while the new manifest is at least as long as the old, which holds
-/// today because adding to a CBOR map only grows it. This pins the property
-/// the reader actually depends on, so a change that broke the assumption
-/// would fail here rather than in the field.
+/// Without this a 64 KiB file silently becomes a mixed file: the tensors added
+/// later land on 4 KiB boundaries and lose page exclusivity on any host whose
+/// pages are larger than that, which is every Apple Silicon machine and some
+/// ARM servers. The writer that made the file would never see it.
+#[test]
+fn an_append_keeps_the_files_alignment() {
+    let path = tmp("append-align.zt");
+    let mut w = Writer::create(&path).unwrap(); // canonical: 64 KiB
+    w.add("a", [1024u64], DType::F32, &vec![1u8; 4096]).unwrap();
+    w.finish().unwrap();
+
+    let mut w = Writer::append(&path).unwrap();
+    w.add("b", [1024u64], DType::F32, &vec![2u8; 4096]).unwrap();
+    w.add("c", [1024u64], DType::F32, &vec![3u8; 4096]).unwrap();
+    w.finish().unwrap();
+
+    let src = Source::open(&path).unwrap();
+    for name in ["a", "b", "c"] {
+        let at = src.tensor(name).unwrap().locate().unwrap();
+        assert_eq!(
+            at.offset % ztensor::ALIGN_CANONICAL,
+            0,
+            "{name} landed at {}, off the file's 64 KiB grid",
+            at.offset
+        );
+    }
+
+    // And an explicit request still wins.
+    let coarse = tmp("append-align-explicit.zt");
+    let mut w = Writer::options()
+        .canonical(false)
+        .align(4096)
+        .create(&coarse)
+        .unwrap();
+    w.add("a", [16u64], DType::F32, &f32s(&[1.0; 16])).unwrap();
+    w.finish().unwrap();
+    let mut w = Writer::options()
+        .canonical(false)
+        .align(65536)
+        .append(&coarse)
+        .unwrap();
+    w.add("b", [16u64], DType::F32, &f32s(&[2.0; 16])).unwrap();
+    w.finish().unwrap();
+    let src = Source::open(&coarse).unwrap();
+    assert_eq!(src.tensor("b").unwrap().locate().unwrap().offset % 65536, 0);
+}
+
+/// The footer ends the file. A reader finds the manifest no other way, so
+/// this is the property every append has to leave standing.
 #[test]
 fn the_footer_still_ends_the_file() {
     let path = tmp("append-shorter.zt");

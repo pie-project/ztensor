@@ -114,13 +114,16 @@ w.add("extra.weight", [1024u64], DType::F32, &data)?;
 w.finish()?;
 ```
 
-Writing resumes at the old manifest, so the cost is the size of what you add.
-Adding a 4 KiB tensor to a 512 MiB file takes about 55 µs, against 303 ms to
-rewrite the file.
+Everything new goes past the old end of the file, so the cost is the size of
+what you add. Adding a 4 KiB tensor to a 512 MiB file takes about 55 µs,
+against 303 ms to rewrite the file. The alignment the file already uses is
+carried forward, so a 64 KiB file stays one.
 
 This is not atomic. From the first byte written until `finish` puts a footer
-at the new end, the file is invalid, and a crash in that window leaves nothing
-a reader can open. Use `publish` when the file is worth more than the rewrite.
+at the new end, the footer is not at EOF and no reader will open the file. The
+original bytes are all still there, so a crashed append is undone by
+truncating back to the old length. Use `publish` when the file is worth more
+than the rewrite.
 
 ### Publishing atomically
 

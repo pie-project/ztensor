@@ -109,21 +109,33 @@ impl Options {
     /// copied, so the cost is the size of what you add rather than the size
     /// of the file.
     ///
+    /// Writing starts past the end of the file, as spec §2.5 requires: nothing
+    /// already there is moved, overwritten, or truncated. The old manifest
+    /// stays where it is as an unreferenced blob, and the file's meaning
+    /// becomes the new footer at the new EOF.
+    ///
+    /// # Alignment is inherited
+    ///
+    /// New blobs are placed at the alignment the file already uses, worked out
+    /// from the offsets it already has (§2.4 keeps alignment out of the file
+    /// precisely because it is observable). A 64 KiB file stays a 64 KiB file,
+    /// so the per-tensor page exclusivity that placement buys is not quietly
+    /// lost on the tensors added later. `.align()` overrides it.
+    ///
     /// # This is not atomic
     ///
-    /// New bytes start at the old manifest, so the moment one is written the
-    /// file on disk is invalid until [`finish`](Writer::finish) puts a footer
-    /// at the new end. A crash in that window leaves a file no reader will
-    /// open and no recovery will fix, because `.zt` finds its manifest through
-    /// a footer at EOF and has no second copy to fall back on.
+    /// From the first byte written until [`finish`](Writer::finish) puts a
+    /// footer at the new end, the footer is not at EOF and no reader will open
+    /// the file. Every original byte is still there, though, so a crashed
+    /// append is undone by truncating the file back to the length it had.
     ///
     /// [`publish`](Self::publish) is the atomic alternative: it costs a full
     /// rewrite, and a reader either sees the old file or the new one. Prefer
     /// it whenever the file is worth more than the rewrite. Appending earns
     /// its risk on files large enough that copying them is the problem.
     ///
-    /// Canonical form is byte-reproducible placement (spec §6.3), which an
-    /// append cannot honour, so this needs `.canonical(false)`.
+    /// Canonical form forbids unreferenced blobs (§6.3 rule 1), which an
+    /// append leaves behind, so this needs `.canonical(false)`.
     pub fn append(self, path: impl AsRef<Path>) -> Result<Writer> {
         if self.canonical {
             return Err(Error::InvalidInput(
@@ -134,7 +146,8 @@ impl Options {
         let vocab = self.vocab.clone().unwrap_or_else(Vocabulary::shared);
         let store = crate::store::Store::index(&path, "zt")?;
         let parsed = crate::validate::read(&store, &vocab)?;
-        let (Some(manifest), Some(start)) = (parsed.manifest, parsed.manifest_at) else {
+        let end = store.len();
+        let (Some(manifest), Some(manifest_at)) = (parsed.manifest, parsed.manifest_at) else {
             return Err(Error::InvalidInput(format!(
                 "{}: a data shard carries no manifest, so there is nothing to add to",
                 path.display()
@@ -147,16 +160,18 @@ impl Options {
                 check_alignment(a)?;
                 a
             }
-            None => ALIGN_FLOOR,
+            None => inherited_alignment(&manifest, manifest_at),
         };
         let file = File::options().read(true).write(true).open(&path)?;
         let mut out = BufWriter::with_capacity(1 << 20, file);
-        out.seek(SeekFrom::Start(start))?;
+        // Past the old footer. `next_offset` aligns up from here, so the gap
+        // is padding and the bytes behind it are left alone.
+        out.seek(SeekFrom::Start(end))?;
         Ok(Writer {
             out: Some(out),
             path,
             publish_to: None,
-            offset: start,
+            offset: end,
             align,
             canonical: false,
             manifest,
@@ -168,7 +183,7 @@ impl Options {
             last_name: None,
             streaming: false,
             vocab: self.vocab.unwrap_or_else(Vocabulary::shared),
-            truncate: true,
+            appending: true,
         })
     }
 
@@ -203,9 +218,46 @@ impl Options {
             last_name: None,
             streaming: false,
             vocab: self.vocab.unwrap_or_else(Vocabulary::shared),
-            truncate: false,
+            appending: false,
         })
     }
+}
+
+/// The alignment a file was written at, read back from its offsets.
+///
+/// §2.4 does not store the alignment, on the grounds that it is observable:
+/// every blob sits on a multiple of it, so the largest power of two dividing
+/// all of them is it (or a multiple of it, when the offsets happen to share a
+/// coarser factor). Guessing coarser is safe, since §2.4 lets any writer place
+/// more strictly than the floor, so this errs upward and clamps to the range
+/// the format actually uses.
+///
+/// Only blobs in *this* file count. A blob in a shard sits at an offset in
+/// that file, chosen by whoever wrote it, and says nothing about this one.
+fn inherited_alignment(manifest: &Manifest, manifest_at: u64) -> u64 {
+    fn gcd(a: u64, b: u64) -> u64 {
+        if b == 0 {
+            a
+        } else {
+            gcd(b, a % b)
+        }
+    }
+
+    // The manifest blob is placed by the same rule, so it counts too, and it
+    // guarantees a non-zero starting point.
+    let mut common = manifest_at;
+    for object in manifest.objects.values() {
+        for part in object.parts.values() {
+            if part.blob.shard.is_none() && part.blob.offset > 0 {
+                common = gcd(common, part.blob.offset);
+            }
+        }
+    }
+    if common == 0 {
+        return ALIGN_FLOOR;
+    }
+    let power_of_two = 1u64 << common.trailing_zeros().min(63);
+    power_of_two.clamp(ALIGN_FLOOR, ALIGN_CANONICAL)
 }
 
 fn partial_path(final_path: &Path) -> PathBuf {
@@ -237,11 +289,10 @@ pub struct Writer {
     /// Whether a [`Sink`] is open. Every other object-adding method refuses
     /// while one is: their bytes would land in the middle of the streamed part.
     streaming: bool,
-    /// Set when appending. The file already had bytes past the point writing
-    /// resumed, and any of them left beyond the new footer would put the
-    /// footer somewhere other than EOF, which is the one thing a reader cannot
-    /// forgive.
-    truncate: bool,
+    /// Set when adding to a file this writer did not create. It decides who
+    /// owns `path`: an appending writer that gives up must leave the file
+    /// alone, where one that created it deletes what it started.
+    appending: bool,
     vocab: Arc<Vocabulary>,
 }
 
@@ -463,15 +514,9 @@ impl Writer {
 
         let out = self.out.take().expect("writer is open");
         let file = out.into_inner().map_err(|e| Error::Io(e.into_error()))?;
-        if self.truncate {
-            // An append cannot currently shrink a file: adding to a CBOR map
-            // only makes it longer, and new blobs push the manifest further
-            // out. So this is a guard rather than a fix, and it costs one
-            // syscall. It is here because the failure it prevents is a footer
-            // that is not at EOF, which no reader will open and nothing in
-            // the writer would catch.
-            file.set_len(self.offset)?;
-        }
+        // No `set_len` here, deliberately. §2.5 says a writer MUST NOT
+        // truncate, and an append never needs to: it starts past the old EOF,
+        // so what it writes only ever extends the file.
         file.sync_all().or_else(|e| {
             // Durability is only promised by publish(); a plain create() on a
             // filesystem that cannot sync is not a failure to write.
@@ -492,7 +537,7 @@ impl Writer {
     /// Abandons the file: a publishing writer removes its partial, a plain one
     /// removes what it has written.
     pub fn abandon(mut self) {
-        if self.truncate {
+        if self.appending {
             // Appending, so `path` is the caller's file rather than a partial
             // this writer owns. Drop the buffered bytes without flushing them
             // and leave the file alone.
@@ -648,7 +693,7 @@ impl Drop for Writer {
         }
         // An append that never finished writes nothing more. What already
         // reached the disk cannot be taken back, but the buffer can.
-        if self.truncate {
+        if self.appending {
             self.discard_buffer();
         }
     }
