@@ -187,54 +187,55 @@ impl ShardResolver for CasResolver {
 /// or files that were renamed on the way. Because it never looks at a name,
 /// it still works after a rename.
 pub struct DirectoryResolver {
-    /// Digest -> (size, path). Keying on the digest alone means a lookup
-    /// needs no allocation, and lets a file whose digest matches but whose
-    /// size does not be reported as corrupt instead of missing.
-    by_digest: BTreeMap<String, (u64, PathBuf)>,
+    /// File size -> the `.zt` files of that size.
+    ///
+    /// Only sizes are collected, because a digest cannot be computed until
+    /// the shard being looked for says which algorithm it is in. Size is the
+    /// cheap half of the identity and narrows the field to almost always one
+    /// candidate; `resolve` hashes only that one, in the algorithm asked for.
+    by_size: BTreeMap<u64, Vec<PathBuf>>,
 }
 
 impl DirectoryResolver {
-    /// Indexes every `.zt` file directly inside `dir`.
+    /// Indexes every `.zt` file directly inside `dir` by size.
     ///
-    /// Digests are computed eagerly, so this costs one full read of every
-    /// candidate file. Prefer a cheaper convention when one applies; this is
-    /// the fallback for when no name can be trusted.
+    /// This reads no tensor bytes. Hashing happens in `resolve`, once, on the
+    /// candidates of the right size.
     ///
     /// Files that are not readable containers are skipped rather than
     /// reported: a directory is allowed to hold things that are not shards,
     /// and a shard that is genuinely missing surfaces at `resolve` with the
     /// identity that was being looked for.
     pub fn scan(dir: impl AsRef<Path>) -> Result<Self> {
-        let mut by_digest = BTreeMap::new();
+        let mut by_size: BTreeMap<u64, Vec<PathBuf>> = BTreeMap::new();
         for entry in std::fs::read_dir(dir.as_ref())? {
-            let path = entry?.path();
+            let entry = entry?;
+            let path = entry.path();
             if path.extension().is_some_and(|e| e == "zt") {
-                if let Ok(id) = shard_identity(&path) {
-                    by_digest.insert(id.digest, (id.size, path));
+                if let Ok(meta) = entry.metadata() {
+                    by_size.entry(meta.len()).or_default().push(path);
                 }
             }
         }
-        Ok(Self { by_digest })
+        for paths in by_size.values_mut() {
+            paths.sort();
+        }
+        Ok(Self { by_size })
     }
 }
 
 impl ShardResolver for DirectoryResolver {
     fn resolve(&self, name: &str, shard: &Shard) -> Result<PathBuf> {
-        match self.by_digest.get(&shard.digest) {
-            Some((size, path)) if *size == shard.size => Ok(path.clone()),
-            Some((size, path)) => Err(Error::reject(
-                Rule::ShardIdentity,
-                format!(
-                    "shard {name:?}: {} has the expected digest but is {size} bytes, not {}",
-                    path.display(),
-                    shard.size
-                ),
-            )),
-            None => Err(Error::NotFound(format!(
-                "shard {name:?} ({} bytes, {}) is not in the scanned directory",
-                shard.size, shard.digest
-            ))),
+        let algo = DigestAlgorithm::of_digest(&shard.digest)?;
+        for path in self.by_size.get(&shard.size).into_iter().flatten() {
+            if shard_identity(path, algo).is_ok_and(|id| id.digest == shard.digest) {
+                return Ok(path.clone());
+            }
         }
+        Err(Error::NotFound(format!(
+            "shard {name:?} ({} bytes, {}) is not in the scanned directory",
+            shard.size, shard.digest
+        )))
     }
 }
 
@@ -1052,17 +1053,12 @@ impl<'a> Part<'a> {
 ///
 /// The frame is checked first, so a file that is not a container is an error
 /// rather than a digest of something else.
-pub fn shard_identity(path: impl AsRef<Path>) -> Result<Shard> {
-    shard_identity_with(path, DigestAlgorithm::Xxh3)
-}
-
-/// The identity of a `.zt` container, digested with `algo`.
 ///
-/// Use [`DigestAlgorithm::Sha256`] for anything that will be signed or
-/// distributed: the root manifest then commits to every shard byte, so one
-/// signature over the root covers the whole model (§6.5). `Xxh3` is faster and
-/// is what a local, unsigned set wants.
-pub fn shard_identity_with(path: impl AsRef<Path>, algo: DigestAlgorithm) -> Result<Shard> {
+/// `algo` is spelled out because it is a real choice, not a default worth
+/// hiding: [`DigestAlgorithm::Sha256`] is what makes a root a commitment to
+/// every shard byte, so one signature over it covers the model (§6.5), while
+/// [`DigestAlgorithm::Xxh3`] is faster and enough for a local, unsigned set.
+pub fn shard_identity(path: impl AsRef<Path>, algo: DigestAlgorithm) -> Result<Shard> {
     let store = Store::index(path.as_ref(), "zt")?;
     validate::read(&store, &Vocabulary::shared())?;
     let mut hasher = Hasher::new(algo);

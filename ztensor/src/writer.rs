@@ -21,9 +21,9 @@ use xxhash_rust::xxh3::{xxh3_128, xxh3_64, Xxh3};
 use crate::cbor;
 use crate::error::{Error, Result};
 use crate::schema::{
-    check_attributes, check_digest, check_name, check_shard_name, BlobRef, DType, DigestAlgorithm,
-    Manifest, Object, Part, Shard, ALIGN_CANONICAL, ALIGN_FLOOR, FOOTER_LEN, MAGIC,
-    MAX_MANIFEST_LEN, MAX_RANK, MIN_FILE_LEN, VERSION,
+    check_attributes, check_digest, check_name, check_shard_name, BlobRef, DType, Manifest, Object,
+    Part, Shard, ALIGN_CANONICAL, ALIGN_FLOOR, FOOTER_LEN, MAGIC, MAX_MANIFEST_LEN, MAX_RANK,
+    MIN_FILE_LEN, VERSION,
 };
 use crate::source::Source;
 use crate::vocab::Vocabulary;
@@ -415,11 +415,10 @@ impl Writer {
     /// Registering the same name twice is accepted when the identity matches
     /// and rejected when it does not: one name means one file.
     ///
-    /// The identity comes from [`shard_identity`](crate::shard_identity), or
-    /// [`shard_identity_with`](crate::shard_identity_with) to choose the
-    /// algorithm. Write the shard as an ordinary `.zt` and then ask it for its
-    /// identity; a shard that carries a manifest is one whose tensors a
-    /// consumer can evict and verify.
+    /// The identity comes from [`shard_identity`](crate::shard_identity).
+    /// Write the shard as an ordinary `.zt` and then ask it for its identity;
+    /// a shard that carries a manifest is one whose tensors a consumer can
+    /// evict and verify.
     ///
     /// Canonical form is single-file (spec §6.3), so this needs
     /// `.canonical(false)`.
@@ -474,44 +473,6 @@ impl Writer {
             builder = builder.part(pname).external(linked);
         }
         builder.add()
-    }
-
-    /// Takes a whole `.zt` in as a shard: registers its identity and links
-    /// every tensor it holds.
-    ///
-    /// This is the four steps a shard set otherwise needs by hand, in the one
-    /// order that works: read the identity, register it, read the manifest,
-    /// link each object through it. Doing three of the four still produces a
-    /// file, and the trouble only shows up in whoever reads it, which is why
-    /// they belong together.
-    ///
-    /// `algo` chooses the shard digest. Use [`DigestAlgorithm::Sha256`] for
-    /// anything to be signed or distributed (§6.5).
-    ///
-    /// Returns the names linked, in manifest order.
-    pub fn link_shard(
-        &mut self,
-        name: impl Into<String>,
-        path: impl AsRef<Path>,
-        algo: DigestAlgorithm,
-    ) -> Result<Vec<String>> {
-        let name = name.into();
-        let path = path.as_ref();
-        let identity = crate::source::shard_identity_with(path, algo)?;
-        let Some(manifest) = crate::validate::manifest_of(path)? else {
-            return Err(Error::InvalidInput(format!(
-                "{}: a shard with no manifest names no tensors, so there is nothing to \
-                 link; reference it with add_shard and build the parts yourself",
-                path.display()
-            )));
-        };
-        self.add_shard(&name, &identity)?;
-        let mut linked = Vec::with_capacity(manifest.objects.len());
-        for (object_name, object) in &manifest.objects {
-            self.link(object_name, object, &name)?;
-            linked.push(object_name.clone());
-        }
-        Ok(linked)
     }
 
     /// Copies every tensor of a [`Source`] into this file. This is the

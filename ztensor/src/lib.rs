@@ -59,8 +59,8 @@ pub use schema::{
     MIN_FILE_LEN, VERSION,
 };
 pub use source::{
-    shard_identity, shard_identity_with, Bytes, Caps, CasResolver, DirectoryResolver, Part,
-    PositionalResolver, ShardResolver, Source, Tensor, Verified,
+    shard_identity, Bytes, Caps, CasResolver, DirectoryResolver, Part, PositionalResolver,
+    ShardResolver, Source, Tensor, Verified,
 };
 pub use store::{page_size, Opaque, Store, StoreId};
 pub use validate::{canonical_violations, image as validate_bytes, manifest_of};

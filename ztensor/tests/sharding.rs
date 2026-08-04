@@ -11,7 +11,8 @@ use std::path::PathBuf;
 
 use xxhash_rust::xxh3::xxh3_64;
 use ztensor::{
-    schema, shard_identity, BlobRef, DType, Error, Rule, Shard, ShardResolver, Source, Writer,
+    schema, shard_identity, BlobRef, DType, DigestAlgorithm, Error, Rule, Shard, ShardResolver,
+    Source, Writer,
 };
 
 fn tmp(name: &str) -> PathBuf {
@@ -55,7 +56,7 @@ fn lora_overlay() {
     w.add("base.weight", [32u64, 32], DType::F32, &base_data)
         .unwrap();
     w.finish().unwrap();
-    let base = shard_identity(&base_path).unwrap();
+    let base = shard_identity(&base_path, DigestAlgorithm::Xxh3).unwrap();
 
     let lora_path = tmp("overlay-lora.zt");
     let delta = vec![7u8; 256];
@@ -130,7 +131,7 @@ fn positional_shards() {
     let payload = vec![9u8; 8192];
     let offset = 4096u64;
     write_data_shard(&shard_path, offset, &payload);
-    let identity = shard_identity(&shard_path).unwrap();
+    let identity = shard_identity(&shard_path, DigestAlgorithm::Xxh3).unwrap();
 
     // The data shard alone is a valid manifest-less file.
     assert!(Source::open(&shard_path).unwrap().is_data_shard());
@@ -187,7 +188,7 @@ fn shard_size_mismatch_rejected() {
     let mut w = Writer::create(&base_path).unwrap();
     w.add("t", [4u64], DType::U8, &[1, 2, 3, 4]).unwrap();
     w.finish().unwrap();
-    let mut identity = shard_identity(&base_path).unwrap();
+    let mut identity = shard_identity(&base_path, DigestAlgorithm::Xxh3).unwrap();
     let base_object = Source::open(&base_path)
         .unwrap()
         .manifest()
@@ -217,7 +218,7 @@ fn shard_digest_mismatch_caught_by_deep_verify() {
     let mut w = Writer::create(&base_path).unwrap();
     w.add("t", [256u64], DType::U8, &[5u8; 256]).unwrap();
     w.finish().unwrap();
-    let identity = shard_identity(&base_path).unwrap();
+    let identity = shard_identity(&base_path, DigestAlgorithm::Xxh3).unwrap();
     let base_object = Source::open(&base_path)
         .unwrap()
         .manifest()
@@ -288,7 +289,7 @@ fn shards_found_by_identity_after_a_rename() {
     let mut w = Writer::create(&base_path).unwrap();
     w.add("t", [4u64], DType::U8, &[1, 2, 3, 4]).unwrap();
     w.finish().unwrap();
-    let identity = shard_identity(&base_path).unwrap();
+    let identity = shard_identity(&base_path, DigestAlgorithm::Xxh3).unwrap();
     let base_object = Source::open(&base_path)
         .unwrap()
         .manifest()
@@ -407,8 +408,6 @@ fn resolver_trait_objects() {
 /// occupancy and the per-part digests that a manifest-less one throws away.
 #[test]
 fn a_sha256_shard_identity_round_trips() {
-    use ztensor::DigestAlgorithm;
-
     let shard_path = tmp("sha-shard.zt");
     let payload = vec![3u8; 4096];
     let mut w = Writer::create(&shard_path).unwrap();
@@ -421,7 +420,7 @@ fn a_sha256_shard_identity_round_trips() {
         .locate()
         .unwrap()
         .offset;
-    let from_writer = ztensor::shard_identity_with(&shard_path, DigestAlgorithm::Sha256).unwrap();
+    let from_writer = ztensor::shard_identity(&shard_path, DigestAlgorithm::Sha256).unwrap();
 
     assert!(
         from_writer.digest.starts_with("sha256:"),
@@ -431,10 +430,10 @@ fn a_sha256_shard_identity_round_trips() {
     assert_eq!(from_writer.digest.len(), "sha256:".len() + 64);
 
     // Asking twice gives the same answer.
-    let scanned = ztensor::shard_identity_with(&shard_path, DigestAlgorithm::Sha256).unwrap();
+    let scanned = ztensor::shard_identity(&shard_path, DigestAlgorithm::Sha256).unwrap();
     assert_eq!(scanned, from_writer);
     // And the default is still xxh3, over the same bytes.
-    let default = ztensor::shard_identity(&shard_path).unwrap();
+    let default = ztensor::shard_identity(&shard_path, DigestAlgorithm::Xxh3).unwrap();
     assert!(default.digest.starts_with("xxh3:"));
     assert_eq!(default.size, from_writer.size);
 
@@ -491,8 +490,6 @@ fn a_sha256_shard_identity_round_trips() {
 fn a_sha256_part_digest_is_verified() {
     use xxhash_rust::xxh3::xxh3_64;
     use ztensor::cbor::{self, Value};
-    use ztensor::DigestAlgorithm;
-
     let data = vec![0xabu8; 256];
     let text = |s: &str| Value::Text(s.to_string());
 
@@ -573,8 +570,6 @@ fn a_sha256_part_digest_is_verified() {
 /// which has never seen this crate can check a signature over it.
 #[test]
 fn the_digests_match_the_published_vectors() {
-    use ztensor::DigestAlgorithm;
-
     assert_eq!(
         DigestAlgorithm::Sha256.digest(b""),
         "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
@@ -591,7 +586,7 @@ fn the_digests_match_the_published_vectors() {
     w.add("t", [long.len() as u64], DType::U8, &long).unwrap();
     w.finish().unwrap();
 
-    let streamed = ztensor::shard_identity_with(&path, DigestAlgorithm::Sha256).unwrap();
+    let streamed = ztensor::shard_identity(&path, DigestAlgorithm::Sha256).unwrap();
     let whole_file = fs::read(&path).unwrap();
     assert_eq!(
         streamed.digest,
@@ -601,75 +596,49 @@ fn the_digests_match_the_published_vectors() {
     assert_eq!(streamed.size, whole_file.len() as u64);
 }
 
-/// `link_shard` is the four-step assembly done in one call.
+/// The by-identity resolver has to match whatever algorithm the root used.
 ///
-/// Doing three of the four by hand still writes a file; the trouble surfaces
-/// in whoever reads it. This checks the shortcut agrees with the long way,
-/// byte for byte in what it produces.
+/// It used to hash every candidate with one fixed algorithm and compare digest
+/// strings, so a root whose shards are `sha256` could never match: the very
+/// tables that signing needs (§6.5) were the ones it could not resolve. Sizes
+/// are indexed instead, and the digest is computed in `resolve` in the
+/// algorithm the shard asked for.
 #[test]
-fn link_shard_matches_the_manual_assembly() {
-    use ztensor::DigestAlgorithm;
+fn the_directory_resolver_matches_a_sha256_shard_table() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("dr-sha");
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
 
-    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
-    let shard = dir.join("ls-shard.zt");
+    let shard = dir.join("some-name.zt");
     let mut w = Writer::create(&shard).unwrap();
-    w.add("a.weight", [4u64], DType::F32, &[1u8; 16]).unwrap();
-    w.add("b.weight", [8u64], DType::U8, &[2u8; 8]).unwrap();
+    w.add("t", [4u64], DType::U8, &[5u8; 4]).unwrap();
     w.finish().unwrap();
+    let object = ztensor::manifest_of(&shard)
+        .unwrap()
+        .unwrap()
+        .object("t")
+        .unwrap()
+        .clone();
 
-    // The long way.
-    let manual = dir.join("ls-manual.zt");
-    let mut w = Writer::options().canonical(false).create(&manual).unwrap();
-    let id = ztensor::shard_identity_with(&shard, DigestAlgorithm::Sha256).unwrap();
-    w.add_shard("s", &id).unwrap();
-    let m = ztensor::manifest_of(&shard).unwrap().unwrap();
-    for (name, object) in &m.objects {
-        w.link(name, object, "s").unwrap();
+    for algo in [DigestAlgorithm::Sha256, DigestAlgorithm::Xxh3] {
+        let root = dir.join("root.zt");
+        let mut w = Writer::options().canonical(false).create(&root).unwrap();
+        w.add_shard("s", &shard_identity(&shard, algo).unwrap())
+            .unwrap();
+        w.link("t", &object, "s").unwrap();
+        w.finish().unwrap();
+
+        // The name in the table says nothing about the file name on disk.
+        let model = Source::options()
+            .resolver(ztensor::DirectoryResolver::scan(&dir).unwrap())
+            .open(&root)
+            .unwrap();
+        assert_eq!(
+            &*model.tensor("t").unwrap().bytes().unwrap(),
+            &[5u8; 4],
+            "{algo:?} shard table"
+        );
+        model.verify_shards().unwrap();
+        fs::remove_file(&root).unwrap();
     }
-    w.finish().unwrap();
-
-    // The one call.
-    let easy = dir.join("ls-easy.zt");
-    let mut w = Writer::options().canonical(false).create(&easy).unwrap();
-    let linked = w.link_shard("s", &shard, DigestAlgorithm::Sha256).unwrap();
-    w.finish().unwrap();
-
-    assert_eq!(linked, vec!["a.weight", "b.weight"]);
-    assert_eq!(
-        fs::read(&manual).unwrap(),
-        fs::read(&easy).unwrap(),
-        "the shortcut must produce exactly what the long way does"
-    );
-
-    // And it reads back.
-    let sp = shard.clone();
-    let src = Source::options()
-        .resolver(move |_: &str, _: &Shard| Ok(sp.clone()))
-        .open(&easy)
-        .unwrap();
-    assert_eq!(
-        src.names().collect::<Vec<_>>(),
-        vec!["a.weight", "b.weight"]
-    );
-    assert_eq!(
-        &*src.tensor("a.weight").unwrap().bytes().unwrap(),
-        &[1u8; 16]
-    );
-    src.verify_shards().unwrap();
-}
-
-/// A manifest-less shard names no tensors, so there is nothing to link and
-/// saying so beats linking nothing and looking like it worked.
-#[test]
-fn link_shard_refuses_a_manifest_less_shard() {
-    let path = tmp("ls-datashard.zt");
-    write_data_shard(&path, 4096, &[1u8; 64]);
-
-    let root = tmp("ls-datashard-root.zt");
-    let mut w = Writer::options().canonical(false).create(&root).unwrap();
-    let err = w
-        .link_shard("s", &path, ztensor::DigestAlgorithm::Xxh3)
-        .unwrap_err();
-    assert!(format!("{err}").contains("no manifest"), "{err}");
-    w.abandon();
 }

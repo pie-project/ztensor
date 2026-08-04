@@ -59,17 +59,14 @@ spec **Draft 4**.
   it, and nothing needs to be, since all six rules of §6.3 are decidable from
   the bytes.
 
-- **`DigestAlgorithm`**, with `sha256` alongside `xxh3`, plus
-  `shard_identity_with`. §6.5 makes a cryptographic shard digest the thing
-  that lets one signature over a root cover every shard byte, and that was
-  previously impossible to produce through the API. Verification takes
-  whatever algorithm a file used, so a build cannot write digests it is
-  unable to check.
+- **`DigestAlgorithm`**, with `sha256` alongside `xxh3`. §6.5 makes a
+  cryptographic shard digest the thing that lets one signature over a root
+  cover every shard byte, and that was previously impossible to produce
+  through the API. Verification takes whatever algorithm a file used, so a
+  build cannot write digests it is unable to check.
 
-- **`Writer::link_shard`** takes a whole `.zt` in as a shard: identity,
-  registration and one link per tensor, in the one order that works. Done by
-  hand it is four steps, and doing three of them still writes a file whose
-  trouble surfaces only in whoever reads it.
+  `shard_identity` now takes the algorithm, rather than there being two
+  functions for one operation. The choice is a real one and worth spelling.
 
 ### Fixed
 
@@ -79,6 +76,12 @@ spec **Draft 4**.
   blob that writer had open. Two files quietly wrong, and the sink believing
   it had written a part it never wrote. Sinks now carry a ticket the writer
   checks on every call.
+
+- **`DirectoryResolver` could not match a `sha256` shard table.** It hashed
+  every candidate with one fixed algorithm and compared digest strings, so the
+  very tables signing needs (§6.5) were the ones it could not resolve. It now
+  indexes by size and computes the digest in the algorithm the shard asks for,
+  which also means the scan reads no tensor bytes at all.
 
 - **Leaving canonical form dropped the alignment to the 4 KiB floor.**
   Placement is not part of what canonical form is; 64 KiB is what buys
@@ -208,11 +211,6 @@ checkpoints already ship with.
 - Python: a zero-copy export now keeps the mapping alive itself, so an array
   or memoryview stays valid after the source it came from is closed.
 
-- **`Writer::link_shard`** takes a whole `.zt` in as a shard: identity,
-  registration and one link per tensor, in the one order that works. Done by
-  hand it is four steps, and doing three of them still writes a file whose
-  trouble surfaces only in whoever reads it.
-
 ### Fixed
 
 - **A `Sink` could drive a `Writer` that did not open it.** The check was
@@ -221,6 +219,12 @@ checkpoints already ship with.
   blob that writer had open. Two files quietly wrong, and the sink believing
   it had written a part it never wrote. Sinks now carry a ticket the writer
   checks on every call.
+
+- **`DirectoryResolver` could not match a `sha256` shard table.** It hashed
+  every candidate with one fixed algorithm and compared digest strings, so the
+  very tables signing needs (§6.5) were the ones it could not resolve. It now
+  indexes by size and computes the digest in the algorithm the shard asks for,
+  which also means the scan reads no tensor bytes at all.
 
 - **Leaving canonical form dropped the alignment to the 4 KiB floor.**
   Placement is not part of what canonical form is; 64 KiB is what buys

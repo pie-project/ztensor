@@ -6,7 +6,7 @@
 
 use std::path::PathBuf;
 
-use ztensor::{shard_identity_with, DType, DigestAlgorithm, Source, Writer};
+use ztensor::{shard_identity, DType, DigestAlgorithm, Source, Writer};
 
 fn tmp(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name)
@@ -79,7 +79,7 @@ fn sharding_does_not_change_the_content_digest() {
     let mut w = Writer::create(&shard).unwrap();
     w.add("w", [64u64], DType::F32, &payload).unwrap();
     w.finish().unwrap();
-    let id = shard_identity_with(&shard, DigestAlgorithm::Sha256).unwrap();
+    let id = shard_identity(&shard, DigestAlgorithm::Sha256).unwrap();
     let object = ztensor::manifest_of(&shard)
         .unwrap()
         .unwrap()

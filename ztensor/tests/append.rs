@@ -9,7 +9,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use ztensor::{shard_identity, DType, Error, Source, Writer};
+use ztensor::{shard_identity, DType, DigestAlgorithm, Error, Source, Writer};
 
 fn tmp(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name)
@@ -199,7 +199,7 @@ fn a_shard_can_be_added_to_a_finished_file() {
     w.add("borrowed", [4u64], DType::F32, &f32s(&[7.0; 4]))
         .unwrap();
     w.finish().unwrap();
-    let id = shard_identity(&shard).unwrap();
+    let id = shard_identity(&shard, DigestAlgorithm::Xxh3).unwrap();
     let object = ztensor::validate::manifest_of(&shard)
         .unwrap()
         .unwrap()

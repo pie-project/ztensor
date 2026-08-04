@@ -237,18 +237,21 @@ w.add("blk.0.attn_q.weight", [4096u64, 4096], DType::BF16, &weights)?;
 w.finish()?;
 ```
 
-The root records that identity and points its tensors at the shard.
-`link_shard` does the whole thing, since taking the identity, registering it
-and linking each tensor only work together:
+The root records that identity and points its tensors at the shard:
 
 ```rust
+let id = ztensor::shard_identity("model-00001.zt", DigestAlgorithm::Sha256)?;
+
 let mut root = Writer::options().canonical(false).create("model.zt")?;
-root.link_shard("00001", "model-00001.zt", DigestAlgorithm::Sha256)?;
+root.add_shard("00001", &id)?;
+for (name, object) in &ztensor::manifest_of("model-00001.zt")?.unwrap().objects {
+    root.link(name, object, "00001")?;
+}
 root.finish()?;
 ```
 
-`add_shard` and `link` are still there for a root that links only some of a
-shard's tensors.
+Linking through a shard that was never registered is an error, so the two
+cannot drift apart.
 
 The format also allows a shard with no manifest of its own, holding nothing
 but bytes (spec §7.2). zTensor reads those, because other tools write them,
@@ -293,7 +296,7 @@ A root records each shard's size and digest, so a root whose digests are
 the whole model.
 
 ```rust
-let id = ztensor::shard_identity_with("model-00001.zt", DigestAlgorithm::Sha256)?;
+let id = ztensor::shard_identity("model-00001.zt", DigestAlgorithm::Sha256)?;
 w.add_shard("00001", &id)?;
 ```
 
