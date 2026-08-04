@@ -10,7 +10,7 @@ after 1 warmup; cold reads drop the page cache with
 where applicable. Reproduce with `benchmark/bench.py`; every number below is
 its output.*
 
-## Cross-format reading
+## Reading
 
 zTensor reads `.safetensors`, `.pt`, `.gguf`, `.npz`, `.onnx`, `.h5` and `.zt`
 through one mmap-backed API. The results below load a Llama 3.2 1B-shaped model
@@ -20,7 +20,7 @@ through one mmap-backed API. The results below load a Llama 3.2 1B-shaped model
 
 *The table is on the [introduction](./intro.md#reading); the analysis is here.*
 
-### Zero-copy versus copy
+### Zero-copy and copy
 
 By default (`copy=False`) zTensor returns
 mmap-backed arrays with no memory copy; `copy=True` reads into owned arrays.
@@ -30,10 +30,10 @@ bandwidth allows. Formats with real serialization overhead stay slower in
 both modes, because that work does not go away: pickle for `.pt`, zip for
 `.npz`, protobuf for `.onnx`.
 
-### Where GGUF is faster
+### GGUF
 
 GGUF's own reader beats zTensor on its own files, 2.52 against 2.37 GB/s. It
-maps the file and hands back block pointers, which is what zTensor does with
+maps the file and hands back block pointers, the same thing zTensor does with
 one more layer of indirection. The columns are close because they are all
 measuring the same mmap.
 
@@ -64,7 +64,7 @@ canonical write hashes all the bytes and pads between them. safetensors writes
 a header and concatenates. The extra work buys the digests and the alignment,
 and you pay for it once per artifact instead of on every load.
 
-## Alignment is a tradeoff {#alignment-is-a-tradeoff}
+## Alignment tradeoff {#alignment-is-a-tradeoff}
 
 The padding is per tensor rather than per byte, about 32 KiB on average, so
 what it costs depends on how large the tensors are:
@@ -82,7 +82,7 @@ silicon, 64 KiB ARM64 distributions). For a model made of many tiny tensors it
 is very expensive: 51k tensors each rounded up to a page turn 512 MB into
 3.4 GB, and every read then pays for the padding as well.
 
-### A known limitation
+### Known limitation
 
 Blanket alignment is the wrong default for small-tensor models. The fix is to
 align
@@ -92,7 +92,7 @@ not matter. Until the spec covers that, use
 (`zt convert --align 4096`, `ztensor.numpy.save_file(..., align=4096)`) for
 checkpoints of that shape.
 
-### What the alignment buys
+### What it buys
 
 - Each tensor can be memory-mapped, registered, and evicted independently.
 - `madvise(MADV_DONTNEED)` on one tensor cannot drop a neighbour's pages, so a
@@ -103,7 +103,7 @@ None of that works at arbitrary alignment, so `caps().evict` is true only for
 files that have 64 KiB placement. Files written at the 4 KiB floor, and every
 foreign format, report what they support.
 
-## A note on the 2.0 rewrite
+## The 2.0 rewrite
 
 The figures on this page and in the README were first measured before the crate
 rewrite. The rewrite changed the API, not the read path's shape, so the question
@@ -126,7 +126,7 @@ exceeded 70%, since what is being timed is the kernel's writeback rather than
 the writer. At 512 MiB, where the spread falls to about ±5%, the two trees are
 indistinguishable (2.02–2.23 GB/s canonical write on both).
 
-### Pin the benchmark directory
+### Benchmark directory
 
 `ZTENSOR_BENCH_DIR` matters for every tree you compare. It
 defaults to `target/bench` beside the manifest, so two checkouts can easily

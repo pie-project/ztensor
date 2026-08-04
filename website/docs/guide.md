@@ -4,25 +4,25 @@ sidebar_position: 2
 
 # Guide
 
-## Where things live
+## Modules
 
 The crate's modules are the spec's layers, so a section of the specification
 and the code that implements it have the same address:
 
 | Module | What is in it |
 | --- | --- |
-| `ztensor::format` | **L0 + L1**, frozen: the magic, the footer, the alignment floor, the manifest schema, its CBOR mapping, and the rules that decide conformance and canonical form. Nothing here opens a file. |
-| `ztensor::vocab` | **L2**, open: layouts, logical types and encodings, which another crate can extend. |
+| `ztensor::format` | L0 and L1, frozen: the magic, the footer, the alignment floor, the manifest schema, its CBOR mapping, and the rules that decide conformance and canonical form. Nothing here opens a file. |
+| `ztensor::vocab` | L2, open: layouts, logical types and encodings, which another crate can extend. |
 | `ztensor::read` | Opening `.zt` and getting at bytes. |
 | `ztensor::write` | Producing `.zt`. |
-| `ztensor::provide` | For a crate projecting a *foreign* format into a `Source`. Reading a checkpoint needs nothing from it. |
+| `ztensor::provide` | For a crate projecting a foreign format into a `Source`. Reading a checkpoint needs nothing from it. |
 
-The names a consumer actually uses are re-exported at the crate root, and only
-those — `Source`, `Tensor`, `Part`, `Writer`, `DType` and about a dozen more.
-The format constants, the shard resolvers, the free functions that take a path
+The crate root re-exports the names a consumer actually uses, and only those:
+`Source`, `Tensor`, `Part`, `Writer`, `DType` and about a dozen more. The
+format constants, the shard resolvers, the free functions that take a path
 instead of a source (`read::shard_identity`, `read::manifest_of`,
 `read::canonical_violations`) and the projection machinery keep their module
-paths, so that what you see first is what you are likely to want.
+paths, so what you see first is what you are likely to want.
 
 ## Reading
 
@@ -44,18 +44,18 @@ let view = data.map()?;     // a borrow, or an error
 let at = data.locate()?;    // (store, offset, len) for your own read
 ```
 
-### Bytes belong to a part
+### Parts and bytes
 
-A dense tensor keeps all of its bytes in one part, `"data"`; a quantized one
-spreads them over that part and its scales. So `data()` is a step rather than
-a shorthand — which part is being addressed is exactly what a caller must not
-lose track of, and `t.parts()` lists the rest.
+A dense tensor keeps all of its bytes in one part, `"data"`. A quantized one
+spreads them over that part and its scales. `data()` is a step rather than a
+shorthand because which part is being addressed is something a caller has to
+keep track of, and `t.parts()` lists the rest.
 
 `verify()` is the one byte-level operation that stays on the tensor, because
-it covers *every* part: a quantized tensor whose scales had rotted must not
-pass because its payload did.
+it covers every part. A quantized tensor whose scales had rotted should not
+pass on the strength of its payload alone.
 
-### Three ways to get bytes
+### Three byte accessors
 
 There are three methods because callers want three different things.
 `bytes()` is for code that just wants the data and does not want to write the
@@ -65,7 +65,7 @@ errors rather than copying. `locate()` is for code doing its own I/O with
 io_uring, cuFile or a staged host-to-device copy, which needs the address
 rather than the bytes.
 
-### Asking what a part supports
+### Capabilities
 
 Ask what a part supports before relying on it:
 
@@ -80,7 +80,7 @@ Each `Caps` field is named after the method it gates, and is computed from
 that method's own precondition. The report and the behaviour therefore stay
 in sync.
 
-### Metadata without mapping
+### Metadata only
 
 When you only need the metadata, for example in a planner deciding what to
 load, open the file without mapping it:
@@ -109,7 +109,7 @@ Two canonical writes of the same tensors produce byte-identical files, so a
 canonical file's hash is a stable identity for that artifact. For an identity
 that survives being re-aligned or split, see the content digest below.
 
-### Building anything else
+### Multi-part objects
 
 `add` is a shorthand for `object`, which builds everything else: several
 parts, a layout profile, or attributes.
@@ -124,10 +124,10 @@ w.object("q", |o| {
 })?;
 ```
 
-Each part is described inside its own scope. That is what makes `.dtype()`
-before there is a part to apply it to a compile error rather than something
-found out when the object is added. The cost is that a description borrows its
-bytes, so a payload built inline — `.bytes(&encode(x))` — has to be bound to a
+Each part is described inside its own scope, so `.dtype()` before there is a
+part to apply it to is a compile error and not something found out when the
+object is added. The cost is that a description borrows its
+bytes, so a payload built inline (`.bytes(&encode(x))`) has to be bound to a
 local first.
 
 ### Leaving canonical form
@@ -139,20 +139,20 @@ encode parts, or reference other files:
 let mut w = Writer::options().canonical(false).create("scratch.zt")?;
 ```
 
-Placement is not part of what you give up: a non-canonical writer still puts
-blobs on 64 KiB boundaries, because that is what buys per-tensor page
-exclusivity and a sharded model wants it as much as any other. Ask for
-something else when the model is many small tensors, where a page of padding
-each is most of the file:
+Placement is not part of what you give up. A non-canonical writer still puts
+blobs on 64 KiB boundaries, since that is what buys per-tensor page
+exclusivity, and a sharded model wants it as much as any other file does. Ask
+for something else when the model is many small tensors and a page of padding
+each accounts for most of the file:
 
 ```rust
 let mut w = Writer::options().canonical(false).align(4096).create("tiny.zt")?;
 ```
 
 Asking for an alignment while leaving canonical form on is an error, and the
-message says how to mean what you probably meant.
+message says which of the two to change.
 
-### Adding to a finished file
+### Appending
 
 `append` adds objects and shards to a `.zt` that already exists, without
 rewriting the blobs in it:
@@ -174,7 +174,7 @@ original bytes are all still there, so a crashed append is undone by
 truncating back to the old length. Use `publish` when the file is worth more
 than the rewrite.
 
-### Publishing atomically
+### Publishing
 
 To publish where readers are watching, let the writer do the dance:
 
@@ -185,11 +185,11 @@ let mut w = Writer::publish("model.zt")?;   // writes beside it, renames at the 
 Nothing appears at the path until `finish`, and a writer dropped without
 finishing leaves nothing behind.
 
-### Is it canonical?
+### Canonical check
 
-Canonical form is the recommended distribution format, and a file carries no
-mark saying it is one. It does not need to: all six rules of the spec are
-decidable from the bytes.
+Canonical form is the recommended distribution format. A file carries no mark
+saying it is one, because all six rules in the spec are decidable from the
+bytes.
 
 ```bash
 zt verify model.zt --canonical
@@ -201,10 +201,10 @@ model.zt: ok. 3 part(s) digest-verified, 0 without digests
     rule 2: "t"/"data" is at offset 4096, which is not a multiple of 65536
 ```
 
-A non-canonical file is still fully conforming; this answers a different
-question from "is it valid".
+A non-canonical file is still fully conforming. This check answers a
+different question from whether the file is valid.
 
-### What model is this?
+### Content digest
 
 A file's hash identifies the *file*. Two files holding the same tensors have
 different hashes if they were aligned or split differently. The content digest
@@ -249,14 +249,14 @@ src.verify_shards()?;                // whole-file digests of every shard
 `Verified::NoDigest` when the part carries none. A mismatch comes back as
 `Err(Reject { rule: Digest, .. })`, since the file has failed a rule.
 
-### What is checked when
+### Verification stages
 
 Structure and the manifest hash are checked when the file is opened. Per-part
 digests are checked when you ask for them, and whole-shard digests only in
 `verify_shards`. Hashing 100 GB on every load would be too slow to be
 practical, so the expensive checks are opt-in.
 
-## Sharded models and overlays
+## Sharding
 
 A multi-file model is one root `.zt` whose manifest addresses blobs in other
 `.zt` files. Those files are containers like any other; what makes them shards
@@ -333,9 +333,8 @@ w.add("base.weight.lora_a", [64u64], DType::F32, &delta)?;
 w.finish()?;
 ```
 
-`link` reads the byte range out of the shard's own manifest. A shard that
-carries none — a data shard, spec §7.2 — has no manifest to read, so state the
-range yourself:
+`link` reads the byte range out of the shard's own manifest. A data shard
+(spec §7.2) carries no manifest to read, so state the range yourself:
 
 ```rust
 w.object("t", |o| {
@@ -362,7 +361,7 @@ let id = ztensor::read::shard_identity("model-00001.zt", DigestAlgorithm::Sha256
 w.add_shard("00001", &id)?;
 ```
 
-### Files that were not written together
+### Unrelated files
 
 A sharded safetensors snapshot is a different case. The files were not written
 for each other, and opening them together makes a weaker claim:
@@ -375,10 +374,10 @@ The only thing tying the set together is the caller's list, so there is
 nothing to verify it against. What `open_all` does check is that no tensor
 name appears in two files.
 
-### Asking which of the three you have
+### Provenance
 
 The difference between a root, a data shard and a projection is what can be
-verified, so it is one answer rather than two half-questions:
+verified, so the API gives it as one answer:
 
 ```rust
 match src.provenance() {
@@ -409,11 +408,11 @@ drop a neighbour's cache. It is present on every platform and refused where
 there is no way to drop page cache, so `if caps.evict { t.evict()? }` compiles
 everywhere.
 
-### Writing a tensor that will not fit in memory
+### Streaming a large tensor
 
-`stream` declares an object by part lengths and hands back a `Sink`, which is
-a token rather than a borrow of the writer — that is what lets a producer
-driven from outside (one copying weights off a device, say) hold both in one
+`stream` declares an object by part lengths and hands back a `Sink`. The
+`Sink` is a token, not a borrow of the writer, so a producer driven from
+outside (one copying weights off a device, say) can hold both in one
 structure.
 
 ```rust
