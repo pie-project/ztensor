@@ -1,15 +1,22 @@
 # Changelog
 
 Notable changes to the `ztensor`, `ztensor-compat` and `ztensor-cli` crates
-and the `ztensor` Python package, which are versioned together.
+and to the `ztensor` Python package.
 
-The **file format is versioned separately**: `.zt` is container version 2,
-spec **Draft 4**.
+**Three version lines, on purpose.** The crates share one number and are
+tagged `v*`. The Python package has its own and is tagged `py-v*`, so a change
+confined to the bindings does not move `ztensor` on crates.io and a crate
+release does not rebuild 20 wheels with nothing new in them. The **file format
+is separate again**: `.zt` is container version 2, spec **Draft 4**.
 
-## Unreleased
+Entries below say which line they belong to.
 
-The Python bindings, which had not had the same pass as the Rust surface.
-Breaking for Python; the Rust crates are untouched.
+## Python 2.1.2
+
+The bindings, which had not had the same pass as the Rust surface. Breaking
+for Python. The crates are untouched and stay at 2.1.1, which is what the
+split version lines are for: this is the first release where the two numbers
+differ.
 
 ### Fixed
 
@@ -64,7 +71,7 @@ Breaking for Python; the Rust crates are untouched.
   memory.
 - **`Writer(..., append=True)`** adds to a `.zt` that already exists.
 
-## 2.1.1
+## Crates 2.1.1
 
 A second pass over the surface, after reading 2.1 back. The container is
 untouched — no file changes meaning — and so is every operation. What changed
@@ -155,7 +162,7 @@ what it says.
   dropping the encoding, and points at `Writer::link`, which can read the
   decoded length out of the shard's manifest.
 
-## 2.1.0
+## Crates 2.1.0
 
 A rewrite of the crate's surface, and a format addition. The container is
 unchanged: every `.zt` file keeps its meaning, and what moved is where the
@@ -333,7 +340,7 @@ The API breaks, which would ordinarily be a major bump. It is not one because
   Reading manifest-less shards is unchanged: other producers write them, and
   the format defines them.
 
-## 2.0.0
+## Crates 2.0.0
 
 A rewrite of the crate surface, and one change to the L1 manifest schema made
 before the format's first release.

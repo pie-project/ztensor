@@ -133,6 +133,13 @@ explains what that means.
 cargo test --all-features
 ```
 
+## Versions
+
+The crates share one number and are tagged `v*`. The Python package has its
+own and is tagged `py-v*`, so a change confined to the bindings does not move
+`ztensor` on crates.io. The file format is separate from both: `.zt` is
+container version 2, spec Draft 4.
+
 ## Status
 
 Pre-1.0 in intent if not in number. The format is at Draft 4 and may still

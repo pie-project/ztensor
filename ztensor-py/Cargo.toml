@@ -1,6 +1,11 @@
 [package]
 name = "ztensor-py"
-version.workspace = true
+# Versioned apart from the crates on purpose. This crate ships to PyPI and
+# nowhere else, so a change confined to the bindings should not move
+# `ztensor` on crates.io, and a crate release should not force a wheel build
+# that has nothing new in it. `pyproject.toml` carries the same number, and
+# the `py-v*` tag is checked against both.
+version = "2.1.2"
 description = "Python bindings for zTensor: read any tensor format, write canonical .zt"
 authors.workspace = true
 edition.workspace = true
