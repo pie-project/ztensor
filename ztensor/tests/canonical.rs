@@ -97,7 +97,7 @@ fn a_shard_table_breaks_rule_6() {
     let mut w = Writer::create(&shard).unwrap();
     w.add("t", [4u64], DType::F32, &f32s(&[1.0; 4])).unwrap();
     w.finish().unwrap();
-    let id = ztensor::shard_identity(&shard, DigestAlgorithm::Sha256).unwrap();
+    let id = ztensor::read::shard_identity(&shard, DigestAlgorithm::Sha256).unwrap();
 
     let root = tmp("canon-sharded.zt");
     let mut w = Writer::options()

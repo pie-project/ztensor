@@ -14,7 +14,7 @@
 //!
 //! let src = Source::open("model.zt")?;
 //! let t = src.tensor("weights")?;
-//! let bytes = t.map()?;              // borrowed, or an error; never a copy
+//! let bytes = t.data()?.map()?;      // borrowed, or an error; never a copy
 //! # Ok::<(), ztensor::Error>(())
 //! ```
 //!
@@ -38,15 +38,22 @@
 //!
 //! The names a consumer actually uses are re-exported at the crate root, and
 //! only those: the format constants, the builder types you never have to name,
-//! the shard resolvers and the projection machinery keep their module paths.
+//! the shard resolvers, the free functions that take a path instead of a
+//! source, and the projection machinery all keep their module paths.
 //!
 //! # Getting bytes
 //!
-//! Three methods, one per intent: [`bytes`](Part::bytes) gives the best the
-//! source can do and says which it gave, [`map`](Part::map) insists on a
-//! borrow, and [`locate`](Part::locate) gives the address so the caller can do
-//! the I/O itself. [`Caps`] reports per part what each will do, and whose
-//! fields are named after those very methods.
+//! Bytes belong to a [`Part`], never to a [`Tensor`]: a dense tensor keeps all
+//! of them in its `"data"` part, a quantized one spreads them over that part
+//! and its scales. [`Tensor::data`] is the step between, and it is a step
+//! rather than a shorthand so that which part is being addressed never goes
+//! unsaid.
+//!
+//! Then three methods, one per intent: [`bytes`](Part::bytes) gives the best
+//! the source can do as a `Cow` that says which it gave, [`map`](Part::map)
+//! insists on a borrow, and [`locate`](Part::locate) gives the address so the
+//! caller can do the I/O itself. [`Caps`] reports per part what each will do,
+//! and whose fields are named after those very methods.
 //!
 //! # Two layers of description
 //!
@@ -66,6 +73,6 @@ pub mod write;
 pub use error::{Error, Result, Rule};
 pub use format::{DType, DigestAlgorithm, Manifest, Object, Shard};
 pub use provide::{Location, Store, StoreId};
-pub use read::{shard_identity, Bytes, Caps, Part, Provenance, Source, Tensor, Verified};
+pub use read::{Caps, Part, Provenance, Source, Tensor, Verified};
 pub use vocab::Vocabulary;
 pub use write::{Sink, Writer};

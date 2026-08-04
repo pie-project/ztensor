@@ -6,6 +6,7 @@
 //! built-in, and the same file read without it has to stay readable and
 //! unchecked.
 
+use std::borrow::Cow;
 use std::path::PathBuf;
 
 use ztensor::format as schema;
@@ -177,20 +178,34 @@ mod zstd_seekable {
 
         let src = Source::open(&path).unwrap();
         let tensor = src.tensor("t").unwrap();
-        let stored = src.provenance().root().unwrap().part("t", "data").unwrap();
+        let stored = src
+            .provenance()
+            .as_root()
+            .unwrap()
+            .part("t", "data")
+            .unwrap();
         assert_eq!(stored.encoding.as_deref(), Some(ENC));
         assert!(stored.blob.length < data.len() as u64, "should compress");
 
-        assert_eq!(&*tensor.bytes().unwrap(), &data[..]);
-        assert!(tensor.verify().unwrap().checked()); // digest over decoded bytes
+        assert_eq!(&*tensor.data().unwrap().bytes().unwrap(), &data[..]);
+        assert!(tensor.verify().unwrap().is_checked()); // digest over decoded bytes
 
         // An encoded part has no address and no borrow: the stored range is
         // not the tensor, and the message says so.
-        let caps = tensor.caps().unwrap();
+        let caps = tensor.data().unwrap().caps();
         assert!(!caps.map && !caps.locate);
-        assert!(matches!(tensor.map(), Err(Error::Unsupported(_))));
-        assert!(matches!(tensor.locate(), Err(Error::Unsupported(_))));
-        assert!(!tensor.bytes().unwrap().is_mapped());
+        assert!(matches!(
+            tensor.data().unwrap().map(),
+            Err(Error::Unsupported(_))
+        ));
+        assert!(matches!(
+            tensor.data().unwrap().locate(),
+            Err(Error::Unsupported(_))
+        ));
+        assert!(matches!(
+            tensor.data().unwrap().bytes().unwrap(),
+            Cow::Owned(_)
+        ));
     }
 
     #[test]
@@ -204,7 +219,10 @@ mod zstd_seekable {
         .unwrap();
         w.finish().unwrap();
         let src = Source::open(&path).unwrap();
-        assert_eq!(&*src.tensor("e").unwrap().bytes().unwrap(), &[] as &[u8]);
+        assert_eq!(
+            &*src.tensor("e").unwrap().data().unwrap().bytes().unwrap(),
+            &[] as &[u8]
+        );
     }
 
     #[test]
@@ -237,7 +255,13 @@ mod zstd_seekable {
         // but must not hand back the stored bytes as if they were the tensor.
         let bare = Vocabulary::empty();
         let src = Source::options().vocabulary(&bare).open(&path).unwrap();
-        let err = src.tensor("t").unwrap().bytes().unwrap_err();
+        let err = src
+            .tensor("t")
+            .unwrap()
+            .data()
+            .unwrap()
+            .bytes()
+            .unwrap_err();
         assert!(matches!(err, Error::Unsupported(_)), "{err:?}");
     }
 
@@ -260,7 +284,13 @@ mod zstd_seekable {
 
         // The manifest is untouched, so the file opens; the bytes are refused.
         let src = Source::open(&path).unwrap();
-        let err = src.tensor("t").unwrap().bytes().unwrap_err();
+        let err = src
+            .tensor("t")
+            .unwrap()
+            .data()
+            .unwrap()
+            .bytes()
+            .unwrap_err();
         assert_eq!(err.rule(), Some(Rule::Encoding), "{err:?}");
     }
 }

@@ -37,7 +37,7 @@ fn canonical_file(name: &str) -> PathBuf {
 fn canonical_placement_reaches_every_capability() {
     let src = Source::open(canonical_file("caps.zt")).unwrap();
     for name in ["a.weight", "b.weight"] {
-        let caps = src.tensor(name).unwrap().caps().unwrap();
+        let caps = src.tensor(name).unwrap().data().unwrap().caps();
         assert!(caps.locate);
         assert!(caps.map);
         assert!(caps.verify);
@@ -60,7 +60,7 @@ fn floor_alignment_still_pages_on_small_pages() {
     w.add("t", [16u64], DType::F32, &[7u8; 64]).unwrap();
     w.finish().unwrap();
     let src = Source::open(&path).unwrap();
-    let caps = src.tensor("t").unwrap().caps().unwrap();
+    let caps = src.tensor("t").unwrap().data().unwrap().caps();
     assert!(caps.map && caps.verify);
     assert_eq!(caps.alignment, 4096);
     if page_size() == 4096 {
@@ -86,7 +86,10 @@ fn the_report_and_the_outcome_agree() {
     paths.push(floor);
 
     for path in &paths {
-        for source in [Source::open(path).unwrap(), Source::index(path).unwrap()] {
+        for source in [
+            Source::open(path).unwrap(),
+            Source::options().map(false).open(path).unwrap(),
+        ] {
             for tensor in source.tensors() {
                 for pname in tensor.parts() {
                     let part = tensor.part(pname).unwrap();
@@ -119,7 +122,7 @@ fn the_report_and_the_outcome_agree() {
 fn a_part_without_a_digest_is_still_evictable() {
     let path = no_digest_file();
     let src = Source::open(&path).unwrap();
-    let caps = src.tensor("t").unwrap().caps().unwrap();
+    let caps = src.tensor("t").unwrap().data().unwrap().caps();
     assert!(!caps.verify, "the fixture has no digest");
     assert_eq!(
         src.tensor("t").unwrap().verify().unwrap(),
@@ -128,7 +131,7 @@ fn a_part_without_a_digest_is_still_evictable() {
     if page_size() <= ALIGN_CANONICAL {
         assert!(caps.evict, "nothing about eviction needs a digest");
         #[cfg(unix)]
-        src.tensor("t").unwrap().evict().unwrap();
+        src.tensor("t").unwrap().data().unwrap().evict().unwrap();
     }
 }
 
@@ -137,12 +140,12 @@ fn a_part_without_a_digest_is_still_evictable() {
 fn evict_and_reread() {
     let src = Source::open(canonical_file("evict.zt")).unwrap();
     let tensor = src.tensor("a.weight").unwrap();
-    let before = tensor.bytes().unwrap().into_owned();
-    if tensor.caps().unwrap().evict {
-        tensor.prefetch().unwrap();
-        tensor.evict().unwrap();
+    let before = tensor.data().unwrap().bytes().unwrap().into_owned();
+    if tensor.data().unwrap().caps().evict {
+        tensor.data().unwrap().prefetch().unwrap();
+        tensor.data().unwrap().evict().unwrap();
         // Evicted pages re-fault from the file: content is unchanged.
-        assert_eq!(&*tensor.bytes().unwrap(), &before[..]);
+        assert_eq!(&*tensor.data().unwrap().bytes().unwrap(), &before[..]);
         assert_eq!(tensor.verify().unwrap(), Verified::Digest);
     }
 }
@@ -221,8 +224,8 @@ fn a_source_can_be_shared_between_threads() {
         let src = src.clone();
         handles.push(std::thread::spawn(move || {
             let tensor = src.tensor("a.weight").unwrap();
-            assert_eq!(tensor.map().unwrap().len(), 16384);
-            assert!(tensor.verify().unwrap().checked());
+            assert_eq!(tensor.data().unwrap().map().unwrap().len(), 16384);
+            assert!(tensor.verify().unwrap().is_checked());
         }));
     }
     for handle in handles {

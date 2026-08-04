@@ -31,16 +31,20 @@ impl std::fmt::Display for StoreId {
     }
 }
 
-/// Bytes only the projection that opened the file can produce, such as a
-/// deflated zip entry or a chunked HDF5 dataset. These have no address, so
-/// they can be read and nothing more, and they report as much.
+/// Produces the bytes of a [`Payload::Opaque`](super::Payload::Opaque): bytes
+/// only the projection that opened the file can make, such as a deflated zip
+/// entry or a chunked HDF5 dataset. These have no address, so they can be
+/// decoded and nothing more, and they report as much.
+///
+/// `key` is whatever the projection put in the payload to find its own data
+/// again — an archive entry index, a chunk id — and means nothing here.
 ///
 /// `Send + Sync` because a [`Source`](crate::Source) is: a loader that reads a
 /// checkpoint from several threads is the ordinary case,
-/// and a reader that needs interior mutability should reach for a lock rather
+/// and a decoder that needs interior mutability should reach for a lock rather
 /// than make the whole source single-threaded.
-pub trait Opaque: Send + Sync {
-    fn read(&self, key: u64, decoded_len: u64) -> Result<Vec<u8>>;
+pub trait Decode: Send + Sync {
+    fn decode(&self, key: u64, decoded_len: u64) -> Result<Vec<u8>>;
 }
 
 pub struct Store {
@@ -53,7 +57,7 @@ pub struct Store {
     /// exclusivity is computed from this. Empty means unknown, in which case
     /// exclusivity is never claimed.
     occupied: Vec<(u64, u64)>,
-    opaque: Option<Box<dyn Opaque>>,
+    decoder: Option<Box<dyn Decode>>,
 }
 
 impl std::fmt::Debug for Store {
@@ -89,7 +93,7 @@ impl Store {
             format,
             map: None,
             occupied: Vec::new(),
-            opaque: None,
+            decoder: None,
         })
     }
 
@@ -102,9 +106,9 @@ impl Store {
         self
     }
 
-    /// Attaches the reader for payloads that have no address.
-    pub fn with_opaque(mut self, opaque: Box<dyn Opaque>) -> Self {
-        self.opaque = Some(opaque);
+    /// Attaches the decoder for payloads that have no address.
+    pub fn with_decoder(mut self, decoder: Box<dyn Decode>) -> Self {
+        self.decoder = Some(decoder);
         self
     }
 
@@ -170,8 +174,8 @@ impl Store {
         Ok(buf)
     }
 
-    pub(crate) fn opaque(&self) -> Option<&dyn Opaque> {
-        self.opaque.as_deref()
+    pub(crate) fn decoder(&self) -> Option<&dyn Decode> {
+        self.decoder.as_deref()
     }
 
     /// True iff the page-aligned envelope of `[offset, offset + len)`

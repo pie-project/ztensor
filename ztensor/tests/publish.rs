@@ -48,6 +48,8 @@ fn nothing_is_at_the_path_until_finish() {
             .unwrap()
             .tensor("t")
             .unwrap()
+            .data()
+            .unwrap()
             .bytes()
             .unwrap(),
         &[1, 2, 3, 4]
@@ -100,6 +102,8 @@ fn publishing_replaces_atomically() {
             .unwrap()
             .tensor("t")
             .unwrap()
+            .data()
+            .unwrap()
             .bytes()
             .unwrap(),
         &[1]
@@ -109,6 +113,8 @@ fn publishing_replaces_atomically() {
         &*Source::open(&path)
             .unwrap()
             .tensor("t")
+            .unwrap()
+            .data()
             .unwrap()
             .bytes()
             .unwrap(),

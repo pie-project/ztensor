@@ -69,9 +69,12 @@ fn a_streamed_object_matches_a_slice_written_one() {
 
     // And the digests it computed on the fly verify.
     let src = Source::open(&streamed).unwrap();
-    assert!(src.tensor("t.a").unwrap().verify().unwrap().checked());
-    assert!(src.tensor("t.b").unwrap().verify().unwrap().checked());
-    assert_eq!(&*src.tensor("t.a").unwrap().bytes().unwrap(), &a[..]);
+    assert!(src.tensor("t.a").unwrap().verify().unwrap().is_checked());
+    assert!(src.tensor("t.b").unwrap().verify().unwrap().is_checked());
+    assert_eq!(
+        &*src.tensor("t.a").unwrap().data().unwrap().bytes().unwrap(),
+        &a[..]
+    );
 }
 
 #[test]
@@ -113,7 +116,12 @@ fn a_multi_part_object_streams_in_name_order() {
         &*tensor.part("scales").unwrap().bytes().unwrap(),
         &scales[..]
     );
-    assert!(tensor.part("scales").unwrap().verify().unwrap().checked());
+    assert!(tensor
+        .part("scales")
+        .unwrap()
+        .verify()
+        .unwrap()
+        .is_checked());
 }
 
 #[test]
@@ -251,7 +259,10 @@ fn a_sink_refuses_a_writer_that_did_not_open_it() {
     for (path, name, byte) in [(&a, "from_a", 0xAAu8), (&b, "from_b", 0xBB)] {
         let src = Source::open(path).unwrap();
         assert_eq!(src.names().collect::<Vec<_>>(), vec![name]);
-        assert_eq!(&*src.tensor(name).unwrap().bytes().unwrap(), &[byte; 8]);
+        assert_eq!(
+            &*src.tensor(name).unwrap().data().unwrap().bytes().unwrap(),
+            &[byte; 8]
+        );
     }
 }
 

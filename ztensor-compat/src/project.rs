@@ -10,9 +10,7 @@
 //! file has no manifest; saying otherwise would be inventing a document
 //! nobody wrote.
 
-use std::sync::Arc;
-
-use ztensor::provide::{Catalog, Opaque};
+use ztensor::provide::{Catalog, Decode};
 use ztensor::{Result, Source, Store, Vocabulary};
 
 pub(crate) struct Projection {
@@ -21,7 +19,7 @@ pub(crate) struct Projection {
     /// any index. Left empty when the format cannot say, and then the store
     /// never claims page exclusivity.
     pub occupied: Vec<(u64, u64)>,
-    pub opaque: Option<Box<dyn Opaque>>,
+    pub decoder: Option<Box<dyn Decode>>,
 }
 
 impl Projection {
@@ -29,7 +27,7 @@ impl Projection {
         Self {
             catalog,
             occupied: Vec::new(),
-            opaque: None,
+            decoder: None,
         }
     }
 
@@ -38,19 +36,20 @@ impl Projection {
         self
     }
 
-    pub fn with_opaque(mut self, opaque: Box<dyn Opaque>) -> Self {
-        self.opaque = Some(opaque);
+    pub fn with_decoder(mut self, decoder: Box<dyn Decode>) -> Self {
+        self.decoder = Some(decoder);
         self
     }
 
     pub fn into_source(self, store: Store, vocab: Option<&Vocabulary>) -> Result<Source> {
         let mut store = store.with_occupied(self.occupied);
-        if let Some(opaque) = self.opaque {
-            store = store.with_opaque(opaque);
+        if let Some(decoder) = self.decoder {
+            store = store.with_decoder(decoder);
         }
-        match vocab {
-            None => Source::from_parts(vec![store], self.catalog),
-            Some(v) => Source::from_parts_with(vec![store], self.catalog, Arc::new(v.clone())),
+        let mut options = Source::options();
+        if let Some(v) = vocab {
+            options = options.vocabulary(v);
         }
+        options.from_parts(vec![store], self.catalog)
     }
 }

@@ -6,6 +6,91 @@ and the `ztensor` Python package, which are versioned together.
 The **file format is versioned separately**: `.zt` is container version 2,
 spec **Draft 4**.
 
+## 2.2.0
+
+A second pass over the surface, after reading 2.1 back. The container is
+untouched — no file changes meaning — and so is every operation. What changed
+is which of them exist, since several turned out to be two ways of saying one
+thing, and two others let a caller write something contradictory and compile.
+
+Breaking, and again not a major bump: 2.1 has one user, updated with it.
+
+### Removed
+
+- **The nine `Tensor` methods that were `self.data()?.<the same name>()`** —
+  `bytes`, `map`, `locate`, `caps`, `dtype`, `logical`, `nbytes`, `prefetch`,
+  `evict`. They read as whole-tensor operations and were not: each addressed
+  the `"data"` part, while `verify` on the same receiver covered *every* part.
+  Nothing distinguished the two, so a reader who took `t.verify()` as evidence
+  about `t.bytes()` was wrong in one direction and a reader who took
+  `t.bytes()` for the whole tensor was wrong in the other.
+
+  `verify` stays as it was; the rest move one call along. `t.data()?.map()`,
+  and `t.parts()` for the ones that are not `"data"`.
+
+- **`Bytes`** — it was `Cow<'a, [u8]>` with two of its methods rewritten and a
+  name that collides with the `bytes` crate. `Part::bytes` now returns the
+  `Cow`. `is_mapped()` is `matches!(b, Cow::Borrowed(_))`.
+
+- **`Source::index`** — its body was `options().map(false).open(path)`, which
+  is what `Options` is for.
+
+- **`Source::from_parts_with`** — likewise: giving a projection a vocabulary
+  is `Source::options().vocabulary(&v).from_parts(stores, catalog)`.
+
+- **`Tensor::entry`** — no caller, and it leaked `provide::Entry` into the
+  reader's surface.
+
+- **`PositionalResolver` and `CasResolver`** — both were a closure with a
+  struct around it, and `ShardResolver` is already implemented for closures.
+  They are now `read::positional(root)` and `read::cas(dir)`, returning
+  `impl ShardResolver`. `DirectoryResolver` stays a type: it holds a scan
+  index and a digest cache.
+
+### Changed
+
+- **`PartBuilder::external` takes what the caller knows**: a shard name and a
+  byte range, `external("00001", offset..end)`. It used to take a
+  `format::Part`, so referencing a blob meant hand-assembling a manifest
+  record — restating the dtype, nesting the shard name inside a `BlobRef`,
+  and importing `format::Part` under an alias to keep it apart from
+  `read::Part`. `format::Part` no longer appears in any writer signature, and
+  the collision with it went with that.
+
+- **`Writer::link` is unchanged** and is still the way to reference a shard
+  that carries a manifest: it reads the range out of that manifest instead of
+  asking for it.
+
+- **Renames**, each towards a convention the crate or std already had:
+  `Verified::checked` → `is_checked` (`Bytes::is_mapped` set the pattern),
+  `Provenance::root` → `as_root` (`cbor::Value::as_map` set it),
+  `Catalog::entry` → `get_key_value` (`entry` means the insertion API in
+  every map in std, and `Entry` is a type in that module),
+  `provide::Opaque` → `provide::Decode` with `read` → `decode` (it was named
+  for what it is not; it decodes), `Store::with_opaque` → `with_decoder`.
+
+- **`read::shard_identity` is no longer re-exported at the crate root.** Its
+  two siblings, `manifest_of` and `canonical_violations`, never were, and
+  which of the three is promoted should not depend on which is called most.
+
+### Fixed
+
+- **A part with two payloads is refused.** `p.bytes(&data).length(4)`
+  compiled, silently dropped `data`, and wrote a file whose blob was never
+  filled in. The builder methods return `Self` and so cannot refuse; the
+  second one now records the contradiction and the object fails to build,
+  naming both setters. The scoped-builder shape is what rules out catching
+  this in the type system: the closure passed to `part` must return the type
+  it was given, so no state can ride along in it.
+
+- **A digest on a part the writer writes is refused.** It could only agree
+  with the computed digest or be wrong. `PartBuilder::digest` is new and is
+  for external parts, whose bytes this writer never sees.
+
+- **An external part with an encoding is refused** rather than silently
+  dropping the encoding, and points at `Writer::link`, which can read the
+  decoded length out of the shard's manifest.
+
 ## 2.1.0
 
 A rewrite of the crate's surface, and a format addition. The container is

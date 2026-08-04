@@ -18,7 +18,7 @@ use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::Read;
 
-use ztensor::provide::{Catalog, Opaque};
+use ztensor::provide::{Catalog, Decode};
 use ztensor::provide::{Entry, Location, PartEntry, Payload};
 use ztensor::{DType, Error, Result, Store, StoreId, Vocabulary};
 
@@ -721,8 +721,8 @@ impl Compressed {
     }
 }
 
-impl Opaque for Compressed {
-    fn read(&self, key: u64, decoded_len: u64) -> Result<Vec<u8>> {
+impl Decode for Compressed {
+    fn decode(&self, key: u64, decoded_len: u64) -> Result<Vec<u8>> {
         let (zip_index, length, offset) = *self
             .slices
             .get(key as usize)
@@ -875,7 +875,7 @@ pub(crate) fn project(store: &Store) -> Result<Projection> {
     Ok(if slices.is_empty() {
         projection
     } else {
-        projection.with_opaque(Box::new(Compressed {
+        projection.with_decoder(Box::new(Compressed {
             archive: std::sync::Mutex::new(archive),
             cache: std::sync::Mutex::new(BTreeMap::new()),
             slices,

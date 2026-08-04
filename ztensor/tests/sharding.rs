@@ -10,10 +10,8 @@ use std::fs;
 use std::path::PathBuf;
 
 use xxhash_rust::xxh3::xxh3_64;
-use ztensor::format as schema;
-use ztensor::format::BlobRef;
-use ztensor::read::ShardResolver;
-use ztensor::{shard_identity, DType, DigestAlgorithm, Error, Rule, Shard, Source, Writer};
+use ztensor::read::{shard_identity, ShardResolver};
+use ztensor::{DType, DigestAlgorithm, Error, Rule, Shard, Source, Writer};
 
 fn tmp(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name)
@@ -63,7 +61,7 @@ fn lora_overlay() {
     let base_source = Source::open(&base_path).unwrap();
     let base_object = base_source
         .provenance()
-        .root()
+        .as_root()
         .unwrap()
         .object("base.weight")
         .unwrap()
@@ -84,19 +82,39 @@ fn lora_overlay() {
 
     // Cross-file borrow: the base tensor's bytes come from base.zt.
     assert_eq!(
-        model.tensor("base.weight").unwrap().map().unwrap(),
+        model
+            .tensor("base.weight")
+            .unwrap()
+            .data()
+            .unwrap()
+            .map()
+            .unwrap(),
         &base_data[..]
     );
     assert_eq!(
-        &*model.tensor("base.weight.lora_a").unwrap().bytes().unwrap(),
+        &*model
+            .tensor("base.weight.lora_a")
+            .unwrap()
+            .data()
+            .unwrap()
+            .bytes()
+            .unwrap(),
         &delta[..]
     );
 
     // The address names the file it came from, which is what a store id is
     // for: two tensors of one model, living in two different files.
-    let base_at = model.tensor("base.weight").unwrap().locate().unwrap();
+    let base_at = model
+        .tensor("base.weight")
+        .unwrap()
+        .data()
+        .unwrap()
+        .locate()
+        .unwrap();
     let lora_at = model
         .tensor("base.weight.lora_a")
+        .unwrap()
+        .data()
         .unwrap()
         .locate()
         .unwrap();
@@ -107,7 +125,7 @@ fn lora_overlay() {
     // The base is itself a manifest-carrying container, so its occupancy is
     // known and page exclusivity is a fact rather than a guess, so a tensor in
     // another file is as evictable as one at home.
-    let caps = model.tensor("base.weight").unwrap().caps().unwrap();
+    let caps = model.tensor("base.weight").unwrap().data().unwrap().caps();
     assert!(caps.map && caps.locate && caps.verify);
     if ztensor::provide::page_size() <= ztensor::format::ALIGN_CANONICAL {
         assert!(caps.evict, "{caps:?}");
@@ -119,7 +137,7 @@ fn lora_overlay() {
         .unwrap()
         .verify()
         .unwrap()
-        .checked());
+        .is_checked());
     model.verify_shards().unwrap();
 }
 
@@ -148,35 +166,30 @@ fn positional_shards() {
         .create(&root_path)
         .unwrap();
     w.add_shard("00001", &identity).unwrap();
-    let part = schema::Part {
-        dtype: DType::U8,
-        logical: None,
-        blob: BlobRef {
-            shard: Some("00001".into()),
-            offset,
-            length: payload.len() as u64,
-        },
-        encoding: None,
-        decoded_length: None,
-        digest: Some(format!("xxh3:{:016x}", xxh3_64(&payload))),
-    };
+    let at = offset..offset + payload.len() as u64;
     w.object("t", |o| {
-        o.shape([8192u64])
-            .part("data", |p| p.dtype(DType::U8).external(part))
+        o.shape([8192u64]).part("data", |p| {
+            p.dtype(DType::U8)
+                .digest(format!("xxh3:{:016x}", xxh3_64(&payload)))
+                .external("00001", at)
+        })
     })
     .unwrap();
     w.finish().unwrap();
 
     // The positional convention: posmodel.zt -> posmodel-00001.zt
     let model = Source::open(&root_path).unwrap();
-    assert_eq!(&*model.tensor("t").unwrap().bytes().unwrap(), &payload[..]);
-    assert!(model.tensor("t").unwrap().verify().unwrap().checked());
+    assert_eq!(
+        &*model.tensor("t").unwrap().data().unwrap().bytes().unwrap(),
+        &payload[..]
+    );
+    assert!(model.tensor("t").unwrap().verify().unwrap().is_checked());
     model.verify_shards().unwrap();
 
     // The contrast with `lora_overlay`: a data shard states no occupancy, so
     // nothing can prove this blob has its pages to itself, and eviction is
     // refused rather than assumed safe.
-    let caps = model.tensor("t").unwrap().caps().unwrap();
+    let caps = model.tensor("t").unwrap().data().unwrap().caps();
     assert!(caps.map && caps.locate);
     assert!(
         !caps.evict,
@@ -194,7 +207,7 @@ fn shard_size_mismatch_rejected() {
     let base_object = Source::open(&base_path)
         .unwrap()
         .provenance()
-        .root()
+        .as_root()
         .unwrap()
         .object("t")
         .unwrap()
@@ -225,7 +238,7 @@ fn shard_digest_mismatch_caught_by_deep_verify() {
     let base_object = Source::open(&base_path)
         .unwrap()
         .provenance()
-        .root()
+        .as_root()
         .unwrap()
         .object("t")
         .unwrap()
@@ -277,7 +290,10 @@ fn a_single_file_is_the_degenerate_case() {
     w.add("t", [4u64], DType::U8, &[1, 2, 3, 4]).unwrap();
     w.finish().unwrap();
     let model = Source::open(&path).unwrap(); // no shards: the resolver is never used
-    assert_eq!(&*model.tensor("t").unwrap().bytes().unwrap(), &[1, 2, 3, 4]);
+    assert_eq!(
+        &*model.tensor("t").unwrap().data().unwrap().bytes().unwrap(),
+        &[1, 2, 3, 4]
+    );
     model.verify_shards().unwrap(); // vacuous
 }
 
@@ -297,7 +313,7 @@ fn shards_found_by_identity_after_a_rename() {
     let base_object = Source::open(&base_path)
         .unwrap()
         .provenance()
-        .root()
+        .as_root()
         .unwrap()
         .object("t")
         .unwrap()
@@ -322,10 +338,22 @@ fn shards_found_by_identity_after_a_rename() {
         .resolver(ztensor::read::DirectoryResolver::scan(&dir).unwrap())
         .open(&root_path)
         .unwrap();
-    assert_eq!(&*model.tensor("t").unwrap().bytes().unwrap(), &[1, 2, 3, 4]);
+    assert_eq!(
+        &*model.tensor("t").unwrap().data().unwrap().bytes().unwrap(),
+        &[1, 2, 3, 4]
+    );
     assert_eq!(
         model
-            .store(model.tensor("t").unwrap().locate().unwrap().store)
+            .store(
+                model
+                    .tensor("t")
+                    .unwrap()
+                    .data()
+                    .unwrap()
+                    .locate()
+                    .unwrap()
+                    .store
+            )
             .path(),
         renamed
     );
@@ -390,9 +418,7 @@ fn a_name_means_one_shard() {
 #[test]
 fn resolver_trait_objects() {
     // The CAS path shape (no file IO, just the mapping).
-    let cas = ztensor::read::CasResolver {
-        store: PathBuf::from("/store"),
-    };
+    let cas = ztensor::read::cas("/store");
     let shard = Shard {
         size: 4096,
         digest: "xxh3:00ff00ff00ff00ff".into(),
@@ -422,10 +448,12 @@ fn a_sha256_shard_identity_round_trips() {
         .unwrap()
         .tensor("borrowed")
         .unwrap()
+        .data()
+        .unwrap()
         .locate()
         .unwrap()
         .offset;
-    let from_writer = ztensor::shard_identity(&shard_path, DigestAlgorithm::Sha256).unwrap();
+    let from_writer = ztensor::read::shard_identity(&shard_path, DigestAlgorithm::Sha256).unwrap();
 
     assert!(
         from_writer.digest.starts_with("sha256:"),
@@ -435,10 +463,10 @@ fn a_sha256_shard_identity_round_trips() {
     assert_eq!(from_writer.digest.len(), "sha256:".len() + 64);
 
     // Asking twice gives the same answer.
-    let scanned = ztensor::shard_identity(&shard_path, DigestAlgorithm::Sha256).unwrap();
+    let scanned = ztensor::read::shard_identity(&shard_path, DigestAlgorithm::Sha256).unwrap();
     assert_eq!(scanned, from_writer);
     // And the default is still xxh3, over the same bytes.
-    let default = ztensor::shard_identity(&shard_path, DigestAlgorithm::Xxh3).unwrap();
+    let default = ztensor::read::shard_identity(&shard_path, DigestAlgorithm::Xxh3).unwrap();
     assert!(default.digest.starts_with("xxh3:"));
     assert_eq!(default.size, from_writer.size);
 
@@ -450,27 +478,19 @@ fn a_sha256_shard_identity_round_trips() {
         .create(&root_path)
         .unwrap();
     w.add_shard("data", &from_writer).unwrap();
+    let at = offset..offset + payload.len() as u64;
     w.object("t", |o| {
-        o.shape([4096u64]).part("data", |p| {
-            p.dtype(DType::U8).external(schema::Part {
-                dtype: DType::U8,
-                logical: None,
-                blob: BlobRef {
-                    shard: Some("data".into()),
-                    offset,
-                    length: payload.len() as u64,
-                },
-                encoding: None,
-                decoded_length: None,
-                digest: None,
-            })
-        })
+        o.shape([4096u64])
+            .part("data", |p| p.dtype(DType::U8).external("data", at))
     })
     .unwrap();
     w.finish().unwrap();
 
     let model = open_with_shard_at(&root_path, shard_path.clone()).unwrap();
-    assert_eq!(&*model.tensor("t").unwrap().bytes().unwrap(), &payload[..]);
+    assert_eq!(
+        &*model.tensor("t").unwrap().data().unwrap().bytes().unwrap(),
+        &payload[..]
+    );
     model.verify_shards().unwrap();
 
     // A corrupted shard is caught by the sha256 path, not waved through.
@@ -549,7 +569,7 @@ fn a_sha256_part_digest_is_verified() {
             .unwrap()
             .verify()
             .unwrap()
-            .checked(),
+            .is_checked(),
         "a sha256 part digest must be checked, not skipped"
     );
 
@@ -590,7 +610,7 @@ fn the_digests_match_the_published_vectors() {
     w.add("t", [long.len() as u64], DType::U8, &long).unwrap();
     w.finish().unwrap();
 
-    let streamed = ztensor::shard_identity(&path, DigestAlgorithm::Sha256).unwrap();
+    let streamed = ztensor::read::shard_identity(&path, DigestAlgorithm::Sha256).unwrap();
     let whole_file = fs::read(&path).unwrap();
     assert_eq!(
         streamed.digest,
@@ -638,7 +658,7 @@ fn the_directory_resolver_matches_a_sha256_shard_table() {
             .open(&root)
             .unwrap();
         assert_eq!(
-            &*model.tensor("t").unwrap().bytes().unwrap(),
+            &*model.tensor("t").unwrap().data().unwrap().bytes().unwrap(),
             &[5u8; 4],
             "{algo:?} shard table"
         );
@@ -675,7 +695,7 @@ fn equal_sized_shards_are_resolved_by_content() {
             Source::open(&path)
                 .unwrap()
                 .provenance()
-                .root()
+                .as_root()
                 .unwrap()
                 .object("t")
                 .unwrap()
@@ -707,11 +727,11 @@ fn equal_sized_shards_are_resolved_by_content() {
         .open(&root_path)
         .unwrap();
     assert_eq!(
-        &*model.tensor("t0").unwrap().bytes().unwrap(),
+        &*model.tensor("t0").unwrap().data().unwrap().bytes().unwrap(),
         &[1u8; 64][..]
     );
     assert_eq!(
-        &*model.tensor("t1").unwrap().bytes().unwrap(),
+        &*model.tensor("t1").unwrap().data().unwrap().bytes().unwrap(),
         &[2u8; 64][..]
     );
     model.verify_shards().unwrap();

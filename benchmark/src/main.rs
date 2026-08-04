@@ -250,7 +250,15 @@ fn main() {
         || {
             let mut sum = 0u64;
             for n in &names {
-                sum += checksum(reader.tensor(n).expect("tensor").map().expect("view"));
+                sum += checksum(
+                    reader
+                        .tensor(n)
+                        .expect("tensor")
+                        .data()
+                        .unwrap()
+                        .map()
+                        .expect("view"),
+                );
             }
             std::hint::black_box(sum);
         },
@@ -265,7 +273,14 @@ fn main() {
         || {
             let mut sum = 0u64;
             for n in &st_names {
-                sum += checksum(stf.tensor(n).expect("tensor").map().expect("view"));
+                sum += checksum(
+                    stf.tensor(n)
+                        .expect("tensor")
+                        .data()
+                        .unwrap()
+                        .map()
+                        .expect("view"),
+                );
             }
             std::hint::black_box(sum);
         },
@@ -286,6 +301,8 @@ fn main() {
                 let owned = reader
                     .tensor(n)
                     .expect("tensor")
+                    .data()
+                    .unwrap()
                     .bytes()
                     .expect("read")
                     .into_owned();
@@ -309,7 +326,14 @@ fn main() {
             let r = ztensor::Source::open(&cold_path).expect("open");
             let mut sum = 0u64;
             for n in &names {
-                sum += checksum(r.tensor(n).expect("tensor").map().expect("view"));
+                sum += checksum(
+                    r.tensor(n)
+                        .expect("tensor")
+                        .data()
+                        .unwrap()
+                        .map()
+                        .expect("view"),
+                );
             }
             std::hint::black_box(sum);
             drop(r);

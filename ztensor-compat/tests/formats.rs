@@ -75,7 +75,13 @@ mod gguf {
         assert_eq!(dense.shape().to_vec(), vec![2, 4]); // reversed from ne
         assert_eq!(dense.part("data").unwrap().dtype(), DType::F32);
         assert_eq!(
-            g.tensor("dense").unwrap().bytes().unwrap().into_owned(),
+            g.tensor("dense")
+                .unwrap()
+                .data()
+                .unwrap()
+                .bytes()
+                .unwrap()
+                .into_owned(),
             f32s(&[0.5; 8])
         );
 
@@ -84,12 +90,18 @@ mod gguf {
         assert_eq!(quant.shape().to_vec(), vec![2, 64]); // logical shape preserved
         assert_eq!(quant.part("data").unwrap().nbytes(), 136);
         assert_eq!(
-            g.tensor("quant").unwrap().bytes().unwrap().into_owned(),
+            g.tensor("quant")
+                .unwrap()
+                .data()
+                .unwrap()
+                .bytes()
+                .unwrap()
+                .into_owned(),
             vec![7u8; 136]
         );
 
         assert!(g.attributes().is_some()); // KVs preserved
-        assert!(g.tensor("dense").unwrap().caps().unwrap().map);
+        assert!(g.tensor("dense").unwrap().data().unwrap().caps().map);
     }
 
     #[test]
@@ -126,10 +138,16 @@ mod gguf {
         let quant = r.get("quant").unwrap();
         assert_eq!(quant.layout(), "gguf.q8_0/1");
         assert_eq!(
-            r.tensor("quant").unwrap().bytes().unwrap().into_owned(),
+            r.tensor("quant")
+                .unwrap()
+                .data()
+                .unwrap()
+                .bytes()
+                .unwrap()
+                .into_owned(),
             vec![7u8; 136]
         );
-        assert!(r.tensor("quant").unwrap().verify().unwrap().checked());
+        assert!(r.tensor("quant").unwrap().verify().unwrap().is_checked());
     }
 }
 
@@ -185,16 +203,34 @@ mod npz {
         let n = ztensor_compat::open(&path).unwrap();
 
         assert_eq!(n.tensor("a").unwrap().shape().to_vec(), vec![2, 3]);
-        assert_eq!(n.tensor("a").unwrap().bytes().unwrap().into_owned(), a);
-        assert!(n.tensor("a").unwrap().map().is_ok()); // stored: zero-copy
-        assert!(n.tensor("a").unwrap().caps().unwrap().map);
+        assert_eq!(
+            n.tensor("a")
+                .unwrap()
+                .data()
+                .unwrap()
+                .bytes()
+                .unwrap()
+                .into_owned(),
+            a
+        );
+        assert!(n.tensor("a").unwrap().data().unwrap().map().is_ok()); // stored: zero-copy
+        assert!(n.tensor("a").unwrap().data().unwrap().caps().map);
 
-        assert_eq!(n.tensor("b").unwrap().bytes().unwrap().into_owned(), b); // deflated: lazy read
+        assert_eq!(
+            n.tensor("b")
+                .unwrap()
+                .data()
+                .unwrap()
+                .bytes()
+                .unwrap()
+                .into_owned(),
+            b
+        ); // deflated: lazy read
         assert!(matches!(
-            n.tensor("b").unwrap().map(),
+            n.tensor("b").unwrap().data().unwrap().map(),
             Err(Error::Unsupported(_))
         ));
-        assert!(!n.tensor("b").unwrap().caps().unwrap().map);
+        assert!(!n.tensor("b").unwrap().data().unwrap().caps().map);
     }
 
     #[test]
@@ -334,10 +370,16 @@ mod hdf5 {
         assert_eq!(obj.shape().to_vec(), vec![4]);
         assert_eq!(obj.part("data").unwrap().dtype(), DType::F32);
         assert_eq!(
-            h.tensor("w").unwrap().bytes().unwrap().into_owned(),
+            h.tensor("w")
+                .unwrap()
+                .data()
+                .unwrap()
+                .bytes()
+                .unwrap()
+                .into_owned(),
             f32s(&vals)
         );
-        assert!(h.tensor("w").unwrap().caps().unwrap().map);
+        assert!(h.tensor("w").unwrap().data().unwrap().caps().map);
     }
 
     #[test]
@@ -383,8 +425,17 @@ mod onnx {
         let obj = o.tensor("w").unwrap();
         assert_eq!(obj.shape().to_vec(), vec![2, 2]);
         assert_eq!(obj.part("data").unwrap().dtype(), DType::F32);
-        assert_eq!(o.tensor("w").unwrap().bytes().unwrap().into_owned(), data);
-        assert!(o.tensor("w").unwrap().caps().unwrap().map);
+        assert_eq!(
+            o.tensor("w")
+                .unwrap()
+                .data()
+                .unwrap()
+                .bytes()
+                .unwrap()
+                .into_owned(),
+            data
+        );
+        assert!(o.tensor("w").unwrap().data().unwrap().caps().map);
     }
 
     /// f16 stored in int32_data: one element per int32 (v1 assembled these
@@ -402,7 +453,13 @@ mod onnx {
 
         let o = ztensor_compat::open(&path).unwrap();
         assert_eq!(
-            o.tensor("h").unwrap().bytes().unwrap().into_owned(),
+            o.tensor("h")
+                .unwrap()
+                .data()
+                .unwrap()
+                .bytes()
+                .unwrap()
+                .into_owned(),
             vec![0x00, 0x3c, 0x00, 0x3c]
         );
     }
@@ -439,7 +496,13 @@ mod detect {
         w.finish().unwrap();
         let src = ztensor_compat::open(&zt).unwrap();
         assert_eq!(
-            src.tensor("t").unwrap().bytes().unwrap().into_owned(),
+            src.tensor("t")
+                .unwrap()
+                .data()
+                .unwrap()
+                .bytes()
+                .unwrap()
+                .into_owned(),
             vec![1, 2]
         );
 
@@ -452,7 +515,13 @@ mod detect {
         fs::write(&st, &bytes).unwrap();
         let src = ztensor_compat::open(&st).unwrap();
         assert_eq!(
-            src.tensor("t").unwrap().bytes().unwrap().into_owned(),
+            src.tensor("t")
+                .unwrap()
+                .data()
+                .unwrap()
+                .bytes()
+                .unwrap()
+                .into_owned(),
             vec![3, 4]
         );
 
@@ -545,9 +614,18 @@ mod pt {
         let obj = pt.tensor("w").unwrap();
         assert_eq!(obj.shape().to_vec(), vec![2, 2]);
         assert_eq!(obj.part("data").unwrap().dtype(), DType::F32);
-        assert_eq!(pt.tensor("w").unwrap().bytes().unwrap().into_owned(), data);
-        assert!(pt.tensor("w").unwrap().map().is_ok()); // stored zip entry
-        assert!(pt.tensor("w").unwrap().caps().unwrap().map);
+        assert_eq!(
+            pt.tensor("w")
+                .unwrap()
+                .data()
+                .unwrap()
+                .bytes()
+                .unwrap()
+                .into_owned(),
+            data
+        );
+        assert!(pt.tensor("w").unwrap().data().unwrap().map().is_ok()); // stored zip entry
+        assert!(pt.tensor("w").unwrap().data().unwrap().caps().map);
     }
 
     #[test]
@@ -576,8 +654,17 @@ mod pt {
         w.finish().unwrap();
 
         let r = ztensor::Source::open(&zt).unwrap();
-        assert_eq!(r.tensor("w").unwrap().bytes().unwrap().into_owned(), data);
-        assert!(r.tensor("w").unwrap().verify().unwrap().checked());
+        assert_eq!(
+            r.tensor("w")
+                .unwrap()
+                .data()
+                .unwrap()
+                .bytes()
+                .unwrap()
+                .into_owned(),
+            data
+        );
+        assert!(r.tensor("w").unwrap().verify().unwrap().is_checked());
     }
 }
 

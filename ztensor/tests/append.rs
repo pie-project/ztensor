@@ -9,7 +9,8 @@
 use std::fs;
 use std::path::PathBuf;
 
-use ztensor::{shard_identity, DType, DigestAlgorithm, Error, Source, Writer};
+use ztensor::read::shard_identity;
+use ztensor::{DType, DigestAlgorithm, Error, Source, Writer};
 
 fn tmp(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name)
@@ -38,6 +39,8 @@ fn the_original_file_is_a_prefix_of_the_appended_one() {
         .unwrap()
         .tensor("a")
         .unwrap()
+        .data()
+        .unwrap()
         .locate()
         .unwrap()
         .offset;
@@ -57,9 +60,24 @@ fn the_original_file_is_a_prefix_of_the_appended_one() {
 
     let src = Source::open(&path).unwrap();
     assert_eq!(src.names().collect::<Vec<_>>(), vec!["a", "b"]);
-    assert_eq!(src.tensor("a").unwrap().map().unwrap(), &a[..]);
-    assert_eq!(src.tensor("b").unwrap().map().unwrap(), &b[..]);
-    assert_eq!(src.tensor("a").unwrap().locate().unwrap().offset, a_off);
+    assert_eq!(
+        src.tensor("a").unwrap().data().unwrap().map().unwrap(),
+        &a[..]
+    );
+    assert_eq!(
+        src.tensor("b").unwrap().data().unwrap().map().unwrap(),
+        &b[..]
+    );
+    assert_eq!(
+        src.tensor("a")
+            .unwrap()
+            .data()
+            .unwrap()
+            .locate()
+            .unwrap()
+            .offset,
+        a_off
+    );
 }
 
 /// A crashed append is undone by truncating back to the old length, which only
@@ -110,7 +128,7 @@ fn an_append_keeps_the_files_alignment() {
 
     let src = Source::open(&path).unwrap();
     for name in ["a", "b", "c"] {
-        let at = src.tensor(name).unwrap().locate().unwrap();
+        let at = src.tensor(name).unwrap().data().unwrap().locate().unwrap();
         assert_eq!(
             at.offset % ztensor::format::ALIGN_CANONICAL,
             0,
@@ -136,7 +154,17 @@ fn an_append_keeps_the_files_alignment() {
     w.add("b", [16u64], DType::F32, &f32s(&[2.0; 16])).unwrap();
     w.finish().unwrap();
     let src = Source::open(&coarse).unwrap();
-    assert_eq!(src.tensor("b").unwrap().locate().unwrap().offset % 65536, 0);
+    assert_eq!(
+        src.tensor("b")
+            .unwrap()
+            .data()
+            .unwrap()
+            .locate()
+            .unwrap()
+            .offset
+            % 65536,
+        0
+    );
 }
 
 /// The footer ends the file. A reader finds the manifest no other way, so
@@ -226,7 +254,7 @@ fn a_shard_can_be_added_to_a_finished_file() {
         .unwrap();
     assert_eq!(s.names().collect::<Vec<_>>(), vec!["borrowed", "local"]);
     assert_eq!(
-        s.tensor("borrowed").unwrap().map().unwrap(),
+        s.tensor("borrowed").unwrap().data().unwrap().map().unwrap(),
         &f32s(&[7.0; 4])[..]
     );
     s.verify_shards().unwrap();

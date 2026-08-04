@@ -11,6 +11,7 @@
 //! they finish. A deadlock here would look like a hung loader, which is the
 //! failure mode nobody can debug from a stack trace.
 
+use std::borrow::Cow;
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::{Arc, Barrier};
@@ -61,7 +62,7 @@ fn threads_contending_on_an_opaque_reader_all_get_the_right_bytes() {
 
     // Nothing here is mappable, so this exercises the lock.
     for (name, _, _) in &tensors {
-        let caps = src.tensor(name).unwrap().caps().unwrap();
+        let caps = src.tensor(name).unwrap().data().unwrap().caps();
         assert!(!caps.map && !caps.locate, "{name} should be opaque");
     }
 
@@ -77,11 +78,11 @@ fn threads_contending_on_an_opaque_reader_all_get_the_right_bytes() {
             barrier.wait();
             for _ in 0..ROUNDS {
                 for (name, byte, len) in &expected {
-                    let bytes = src.tensor(name).unwrap().bytes().unwrap();
+                    let bytes = src.tensor(name).unwrap().data().unwrap().bytes().unwrap();
                     assert_eq!(bytes.len(), *len, "{name}: wrong length");
                     assert!(bytes.iter().all(|b| b == byte), "{name}: wrong content");
                     assert!(
-                        !bytes.is_mapped(),
+                        matches!(bytes, Cow::Owned(_)),
                         "{name}: a deflated entry cannot be mapped"
                     );
                 }
@@ -108,7 +109,7 @@ fn one_hot_tensor_read_by_everyone_at_once() {
         let barrier = Arc::clone(&barrier);
         handles.push(std::thread::spawn(move || {
             barrier.wait();
-            let bytes = src.tensor("hot").unwrap().bytes().unwrap();
+            let bytes = src.tensor("hot").unwrap().data().unwrap().bytes().unwrap();
             assert_eq!(bytes.len(), 65536);
             assert!(bytes.iter().all(|&b| b == 0x5A));
         }));
@@ -138,8 +139,8 @@ fn mapped_and_opaque_tensors_are_read_side_by_side() {
     zip.finish().unwrap();
 
     let src = Arc::new(ztensor_compat::open(&path).unwrap());
-    assert!(src.tensor("plain").unwrap().caps().unwrap().map);
-    assert!(!src.tensor("packed").unwrap().caps().unwrap().map);
+    assert!(src.tensor("plain").unwrap().data().unwrap().caps().map);
+    assert!(!src.tensor("packed").unwrap().data().unwrap().caps().map);
 
     const THREADS: usize = 8;
     let barrier = Arc::new(Barrier::new(THREADS));
@@ -151,10 +152,16 @@ fn mapped_and_opaque_tensors_are_read_side_by_side() {
             barrier.wait();
             for _ in 0..16 {
                 if i % 2 == 0 {
-                    let mapped = src.tensor("plain").unwrap().map().unwrap();
+                    let mapped = src.tensor("plain").unwrap().data().unwrap().map().unwrap();
                     assert!(mapped.iter().all(|&b| b == 0x11));
                 } else {
-                    let bytes = src.tensor("packed").unwrap().bytes().unwrap();
+                    let bytes = src
+                        .tensor("packed")
+                        .unwrap()
+                        .data()
+                        .unwrap()
+                        .bytes()
+                        .unwrap();
                     assert!(bytes.iter().all(|&b| b == 0x22));
                 }
             }
@@ -172,7 +179,14 @@ fn a_source_can_be_moved_to_another_thread() {
     let path = deflated_npz("threads-moved.zt", &[("w", 0x77, 4096)]);
     let src = ztensor_compat::open(&path).unwrap();
     let read = std::thread::spawn(move || {
-        let bytes = src.tensor("w").unwrap().bytes().unwrap().into_owned();
+        let bytes = src
+            .tensor("w")
+            .unwrap()
+            .data()
+            .unwrap()
+            .bytes()
+            .unwrap()
+            .into_owned();
         (bytes.len(), bytes.iter().all(|&b| b == 0x77))
     })
     .join()

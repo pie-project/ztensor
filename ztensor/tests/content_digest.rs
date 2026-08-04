@@ -6,7 +6,8 @@
 
 use std::path::PathBuf;
 
-use ztensor::{shard_identity, DType, DigestAlgorithm, Source, Writer};
+use ztensor::read::shard_identity;
+use ztensor::{DType, DigestAlgorithm, Source, Writer};
 
 fn tmp(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name)

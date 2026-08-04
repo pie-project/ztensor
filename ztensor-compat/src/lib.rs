@@ -9,7 +9,7 @@
 //! ```no_run
 //! let src = ztensor_compat::open("model.safetensors")?;
 //! let t = src.tensor("layer.weight")?;
-//! let bytes = t.map()?;          // zero-copy where the file allows it
+//! let bytes = t.data()?.map()?;  // zero-copy where the file allows it
 //! # Ok::<(), ztensor::Error>(())
 //! ```
 //!

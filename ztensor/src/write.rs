@@ -13,6 +13,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
 use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -398,7 +399,7 @@ impl Writer {
     /// Registering the same name twice is accepted when the identity matches
     /// and rejected when it does not: one name means one file.
     ///
-    /// The identity comes from [`shard_identity`](crate::shard_identity).
+    /// The identity comes from [`shard_identity`](crate::read::shard_identity).
     /// Write the shard as an ordinary `.zt` and then ask it for its identity;
     /// a shard that carries a manifest is one whose tensors a consumer can
     /// evict and verify.
@@ -454,7 +455,7 @@ impl Writer {
                 o = o.attributes(attrs.clone());
             }
             for (pname, part) in linked {
-                o = o.part(pname, |p| p.external(part));
+                o = o.part(pname, |p| p.linked(part));
             }
             o
         })
@@ -735,9 +736,31 @@ enum Source_<'d> {
     Bytes(&'d [u8]),
     /// A length to be streamed later.
     Length(u64),
-    /// A blob that already exists in another file.
-    External(Part),
+    /// A byte range of a registered shard.
+    External {
+        shard: String,
+        at: Range<u64>,
+    },
+    /// A part description copied wholesale from the shard's own manifest.
+    /// Only [`Writer::link`] produces this: it is the one caller that already
+    /// holds a validated description and would only corrupt it by restating
+    /// it a field at a time.
+    Linked(Part),
     Missing,
+}
+
+impl Source_<'_> {
+    /// The builder method that set this, for the message when a second one
+    /// tries to.
+    fn setter(&self) -> &'static str {
+        match self {
+            Source_::Bytes(_) => "bytes",
+            Source_::Length(_) => "length",
+            Source_::External { .. } => "external",
+            Source_::Linked(_) => "link",
+            Source_::Missing => "nothing",
+        }
+    }
 }
 
 struct PartDraft<'d> {
@@ -745,7 +768,11 @@ struct PartDraft<'d> {
     dtype: Option<DType>,
     logical: Option<String>,
     encoding: Option<String>,
+    digest: Option<String>,
     source: Source_<'d>,
+    /// Set when a description contradicted itself. Reported when the object
+    /// is built, since a builder method has nowhere to put an error.
+    conflict: Option<String>,
 }
 
 /// Object-level attributes: either accumulated one at a time, or handed over
@@ -842,7 +869,9 @@ impl<'d> ObjectBuilder<'d> {
                     dtype: None,
                     logical: None,
                     encoding: None,
+                    digest: None,
                     source: Source_::Missing,
+                    conflict: None,
                 },
             })
             .draft,
@@ -877,22 +906,59 @@ impl<'d> PartBuilder<'d> {
         self
     }
 
-    /// The part's decoded bytes.
-    pub fn bytes(mut self, data: &'d [u8]) -> Self {
-        self.draft.source = Source_::Bytes(data);
+    /// The digest of a part whose bytes this writer will not see, as
+    /// `algo:hex`.
+    ///
+    /// Only [`external`](Self::external) parts take one. Everything this
+    /// writer writes is hashed as it goes, and a digest supplied for those
+    /// could only either agree with the computed one or be wrong.
+    pub fn digest(mut self, digest: impl Into<String>) -> Self {
+        self.draft.digest = Some(digest.into());
         self
+    }
+
+    /// The part's decoded bytes.
+    pub fn bytes(self, data: &'d [u8]) -> Self {
+        self.payload(Source_::Bytes(data))
     }
 
     /// The part's byte length, to be streamed. See [`Writer::stream`].
-    pub fn length(mut self, length: u64) -> Self {
-        self.draft.source = Source_::Length(length);
-        self
+    pub fn length(self, length: u64) -> Self {
+        self.payload(Source_::Length(length))
     }
 
-    /// A blob that already exists in a registered shard: nothing is written
-    /// for this part.
-    pub fn external(mut self, part: Part) -> Self {
-        self.draft.source = Source_::External(part);
+    /// A byte range of a registered shard: nothing is written for this part.
+    ///
+    /// `shard` is a name given to [`Writer::add_shard`], and `bytes` is the
+    /// range within that file — its blob offset and length, which the
+    /// producer of the shard knows. When the shard carries a manifest, prefer
+    /// [`Writer::link`], which reads the range out of it instead of asking
+    /// you to restate it.
+    pub fn external(self, shard: impl Into<String>, bytes: Range<u64>) -> Self {
+        self.payload(Source_::External {
+            shard: shard.into(),
+            at: bytes,
+        })
+    }
+
+    /// [`Writer::link`]'s way in: a whole part description taken from the
+    /// shard's own manifest.
+    pub(crate) fn linked(self, part: Part) -> Self {
+        self.payload(Source_::Linked(part))
+    }
+
+    /// One payload per part. A second one is a contradiction rather than an
+    /// override, so it is recorded and reported when the object is built.
+    fn payload(mut self, source: Source_<'d>) -> Self {
+        match &self.draft.source {
+            Source_::Missing => self.draft.source = source,
+            already => {
+                let (first, second) = (already.setter(), source.setter());
+                self.draft.conflict.get_or_insert_with(|| {
+                    format!("payload already set by `{first}`, then `{second}`")
+                });
+            }
+        }
         self
     }
 }
@@ -937,23 +1003,36 @@ fn build<'d>(
     for draft in &drafts {
         check_name(&draft.name).map_err(invalid)?;
         writer.check_canonical_name(&draft.name)?;
-        // An external part already states its own dtype and logical type;
+        if let Some(conflict) = &draft.conflict {
+            return Err(Error::InvalidInput(format!(
+                "object {name:?} part {:?}: {conflict}",
+                draft.name
+            )));
+        }
+        if draft.digest.is_some() && !matches!(draft.source, Source_::External { .. }) {
+            return Err(Error::InvalidInput(format!(
+                "object {name:?} part {:?}: only an external part takes a digest; \
+                 this writer hashes what it writes",
+                draft.name
+            )));
+        }
+        // A linked part already states its own dtype and logical type;
         // making the caller repeat them would only create a way to
         // disagree with the file being referenced.
-        let external = match &draft.source {
-            Source_::External(part) => Some(part),
+        let linked = match &draft.source {
+            Source_::Linked(part) => Some(part),
             _ => None,
         };
         let dtype = draft
             .dtype
-            .or_else(|| external.map(|p| p.dtype))
+            .or_else(|| linked.map(|p| p.dtype))
             .ok_or_else(|| {
                 Error::InvalidInput(format!("object {:?} part {:?}: no dtype", name, draft.name))
             })?;
         let logical = draft
             .logical
             .clone()
-            .or_else(|| external.and_then(|p| p.logical.clone()));
+            .or_else(|| linked.and_then(|p| p.logical.clone()));
         if let Some(logical) = &logical {
             if let Some(required) = writer.vocab.dtype_of(logical) {
                 if dtype != required {
@@ -971,10 +1050,39 @@ fn build<'d>(
                     name, draft.name
                 )))
             }
-            Source_::External(part) => {
+            Source_::Linked(part) => {
                 let mut part = part.clone();
                 part.dtype = dtype;
                 part.logical = logical.clone();
+                validate_external(&writer.manifest, &draft.name, &part)?;
+                part
+            }
+            Source_::External { shard, at } => {
+                if draft.encoding.is_some() {
+                    return Err(Error::InvalidInput(format!(
+                        "object {name:?} part {:?}: an encoded external part carries a decoded \
+                         length only its own manifest knows; link it with `Writer::link`",
+                        draft.name
+                    )));
+                }
+                let part = Part {
+                    dtype,
+                    logical: logical.clone(),
+                    blob: BlobRef {
+                        shard: Some(shard.clone()),
+                        offset: at.start,
+                        length: at.end.saturating_sub(at.start),
+                    },
+                    encoding: None,
+                    decoded_length: None,
+                    digest: draft.digest.clone(),
+                };
+                if at.end < at.start {
+                    return Err(Error::InvalidInput(format!(
+                        "object {name:?} part {:?}: empty range {}..{}",
+                        draft.name, at.start, at.end
+                    )));
+                }
                 validate_external(&writer.manifest, &draft.name, &part)?;
                 part
             }
@@ -1086,7 +1194,7 @@ impl Writer {
                         _ => self.write_or_share_blob(data)?,
                     };
                 }
-                Source_::External(_) => {} // offsets belong to the other file
+                Source_::External { .. } | Source_::Linked(_) => {} // another file's bytes
                 _ => unreachable!("checked above"),
             }
         }

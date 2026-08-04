@@ -351,7 +351,7 @@ impl Tensor {
     /// Checks this part's digest and its logical type's content rules.
     /// Returns True when a digest was actually checked.
     fn verify(&self, py: Python<'_>) -> PyResult<bool> {
-        with_part(py, self, |p| Ok(p.verify().map_err(err)?.checked()))
+        with_part(py, self, |p| Ok(p.verify().map_err(err)?.is_checked()))
     }
 
     fn prefetch(&self, py: Python<'_>) -> PyResult<()> {

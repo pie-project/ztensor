@@ -1,6 +1,7 @@
 //! The container: round-trip, canonical determinism, blob sharing, and the
 //! files that must be rejected.
 
+use std::borrow::Cow;
 use std::fs;
 use std::path::PathBuf;
 
@@ -35,9 +36,29 @@ fn roundtrip_dense() {
     assert!(matches!(src.provenance(), ztensor::Provenance::Root(_)));
     assert_eq!(src.len(), 3);
     assert_eq!(src.tensor("a.weight").unwrap().shape(), &[2, 3]);
-    assert_eq!(src.tensor("a.weight").unwrap().map().unwrap(), &a[..]);
-    assert_eq!(src.tensor("b.bias").unwrap().map().unwrap(), &b[..]);
-    assert_eq!(&*src.tensor("c.mask").unwrap().bytes().unwrap(), &c[..]);
+    assert_eq!(
+        src.tensor("a.weight")
+            .unwrap()
+            .data()
+            .unwrap()
+            .map()
+            .unwrap(),
+        &a[..]
+    );
+    assert_eq!(
+        src.tensor("b.bias").unwrap().data().unwrap().map().unwrap(),
+        &b[..]
+    );
+    assert_eq!(
+        &*src
+            .tensor("c.mask")
+            .unwrap()
+            .data()
+            .unwrap()
+            .bytes()
+            .unwrap(),
+        &c[..]
+    );
     assert_eq!(
         src.tensor("a.weight").unwrap().verify().unwrap(),
         Verified::Digest
@@ -63,24 +84,48 @@ fn an_indexed_source_locates_without_mapping() {
     w.finish().unwrap();
 
     let mapped = Source::open(&path).unwrap();
-    let indexed = Source::index(&path).unwrap();
+    let indexed = Source::options().map(false).open(&path).unwrap();
 
     // The same address either way.
-    let here = mapped.tensor("x").unwrap().locate().unwrap();
-    let there = indexed.tensor("x").unwrap().locate().unwrap();
+    let here = mapped
+        .tensor("x")
+        .unwrap()
+        .data()
+        .unwrap()
+        .locate()
+        .unwrap();
+    let there = indexed
+        .tensor("x")
+        .unwrap()
+        .data()
+        .unwrap()
+        .locate()
+        .unwrap();
     assert_eq!(here.offset, there.offset);
     assert_eq!(here.len, there.len);
 
-    let caps = indexed.tensor("x").unwrap().caps().unwrap();
+    let caps = indexed.tensor("x").unwrap().data().unwrap().caps();
     assert!(caps.locate, "an indexed file still knows where things are");
     assert!(!caps.map, "nothing is mapped, so nothing can be borrowed");
     assert!(!caps.evict);
 
-    assert!(indexed.tensor("x").unwrap().map().is_err());
-    let bytes = indexed.tensor("x").unwrap().bytes().unwrap();
-    assert!(!bytes.is_mapped(), "an unmapped file has to copy");
+    assert!(indexed.tensor("x").unwrap().data().unwrap().map().is_err());
+    let bytes = indexed
+        .tensor("x")
+        .unwrap()
+        .data()
+        .unwrap()
+        .bytes()
+        .unwrap();
+    assert!(
+        matches!(bytes, Cow::Owned(_)),
+        "an unmapped file has to copy"
+    );
     assert_eq!(&*bytes, &data[..]);
-    assert!(mapped.tensor("x").unwrap().bytes().unwrap().is_mapped());
+    assert!(matches!(
+        mapped.tensor("x").unwrap().data().unwrap().bytes().unwrap(),
+        Cow::Borrowed(_)
+    ));
 }
 
 #[test]
@@ -160,10 +205,25 @@ fn tied_weights_share_one_blob() {
     w.finish().unwrap();
 
     let src = Source::open(&path).unwrap();
-    let e = src.tensor("embed").unwrap().locate().unwrap();
-    let l = src.tensor("lm_head").unwrap().locate().unwrap();
+    let e = src
+        .tensor("embed")
+        .unwrap()
+        .data()
+        .unwrap()
+        .locate()
+        .unwrap();
+    let l = src
+        .tensor("lm_head")
+        .unwrap()
+        .data()
+        .unwrap()
+        .locate()
+        .unwrap();
     assert_eq!(e.offset, l.offset, "identical parts must share one blob");
-    assert_eq!(src.tensor("embed").unwrap().map().unwrap(), &data[..]);
+    assert_eq!(
+        src.tensor("embed").unwrap().data().unwrap().map().unwrap(),
+        &data[..]
+    );
 }
 
 #[test]
@@ -173,7 +233,16 @@ fn zero_length_tensor() {
     w.add("empty", [0u64, 8], DType::F32, &[]).unwrap();
     w.finish().unwrap();
     let src = Source::open(&path).unwrap();
-    assert_eq!(src.tensor("empty").unwrap().map().unwrap().len(), 0);
+    assert_eq!(
+        src.tensor("empty")
+            .unwrap()
+            .data()
+            .unwrap()
+            .map()
+            .unwrap()
+            .len(),
+        0
+    );
 }
 
 #[test]
@@ -230,7 +299,7 @@ fn a_non_canonical_writer_still_places_at_64_kib() {
 
     let src = Source::open(&path).unwrap();
     for name in ["t", "u"] {
-        let at = src.tensor(name).unwrap().locate().unwrap();
+        let at = src.tensor(name).unwrap().data().unwrap().locate().unwrap();
         assert_eq!(
             at.offset % ALIGN_CANONICAL,
             0,
@@ -253,6 +322,8 @@ fn a_non_canonical_writer_still_places_at_64_kib() {
         Source::open(&floor)
             .unwrap()
             .tensor("t")
+            .unwrap()
+            .data()
             .unwrap()
             .locate()
             .unwrap()
@@ -389,8 +460,8 @@ fn identical_refs_are_legal() {
     assemble(&path, 4096 + 8 - 8, &m);
     let src = Source::open(&path).unwrap();
     assert_eq!(
-        src.tensor("a").unwrap().map().unwrap(),
-        src.tensor("b").unwrap().map().unwrap()
+        src.tensor("a").unwrap().data().unwrap().map().unwrap(),
+        src.tensor("b").unwrap().data().unwrap().map().unwrap()
     );
 }
 
@@ -448,4 +519,66 @@ fn a_wholesale_attribute_map_survives_a_later_attr() {
             "{key} was lost: {attrs:?}"
         );
     }
+}
+
+/// Two payloads on one part is a contradiction, not an override.
+///
+/// The builder methods return `Self`, so neither of them can refuse; the
+/// second one records the conflict and the object refuses to build. Before
+/// this, `.bytes(x).length(n)` compiled, dropped `x` silently, and produced a
+/// file whose blob was never written.
+#[test]
+fn a_part_takes_one_payload() {
+    let path = tmp("two-payloads.zt");
+    let mut w = Writer::options().canonical(false).create(&path).unwrap();
+    let data = [7u8; 4];
+
+    let err = w
+        .object("t", |o| {
+            o.shape([4u64])
+                .part("data", |p| p.dtype(DType::U8).bytes(&data).length(4))
+        })
+        .unwrap_err();
+    let message = err.to_string();
+    assert!(
+        message.contains("`bytes`") && message.contains("`length`"),
+        "the error has to name both setters, got: {message}"
+    );
+
+    // Order is reported as given, and the object did not land.
+    let err = w
+        .object("t", |o| {
+            o.shape([4u64])
+                .part("data", |p| p.dtype(DType::U8).length(4).bytes(&data))
+        })
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("`length`, then `bytes`"),
+        "got: {err}"
+    );
+    w.abandon();
+}
+
+/// A digest is for bytes this writer will not see. Supplying one for bytes it
+/// does write could only agree with the computed digest or be wrong, so it is
+/// refused rather than ignored.
+#[test]
+fn only_an_external_part_takes_a_digest() {
+    let path = tmp("digest-on-local.zt");
+    let mut w = Writer::options().canonical(false).create(&path).unwrap();
+    let err = w
+        .object("t", |o| {
+            o.shape([4u64]).part("data", |p| {
+                p.dtype(DType::U8)
+                    .digest("xxh3:0000000000000000")
+                    .bytes(&[0u8; 4])
+            })
+        })
+        .unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("only an external part takes a digest"),
+        "got: {err}"
+    );
+    w.abandon();
 }

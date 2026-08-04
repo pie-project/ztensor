@@ -186,12 +186,15 @@ impl Catalog {
         self.entries.get(name)
     }
 
-    /// The entry and the name as this catalog stores it.
+    /// The entry and the name as this catalog stores it. Named after
+    /// [`BTreeMap::get_key_value`](std::collections::BTreeMap::get_key_value),
+    /// which is what it is; `entry` is taken, in every map in std, for the
+    /// occupied-or-vacant insertion API.
     ///
     /// A reader hands out tensor handles that borrow their name from here, so
     /// it needs the stored `&str` rather than the caller's. Without this it
     /// would have to scan for it, which is a linear lookup in a `BTreeMap`.
-    pub fn entry(&self, name: &str) -> Option<(&str, &Entry)> {
+    pub fn get_key_value(&self, name: &str) -> Option<(&str, &Entry)> {
         self.entries
             .get_key_value(name)
             .map(|(k, v)| (k.as_str(), v))

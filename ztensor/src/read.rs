@@ -7,12 +7,13 @@
 //!
 //! There are three ways to get at the bytes:
 //!
-//! - [`bytes`](Part::bytes) gives the best the source can do, and says
-//!   whether it borrowed or copied.
+//! - [`bytes`](Part::bytes) gives the best the source can do, as a
+//!   `Cow<[u8]>` that says whether it borrowed or copied.
 //! - [`map`](Part::map) gives a borrow or an error, never a hidden copy.
 //! - [`locate`](Part::locate) gives the address, so the caller can do its own
 //!   I/O with io_uring, cuFile or a staged host-to-device copy.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -54,49 +55,6 @@ pub struct Caps {
     pub alignment: u64,
 }
 
-/// Bytes, and whether they were borrowed or copied.
-///
-/// Dereferences to `[u8]`, so most callers never look inside. A caller that
-/// does care, such as a loader checking whether it just paid for a copy, can
-/// ask [`is_mapped`](Bytes::is_mapped).
-#[derive(Debug)]
-pub enum Bytes<'a> {
-    /// Borrowed from a file mapping.
-    Mapped(&'a [u8]),
-    /// Copied, decoded, or decompressed into memory.
-    Owned(Vec<u8>),
-}
-
-impl Bytes<'_> {
-    pub fn is_mapped(&self) -> bool {
-        matches!(self, Bytes::Mapped(_))
-    }
-
-    pub fn into_owned(self) -> Vec<u8> {
-        match self {
-            Bytes::Mapped(s) => s.to_vec(),
-            Bytes::Owned(v) => v,
-        }
-    }
-}
-
-impl std::ops::Deref for Bytes<'_> {
-    type Target = [u8];
-
-    fn deref(&self) -> &[u8] {
-        match self {
-            Bytes::Mapped(s) => s,
-            Bytes::Owned(v) => v,
-        }
-    }
-}
-
-impl AsRef<[u8]> for Bytes<'_> {
-    fn as_ref(&self) -> &[u8] {
-        self
-    }
-}
-
 /// The outcome of a successful [`Part::verify`].
 ///
 /// A digest *mismatch* is not here: that is a rejected file, and it comes back
@@ -111,7 +69,7 @@ pub enum Verified {
 
 impl Verified {
     /// True when a digest was actually checked.
-    pub fn checked(self) -> bool {
+    pub fn is_checked(self) -> bool {
         self == Verified::Digest
     }
 }
@@ -141,9 +99,9 @@ impl<'a> Provenance<'a> {
     /// The manifest, when this is a `.zt` root.
     ///
     /// A projection of [`Provenance`] rather than a second way to ask, the way
-    /// [`Verified::checked`] projects that enum: for code that already knows it
-    /// opened a root and only wants the manifest.
-    pub fn root(self) -> Option<&'a Manifest> {
+    /// [`Verified::is_checked`] projects that enum: for code that already knows
+    /// it opened a root and only wants the manifest.
+    pub fn as_root(self) -> Option<&'a Manifest> {
         match self {
             Provenance::Root(manifest) => Some(manifest),
             _ => None,
@@ -173,45 +131,28 @@ impl<F: Fn(&str, &Shard) -> Result<PathBuf>> ShardResolver for F {
     }
 }
 
-/// The positional convention (Appendix B): root `<dir>/<stem>.zt` maps a
-/// shard named `n` to `<dir>/<stem>-<n>.zt`.
+/// The positional convention (Appendix B), and the default: root
+/// `<dir>/<stem>.zt` maps a shard named `n` to `<dir>/<stem>-<n>.zt`.
 ///
 /// Naming shards `00001-of-00003` and so on therefore reproduces the file
 /// names checkpoints already ship with.
-pub struct PositionalResolver {
-    dir: PathBuf,
-    stem: String,
-}
-
-impl PositionalResolver {
-    pub fn for_root(root: impl AsRef<Path>) -> Self {
-        let root = root.as_ref();
-        Self {
-            dir: root.parent().unwrap_or(Path::new(".")).to_path_buf(),
-            stem: root
-                .file_stem()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "model".to_string()),
-        }
-    }
-}
-
-impl ShardResolver for PositionalResolver {
-    fn resolve(&self, name: &str, _shard: &Shard) -> Result<PathBuf> {
-        Ok(self.dir.join(format!("{}-{name}.zt", self.stem)))
-    }
+pub fn positional(root: impl AsRef<Path>) -> impl ShardResolver {
+    let root = root.as_ref();
+    let dir = root.parent().unwrap_or(Path::new(".")).to_path_buf();
+    let stem = root
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "model".to_string());
+    move |name: &str, _: &Shard| Ok(dir.join(format!("{stem}-{name}.zt")))
 }
 
 /// The content-addressed convention (Appendix B): a shard with digest
 /// `algo:hex` lives at `<store>/blobs/<algo>/<hex>`.
-pub struct CasResolver {
-    pub store: PathBuf,
-}
-
-impl ShardResolver for CasResolver {
-    fn resolve(&self, _name: &str, shard: &Shard) -> Result<PathBuf> {
+pub fn cas(store: impl AsRef<Path>) -> impl ShardResolver {
+    let store = store.as_ref().to_path_buf();
+    move |_: &str, shard: &Shard| {
         let (algo, hex) = shard.digest.split_once(':').unwrap_or(("", ""));
-        Ok(self.store.join("blobs").join(algo).join(hex))
+        Ok(store.join("blobs").join(algo).join(hex))
     }
 }
 
@@ -324,7 +265,7 @@ impl Options {
         self
     }
 
-    /// How to find shard files. Defaults to [`PositionalResolver`].
+    /// How to find shard files. Defaults to [`positional`].
     pub fn resolver(mut self, resolver: impl ShardResolver + 'static) -> Self {
         self.resolver = Some(Box::new(resolver));
         self
@@ -372,12 +313,12 @@ impl Options {
         let mut stores = vec![root];
         let mut store_of: BTreeMap<&str, StoreId> = BTreeMap::new();
 
-        let positional;
+        let default;
         let resolver: &dyn ShardResolver = match &self.resolver {
             Some(r) => r.as_ref(),
             None => {
-                positional = PositionalResolver::for_root(path);
-                &positional
+                default = positional(path);
+                &default
             }
         };
 
@@ -426,6 +367,30 @@ impl Options {
             sources.push(opts.open(path.as_ref())?);
         }
         Source::merge(sources)
+    }
+
+    /// Builds a source from a projection's own stores and catalog, under this
+    /// vocabulary. Nothing here is opened, so [`map`](Self::map) and
+    /// [`resolver`](Self::resolver) do not apply.
+    pub fn from_parts(self, stores: Vec<Store>, catalog: Catalog) -> Result<Source> {
+        for (name, entry) in catalog.iter() {
+            for (pname, part) in &entry.parts {
+                if part.payload.store().0 as usize >= stores.len() {
+                    return Err(Error::InvalidInput(format!(
+                        "{name:?}/{pname:?} addresses store {} of {}",
+                        part.payload.store(),
+                        stores.len()
+                    )));
+                }
+            }
+        }
+        Ok(Source {
+            stores,
+            catalog,
+            manifest: None,
+            data_shard: false,
+            vocab: self.vocabulary_arc(),
+        })
     }
 }
 
@@ -527,47 +492,23 @@ impl Source {
         Options::default().open_all(paths)
     }
 
-    /// Opens without mapping: metadata and addresses only.
+    /// Every way of opening that is not one of the two above:
+    /// [`vocabulary`](Options::vocabulary), [`resolver`](Options::resolver),
+    /// and [`map`](Options::map).
     ///
-    /// This is what a planner needs. It answers where every tensor lives and
-    /// costs two reads instead of mapping the whole checkpoint.
-    pub fn index(path: impl AsRef<Path>) -> Result<Source> {
-        Options::default().map(false).open(path)
-    }
-
+    /// `options().map(false)` is what a planner wants — it answers where
+    /// every tensor lives for two reads, instead of mapping the whole
+    /// checkpoint.
     pub fn options() -> Options {
         Options::default()
     }
 
     /// Builds a source directly from a projection's stores and catalog. This
     /// is how the compat crate hands a foreign format back.
+    ///
+    /// Use [`Options::from_parts`] to give the projection a vocabulary.
     pub fn from_parts(stores: Vec<Store>, catalog: Catalog) -> Result<Source> {
-        Self::from_parts_with(stores, catalog, Vocabulary::shared())
-    }
-
-    pub fn from_parts_with(
-        stores: Vec<Store>,
-        catalog: Catalog,
-        vocab: Arc<Vocabulary>,
-    ) -> Result<Source> {
-        for (name, entry) in catalog.iter() {
-            for (pname, part) in &entry.parts {
-                if part.payload.store().0 as usize >= stores.len() {
-                    return Err(Error::InvalidInput(format!(
-                        "{name:?}/{pname:?} addresses store {} of {}",
-                        part.payload.store(),
-                        stores.len()
-                    )));
-                }
-            }
-        }
-        Ok(Source {
-            stores,
-            catalog,
-            manifest: None,
-            data_shard: false,
-            vocab,
-        })
+        Options::default().from_parts(stores, catalog)
     }
 
     /// Reads several sources as one name space.
@@ -655,7 +596,7 @@ impl Source {
 
     /// One tensor by name, for a caller to whom absence is not an error.
     pub fn get(&self, name: &str) -> Option<Tensor<'_>> {
-        let (name, entry) = self.catalog.entry(name)?;
+        let (name, entry) = self.catalog.get_key_value(name)?;
         Some(Tensor {
             src: self,
             name,
@@ -776,10 +717,6 @@ impl<'a> Tensor<'a> {
         self.entry.attributes.as_ref()
     }
 
-    pub fn entry(&self) -> &'a Entry {
-        self.entry
-    }
-
     pub fn num_elements(&self) -> Result<u64> {
         self.entry.num_elements()
     }
@@ -804,44 +741,16 @@ impl<'a> Tensor<'a> {
         })
     }
 
-    /// The `"data"` part, which is what every dense tensor has and what the
-    /// sugar below addresses.
+    /// The `"data"` part, which is what every dense tensor has.
+    ///
+    /// Bytes belong to a part, not to a tensor: a dense tensor's are all in
+    /// this one, a quantized tensor's are spread over this one and its
+    /// scales. So this is the step from a tensor to something with bytes —
+    /// `t.data()?.map()`, `t.data()?.locate()` — and it is a step rather than
+    /// a shorthand because which part is being addressed is exactly what a
+    /// caller must not lose track of.
     pub fn data(&self) -> Result<Part<'a>> {
         self.part("data")
-    }
-
-    /// Storage type of the `"data"` part.
-    pub fn dtype(&self) -> Result<DType> {
-        Ok(self.data()?.dtype())
-    }
-
-    /// Logical type of the `"data"` part, if it has one.
-    pub fn logical(&self) -> Result<Option<&'a str>> {
-        Ok(self.data()?.logical())
-    }
-
-    /// Decoded byte size of the `"data"` part.
-    pub fn nbytes(&self) -> Result<u64> {
-        Ok(self.data()?.nbytes())
-    }
-
-    /// Bytes of the `"data"` part: the best the source can do, saying which.
-    pub fn bytes(&self) -> Result<Bytes<'a>> {
-        self.data()?.bytes()
-    }
-
-    /// Borrowed bytes of the `"data"` part, or an error.
-    pub fn map(&self) -> Result<&'a [u8]> {
-        self.data()?.map()
-    }
-
-    /// Address of the `"data"` part's bytes.
-    pub fn locate(&self) -> Result<Location> {
-        self.data()?.locate()
-    }
-
-    pub fn caps(&self) -> Result<Caps> {
-        Ok(self.data()?.caps())
     }
 
     /// Verifies **every** part of this tensor, and reports whether a digest was
@@ -863,14 +772,6 @@ impl<'a> Tensor<'a> {
             }
         }
         Ok(all)
-    }
-
-    pub fn prefetch(&self) -> Result<()> {
-        self.data()?.prefetch()
-    }
-
-    pub fn evict(&self) -> Result<()> {
-        self.data()?.evict()
     }
 }
 
@@ -991,13 +892,17 @@ impl<'a> Part<'a> {
     }
 
     /// Decoded bytes, the best way this source can produce them.
-    pub fn bytes(&self) -> Result<Bytes<'a>> {
+    ///
+    /// `Cow::Borrowed` is a mapping and cost nothing; `Cow::Owned` was copied,
+    /// decoded or decompressed. A caller that only wants the bytes can ignore
+    /// the difference and deref.
+    pub fn bytes(&self) -> Result<Cow<'a, [u8]>> {
         match &self.entry.payload {
             Payload::At(at) => {
                 let store = self.src.store(at.store);
                 match store.slice(at.offset, at.len)? {
-                    Some(slice) => Ok(Bytes::Mapped(slice)),
-                    None => Ok(Bytes::Owned(store.read(at.offset, at.len)?)),
+                    Some(slice) => Ok(Cow::Borrowed(slice)),
+                    None => Ok(Cow::Owned(store.read(at.offset, at.len)?)),
                 }
             }
             Payload::Encoded {
@@ -1012,7 +917,7 @@ impl<'a> Part<'a> {
                         self.label()
                     ))
                 })?;
-                Ok(Bytes::Owned(profile.decode(&stored, *decoded_len)?))
+                Ok(Cow::Owned(profile.decode(&stored, *decoded_len)?))
             }
             Payload::Opaque {
                 store,
@@ -1020,13 +925,13 @@ impl<'a> Part<'a> {
                 decoded_len,
             } => {
                 let store = self.src.store(*store);
-                let opaque = store.opaque().ok_or_else(|| {
+                let decoder = store.decoder().ok_or_else(|| {
                     Error::Unsupported(format!(
-                        "{}: opaque payload with no reader attached",
+                        "{}: opaque payload with no decoder attached",
                         self.label()
                     ))
                 })?;
-                Ok(Bytes::Owned(opaque.read(*key, *decoded_len)?))
+                Ok(Cow::Owned(decoder.decode(*key, *decoded_len)?))
             }
         }
     }

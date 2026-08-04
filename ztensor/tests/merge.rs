@@ -44,13 +44,41 @@ fn tensors_are_one_name_space_that_remembers_its_files() {
     assert_eq!(names, vec!["layer.0.weight", "layer.1.weight"]);
 
     // And each name still knows where it came from.
-    let at0 = src.tensor("layer.0.weight").unwrap().locate().unwrap();
-    let at1 = src.tensor("layer.1.weight").unwrap().locate().unwrap();
+    let at0 = src
+        .tensor("layer.0.weight")
+        .unwrap()
+        .data()
+        .unwrap()
+        .locate()
+        .unwrap();
+    let at1 = src
+        .tensor("layer.1.weight")
+        .unwrap()
+        .data()
+        .unwrap()
+        .locate()
+        .unwrap();
     assert_eq!(src.store(at0.store).path(), first);
     assert_eq!(src.store(at1.store).path(), second);
 
-    assert_eq!(src.tensor("layer.0.weight").unwrap().map().unwrap(), &a[..]);
-    assert_eq!(src.tensor("layer.1.weight").unwrap().map().unwrap(), &b[..]);
+    assert_eq!(
+        src.tensor("layer.0.weight")
+            .unwrap()
+            .data()
+            .unwrap()
+            .map()
+            .unwrap(),
+        &a[..]
+    );
+    assert_eq!(
+        src.tensor("layer.1.weight")
+            .unwrap()
+            .data()
+            .unwrap()
+            .map()
+            .unwrap(),
+        &b[..]
+    );
 }
 
 /// An offset belongs to the file that holds it, which is why the pair
@@ -61,8 +89,8 @@ fn offsets_stay_relative_to_their_own_file() {
     let b = file("merge-off-b.zt", "w.b", &[8u8; 100]);
     let src = Source::open_all(&[a, b]).unwrap();
 
-    let at_a = src.tensor("w.a").unwrap().locate().unwrap();
-    let at_b = src.tensor("w.b").unwrap().locate().unwrap();
+    let at_a = src.tensor("w.a").unwrap().data().unwrap().locate().unwrap();
+    let at_b = src.tensor("w.b").unwrap().data().unwrap().locate().unwrap();
     // Both files were written the same way, so both payloads land at the same
     // offset, which is only coherent because the offset belongs to the file.
     assert_eq!(at_a.offset, at_b.offset);
@@ -92,10 +120,10 @@ fn a_name_in_two_files_is_refused() {
 fn capabilities_are_the_holding_file_s() {
     let path = file("merge-caps.zt", "w", &[3u8; 128]);
     let alone = Source::open(&path).unwrap();
-    let direct = alone.tensor("w").unwrap().caps().unwrap();
+    let direct = alone.tensor("w").unwrap().data().unwrap().caps();
 
     let merged = Source::open_all(&[path]).unwrap();
-    assert_eq!(merged.tensor("w").unwrap().caps().unwrap(), direct);
+    assert_eq!(merged.tensor("w").unwrap().data().unwrap().caps(), direct);
 }
 
 /// A merged set is not one file, so it has no manifest. There is no single
@@ -104,11 +132,11 @@ fn capabilities_are_the_holding_file_s() {
 fn a_merged_set_has_no_manifest() {
     let a = file("merge-manifest-a.zt", "a", &[1u8; 8]);
     let b = file("merge-manifest-b.zt", "b", &[2u8; 8]);
-    assert!(Source::open(&a).unwrap().provenance().root().is_some());
+    assert!(Source::open(&a).unwrap().provenance().as_root().is_some());
     assert!(Source::open_all(&[a, b])
         .unwrap()
         .provenance()
-        .root()
+        .as_root()
         .is_none());
 }
 

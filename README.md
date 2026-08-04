@@ -12,7 +12,7 @@ move together.*
 // Read anything: .zt, .safetensors, .gguf, .npz, .pt, .h5, .onnx
 let src = ztensor_compat::open("model.safetensors")?;
 let t = src.tensor("layer.weight")?;
-let bytes = t.map()?;                  // borrowed, or an error; never a copy
+let bytes = t.data()?.map()?;          // borrowed, or an error; never a copy
 
 // Write one thing: a canonical, digest-carrying .zt file
 let mut w = ztensor::Writer::create("model.zt")?;

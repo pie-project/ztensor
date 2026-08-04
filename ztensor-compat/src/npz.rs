@@ -12,7 +12,7 @@
 use std::fs::File;
 use std::io::Read;
 
-use ztensor::provide::{Catalog, Opaque};
+use ztensor::provide::{Catalog, Decode};
 use ztensor::provide::{Entry, Location, PartEntry, Payload};
 use ztensor::{DType, Error, Result, Store, StoreId, Vocabulary};
 
@@ -162,8 +162,8 @@ struct Deflated {
     entries: Vec<(usize, usize)>,
 }
 
-impl Opaque for Deflated {
-    fn read(&self, key: u64, decoded_len: u64) -> Result<Vec<u8>> {
+impl Decode for Deflated {
+    fn decode(&self, key: u64, decoded_len: u64) -> Result<Vec<u8>> {
         let (zip_index, data_offset) = *self
             .entries
             .get(key as usize)
@@ -309,7 +309,7 @@ pub(crate) fn project(store: &Store) -> Result<Projection> {
     Ok(if deflated.is_empty() {
         projection
     } else {
-        projection.with_opaque(Box::new(Deflated {
+        projection.with_decoder(Box::new(Deflated {
             archive: std::sync::Mutex::new(archive),
             entries: deflated,
         }))

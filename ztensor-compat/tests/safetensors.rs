@@ -71,12 +71,26 @@ fn open_and_read() {
     assert!(st.attributes().is_some());
 
     assert_eq!(
-        st.tensor("a.weight").unwrap().bytes().unwrap().into_owned(),
+        st.tensor("a.weight")
+            .unwrap()
+            .data()
+            .unwrap()
+            .bytes()
+            .unwrap()
+            .into_owned(),
         a
     );
-    assert_eq!(st.tensor("b.weight").unwrap().map().unwrap(), &b[..]);
+    assert_eq!(
+        st.tensor("b.weight")
+            .unwrap()
+            .data()
+            .unwrap()
+            .map()
+            .unwrap(),
+        &b[..]
+    );
 
-    let caps = st.tensor("a.weight").unwrap().caps().unwrap();
+    let caps = st.tensor("a.weight").unwrap().data().unwrap().caps();
     assert!(caps.map);
     assert!(!caps.verify);
     assert!(caps.map);
@@ -167,19 +181,31 @@ fn convert_to_canonical_zt() {
 
     let r = ztensor::Source::open(&zt1).unwrap();
     assert_eq!(
-        r.tensor("a.weight").unwrap().bytes().unwrap().into_owned(),
+        r.tensor("a.weight")
+            .unwrap()
+            .data()
+            .unwrap()
+            .bytes()
+            .unwrap()
+            .into_owned(),
         a
     );
     assert_eq!(
-        r.tensor("b.weight").unwrap().bytes().unwrap().into_owned(),
+        r.tensor("b.weight")
+            .unwrap()
+            .data()
+            .unwrap()
+            .bytes()
+            .unwrap()
+            .into_owned(),
         b
     );
-    assert!(r.tensor("a.weight").unwrap().verify().unwrap().checked()); // digests added
+    assert!(r.tensor("a.weight").unwrap().verify().unwrap().is_checked()); // digests added
     assert!(r.attributes().is_some()); // metadata carried over
 
     // Everything the projection could not offer, the conversion added: a
     // digest to verify against, and (on <=64K page hosts) pages of its own.
-    let caps = r.tensor("a.weight").unwrap().caps().unwrap();
+    let caps = r.tensor("a.weight").unwrap().data().unwrap().caps();
     assert!(caps.verify && caps.map && caps.locate);
     if ztensor::provide::page_size() <= ztensor::format::ALIGN_CANONICAL {
         assert!(caps.evict);

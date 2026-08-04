@@ -40,4 +40,4 @@ pub(crate) mod catalog;
 pub(crate) mod store;
 
 pub use catalog::{Catalog, Entry, Location, PartEntry, Payload};
-pub use store::{page_size, Opaque, Store, StoreId};
+pub use store::{page_size, Decode, Store, StoreId};

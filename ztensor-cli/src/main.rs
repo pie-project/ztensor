@@ -129,7 +129,7 @@ fn ls(path: &Path) -> Result<ExitCode, Error> {
                 "\nshards ({} expected alongside the root):",
                 manifest.shards.len()
             );
-            let resolver = ztensor::read::PositionalResolver::for_root(path);
+            let resolver = ztensor::read::positional(path);
             for (name, shard) in &manifest.shards {
                 let expected = ztensor::read::ShardResolver::resolve(&resolver, name, shard)
                     .map(|p| p.display().to_string())
@@ -229,7 +229,7 @@ fn verify(path: &Path, deep: bool, canonical: bool) -> Result<ExitCode, Error> {
     if deep {
         src.verify_shards()?;
     }
-    let shard_count = src.provenance().root().map_or(0, |m| m.shards.len());
+    let shard_count = src.provenance().as_root().map_or(0, |m| m.shards.len());
     println!(
         "{}: ok. {verified} part(s) digest-verified, {undigested} without digests{}{}",
         path.display(),

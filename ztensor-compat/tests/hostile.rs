@@ -115,7 +115,13 @@ mod gguf {
             Err(_) => {}
             Ok(g) => {
                 // If it opens, the blob must at least be in bounds.
-                let _ = g.tensor("t").unwrap().bytes().expect("in-bounds read");
+                let _ = g
+                    .tensor("t")
+                    .unwrap()
+                    .data()
+                    .unwrap()
+                    .bytes()
+                    .expect("in-bounds read");
             }
         }
     }
@@ -186,7 +192,7 @@ mod npz {
         // Either the size equation rejects it at open, or the read is
         // bounded, never an unbounded reservation.
         if let Ok(n) = ztensor_compat::open(&path) {
-            assert!(n.tensor("t").unwrap().bytes().is_err());
+            assert!(n.tensor("t").unwrap().data().unwrap().bytes().is_err());
         }
     }
 
@@ -222,7 +228,14 @@ mod npz {
                 // manifest's declared size.
                 let declared = n.tensor("ta").unwrap().part("data").unwrap().nbytes();
                 assert_eq!(
-                    n.tensor("ta").unwrap().bytes().unwrap().into_owned().len() as u64,
+                    n.tensor("ta")
+                        .unwrap()
+                        .data()
+                        .unwrap()
+                        .bytes()
+                        .unwrap()
+                        .into_owned()
+                        .len() as u64,
                     declared
                 );
             }

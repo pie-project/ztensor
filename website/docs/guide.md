@@ -19,8 +19,10 @@ and the code that implements it have the same address:
 
 The names a consumer actually uses are re-exported at the crate root, and only
 those — `Source`, `Tensor`, `Part`, `Writer`, `DType` and about a dozen more.
-The format constants, the shard resolvers and the projection machinery keep
-their module paths, so that what you see first is what you are likely to want.
+The format constants, the shard resolvers, the free functions that take a path
+instead of a source (`read::shard_identity`, `read::manifest_of`,
+`read::canonical_violations`) and the projection machinery keep their module
+paths, so that what you see first is what you are likely to want.
 
 ## Reading
 
@@ -36,26 +38,39 @@ for t in src.tensors() {
 }
 
 let t = src.tensor("blk.0.attn_q.weight")?;
-let bytes = t.bytes()?;     // the best available; says which it gave
-let view = t.map()?;        // a borrow, or an error
-let at = t.locate()?;       // (store, offset, len) for your own read
+let data = t.data()?;       // the part that holds the bytes
+let bytes = data.bytes()?;  // the best available; says which it gave
+let view = data.map()?;     // a borrow, or an error
+let at = data.locate()?;    // (store, offset, len) for your own read
 ```
+
+### Bytes belong to a part
+
+A dense tensor keeps all of its bytes in one part, `"data"`; a quantized one
+spreads them over that part and its scales. So `data()` is a step rather than
+a shorthand — which part is being addressed is exactly what a caller must not
+lose track of, and `t.parts()` lists the rest.
+
+`verify()` is the one byte-level operation that stays on the tensor, because
+it covers *every* part: a quantized tensor whose scales had rotted must not
+pass because its payload did.
 
 ### Three ways to get bytes
 
 There are three methods because callers want three different things.
 `bytes()` is for code that just wants the data and does not want to write the
-branch. `map()` is for code that needs a borrow and should fail if it cannot
-have one, so it errors rather than copying. `locate()` is for code doing its
-own I/O with io_uring, cuFile or a staged host-to-device copy, which needs
-the address rather than the bytes.
+branch; it hands back a `Cow`, borrowed when the file allowed it. `map()` is
+for code that needs a borrow and should fail if it cannot have one, so it
+errors rather than copying. `locate()` is for code doing its own I/O with
+io_uring, cuFile or a staged host-to-device copy, which needs the address
+rather than the bytes.
 
 ### Asking what a part supports
 
 Ask what a part supports before relying on it:
 
 ```rust
-let caps = src.tensor("blk.0.attn_q.weight")?.caps()?;
+let caps = src.tensor("blk.0.attn_q.weight")?.data()?.caps();
 if caps.evict {
     // its pages are its own: releasing them cannot disturb a neighbour
 }
@@ -71,8 +86,8 @@ When you only need the metadata, for example in a planner deciding what to
 load, open the file without mapping it:
 
 ```rust
-let src = ztensor::Source::index("model.zt")?;   // header reads, no mapping
-let at = src.tensor("blk.0.attn_q.weight")?.locate()?;
+let src = ztensor::Source::options().map(false).open("model.zt")?;
+let at = src.tensor("blk.0.attn_q.weight")?.data()?.locate()?;
 ```
 
 ## Writing
@@ -264,7 +279,7 @@ w.finish()?;
 The root records that identity and points its tensors at the shard:
 
 ```rust
-let id = ztensor::shard_identity("model-00001.zt", DigestAlgorithm::Sha256)?;
+let id = ztensor::read::shard_identity("model-00001.zt", DigestAlgorithm::Sha256)?;
 
 let mut root = Writer::options().canonical(false).create("model.zt")?;
 root.add_shard("00001", &id)?;
@@ -304,14 +319,32 @@ model's tensors.
 
 ```rust
 let base = ztensor::Source::open("base.zt")?;
-let object = base.provenance().root().unwrap().object("base.weight")?.clone();
+let object = base.provenance().as_root().unwrap().object("base.weight")?.clone();
 
 let mut w = ztensor::Writer::options().canonical(false).align(4096).create("lora.zt")?;
-w.add_shard("base", &ztensor::shard_identity("base.zt", DigestAlgorithm::Xxh3)?)?;
+w.add_shard("base", &ztensor::read::shard_identity("base.zt", DigestAlgorithm::Xxh3)?)?;
 w.link("base.weight", &object, "base")?;
 w.add("base.weight.lora_a", [64u64], DType::F32, &delta)?;
 w.finish()?;
 ```
+
+`link` reads the byte range out of the shard's own manifest. A shard that
+carries none — a data shard, spec §7.2 — has no manifest to read, so state the
+range yourself:
+
+```rust
+w.object("t", |o| {
+    o.shape([8192u64]).part("data", |p| {
+        p.dtype(DType::U8)
+            .digest(format!("xxh3:{hex}"))
+            .external("00001", offset..offset + length)
+    })
+})?;
+```
+
+`digest` is only for parts like this one. Everything the writer writes it
+hashes as it goes, and a digest supplied for those could only agree with the
+computed one or be wrong.
 
 ### Signing a sharded model
 
@@ -320,7 +353,7 @@ A root records each shard's size and digest, so a root whose digests are
 the whole model.
 
 ```rust
-let id = ztensor::shard_identity("model-00001.zt", DigestAlgorithm::Sha256)?;
+let id = ztensor::read::shard_identity("model-00001.zt", DigestAlgorithm::Sha256)?;
 w.add_shard("00001", &id)?;
 ```
 
@@ -350,7 +383,7 @@ match src.provenance() {
 }
 ```
 
-`src.provenance().root()` is the shorthand for code that already knows it
+`src.provenance().as_root()` is the shorthand for code that already knows it
 opened a `.zt` root and only wants the manifest.
 
 ## Streaming weights

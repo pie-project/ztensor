@@ -15,7 +15,7 @@
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 
-use ztensor::provide::{Catalog, Opaque};
+use ztensor::provide::{Catalog, Decode};
 use ztensor::provide::{Entry, Location, PartEntry, Payload};
 use ztensor::{DType, Error, Result, Store, StoreId, Vocabulary};
 
@@ -290,8 +290,8 @@ struct Typed {
     buffers: Vec<Vec<u8>>,
 }
 
-impl Opaque for Typed {
-    fn read(&self, key: u64, decoded_len: u64) -> Result<Vec<u8>> {
+impl Decode for Typed {
+    fn decode(&self, key: u64, decoded_len: u64) -> Result<Vec<u8>> {
         let bytes = self
             .buffers
             .get(key as usize)
@@ -425,6 +425,6 @@ pub(crate) fn project(store: &Store) -> Result<Projection> {
     Ok(if converted.is_empty() {
         projection
     } else {
-        projection.with_opaque(Box::new(Typed { buffers: converted }))
+        projection.with_decoder(Box::new(Typed { buffers: converted }))
     })
 }
