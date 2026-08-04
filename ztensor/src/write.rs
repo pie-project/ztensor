@@ -1065,24 +1065,26 @@ fn build<'d>(
                         draft.name
                     )));
                 }
+                // An empty range is legal — a zero-length tensor is — but a
+                // backwards one is not, and subtracting it would wrap.
+                let Some(length) = at.end.checked_sub(at.start) else {
+                    return Err(Error::InvalidInput(format!(
+                        "object {name:?} part {:?}: range {}..{} ends before it starts",
+                        draft.name, at.start, at.end
+                    )));
+                };
                 let part = Part {
                     dtype,
                     logical: logical.clone(),
                     blob: BlobRef {
                         shard: Some(shard.clone()),
                         offset: at.start,
-                        length: at.end.saturating_sub(at.start),
+                        length,
                     },
                     encoding: None,
                     decoded_length: None,
                     digest: draft.digest.clone(),
                 };
-                if at.end < at.start {
-                    return Err(Error::InvalidInput(format!(
-                        "object {name:?} part {:?}: empty range {}..{}",
-                        draft.name, at.start, at.end
-                    )));
-                }
                 validate_external(&writer.manifest, &draft.name, &part)?;
                 part
             }

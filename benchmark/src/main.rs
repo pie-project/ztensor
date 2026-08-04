@@ -255,7 +255,7 @@ fn main() {
                         .tensor(n)
                         .expect("tensor")
                         .data()
-                        .unwrap()
+                        .expect("data part")
                         .map()
                         .expect("view"),
                 );
@@ -277,7 +277,7 @@ fn main() {
                     stf.tensor(n)
                         .expect("tensor")
                         .data()
-                        .unwrap()
+                        .expect("data part")
                         .map()
                         .expect("view"),
                 );
@@ -302,7 +302,7 @@ fn main() {
                     .tensor(n)
                     .expect("tensor")
                     .data()
-                    .unwrap()
+                    .expect("data part")
                     .bytes()
                     .expect("read")
                     .into_owned();
@@ -330,7 +330,7 @@ fn main() {
                     r.tensor(n)
                         .expect("tensor")
                         .data()
-                        .unwrap()
+                        .expect("data part")
                         .map()
                         .expect("view"),
                 );

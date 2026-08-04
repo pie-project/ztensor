@@ -736,3 +736,67 @@ fn equal_sized_shards_are_resolved_by_content() {
     );
     model.verify_shards().unwrap();
 }
+
+/// A named resolver has to survive being installed, which is the only thing
+/// anyone does with one.
+///
+/// `positional` and `cas` return `impl ShardResolver`, and in edition 2021 an
+/// opaque return type captures the function's type parameters — so without an
+/// explicit `'static` the resolver borrowed from its `impl AsRef<Path>`
+/// argument and `Options::resolver`, which needs `'static`, rejected it. Both
+/// closures own everything they capture; the bound says so.
+#[test]
+fn a_named_resolver_outlives_the_path_it_was_built_from() {
+    let installed = {
+        let root = tmp("transient-root.zt");
+        Source::options()
+            .resolver(ztensor::read::positional(&root))
+            .map(false)
+    };
+    // Built inside the scope, still usable outside it.
+    assert!(installed.open(tmp("no-such-root.zt")).is_err());
+
+    let dir = PathBuf::from("/store");
+    let _ = Source::options().resolver(ztensor::read::cas(&dir));
+}
+
+/// An empty external range is a zero-length tensor, which the format allows.
+/// A backwards one is a typo, and subtracting it would wrap.
+#[test]
+fn an_external_range_may_be_empty_but_not_backwards() {
+    let shard_path = tmp("range-shard.zt");
+    let mut w = Writer::create(&shard_path).unwrap();
+    w.add("t", [4u64], DType::U8, &[1u8; 4]).unwrap();
+    w.finish().unwrap();
+    let id = shard_identity(&shard_path, DigestAlgorithm::Xxh3).unwrap();
+
+    let mut w = Writer::options()
+        .canonical(false)
+        .align(4096)
+        .create(tmp("range-root.zt"))
+        .unwrap();
+    w.add_shard("s", &id).unwrap();
+
+    // An empty range is the point of this half of the test.
+    #[allow(clippy::reversed_empty_ranges)]
+    let empty = 4096..4096;
+    w.object("empty", |o| {
+        o.shape([0u64])
+            .part("data", |p| p.dtype(DType::U8).external("s", empty))
+    })
+    .unwrap();
+
+    #[allow(clippy::reversed_empty_ranges)]
+    let backwards = 8192..4096;
+    let err = w
+        .object("backwards", |o| {
+            o.shape([4u64])
+                .part("data", |p| p.dtype(DType::U8).external("s", backwards))
+        })
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("ends before it starts"),
+        "got: {err}"
+    );
+    w.abandon();
+}

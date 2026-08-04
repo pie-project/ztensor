@@ -136,7 +136,7 @@ impl<F: Fn(&str, &Shard) -> Result<PathBuf>> ShardResolver for F {
 ///
 /// Naming shards `00001-of-00003` and so on therefore reproduces the file
 /// names checkpoints already ship with.
-pub fn positional(root: impl AsRef<Path>) -> impl ShardResolver {
+pub fn positional(root: impl AsRef<Path>) -> impl ShardResolver + 'static {
     let root = root.as_ref();
     let dir = root.parent().unwrap_or(Path::new(".")).to_path_buf();
     let stem = root
@@ -148,7 +148,7 @@ pub fn positional(root: impl AsRef<Path>) -> impl ShardResolver {
 
 /// The content-addressed convention (Appendix B): a shard with digest
 /// `algo:hex` lives at `<store>/blobs/<algo>/<hex>`.
-pub fn cas(store: impl AsRef<Path>) -> impl ShardResolver {
+pub fn cas(store: impl AsRef<Path>) -> impl ShardResolver + 'static {
     let store = store.as_ref().to_path_buf();
     move |_: &str, shard: &Shard| {
         let (algo, hex) = shard.digest.split_once(':').unwrap_or(("", ""));
