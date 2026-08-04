@@ -6,7 +6,6 @@
 //! built-in, and the same file read without it has to stay readable and
 //! unchecked.
 
-use std::borrow::Cow;
 use std::path::PathBuf;
 
 use ztensor::format as schema;
@@ -151,6 +150,7 @@ fn a_registered_layout_rejects_a_file_that_violates_it() {
 #[cfg(feature = "zstd")]
 mod zstd_seekable {
     use super::*;
+    use std::borrow::Cow;
 
     const ENC: &str = "zt.zstd-seekable/1";
 
