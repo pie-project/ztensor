@@ -39,6 +39,7 @@ SPEC = Path(__file__).parent.parent / "spec" / "ztensor-v2-spec.md"
 PAGES = [
     ("intro.md", "Introduction", "index.html"),
     ("guide.md", "Guide", "guide.html"),
+    ("formats.md", "Formats", "formats.html"),
     (SPEC, "Specification", "spec.html"),
     ("benchmarks.md", "Benchmarks", "benchmarks.html"),
 ]

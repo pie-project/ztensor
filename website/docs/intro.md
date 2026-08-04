@@ -53,6 +53,29 @@ serving a large model off disk runs into what they set aside:
 - **Verifiability.** None of them carry per-tensor digests, so a corrupt
   byte surfaces as a wrong answer rather than an error.
 
+### What each format can do
+
+| | `.zt` | `.safetensors` | `.gguf` | `.pt` (pickle) | `.npz` | `.onnx` | `.h5` |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| Zero-copy read | ✓ | ✓ | ✓ | ~² | ~² | | |
+| Page-aligned tensors | ✓ | | | | | | |
+| Per-tensor digest | ✓ | | | | | | |
+| Safe (no code execution) | ✓ | ✓ | ✓ | | ✓ | ✓ | ✓ |
+| Streaming / append | ✓ | | | | ~³ | | ✓ |
+| Sparse tensors | ✓ | | | ✓ | | | |
+| Per-tensor compression | ✓ | | | | ✗¹ | | ✓ |
+| Extensible types | ✓ | | | N/A | | ✓ | ✓ |
+| Byte-reproducible | ✓ | | | | | | |
+
+¹ `.npz` compresses the zip archive, not each tensor. ² Partial: needs the
+right alignment, or uncompressed data. ³ Zip append, not through the standard
+API.
+
+A blank cell is not a criticism. `.safetensors` set out to be a safe, simple
+replacement for pickle and is exactly that — alignment and digests were not in
+its brief. What the `.zt` column reflects is being designed once those columns
+already existed. [Formats](./formats.md) has the per-format detail.
+
 ### What `.zt` does instead
 
 A canonical `.zt` file places every tensor on a 64 KiB boundary and records an
@@ -80,6 +103,14 @@ expected to change:
 A manifest entry gives a tensor's location as a byte range in L0, and its
 meaning as a profile name in L2. Adding a profile to L2 does not change L1
 or L0.
+
+What separates the three is how long each is meant to last:
+
+| Layer | Contents | Contract |
+| --- | --- | --- |
+| **L0: Container** | Magic, 40-byte footer, aligned blob heap, byte order | **Frozen** |
+| **L1: Manifest** | Deterministic-CBOR schema | Gated by the footer's version integer |
+| **L2: Vocabulary** | Layouts, logical types, encodings, digests | Expected to change; registry-managed |
 
 ### How L2 names are handled
 
@@ -203,6 +234,18 @@ be zero-copy finds out instead of silently paying for one. When a foreign
 checkpoint does not support what you need, `ingest` converts it to a `.zt`
 that does.
 
+## How it is tested
+
+The parsers here read files from wherever a model came from, so the contract
+is explicit: hostile input yields an error, never a panic, an unbounded
+allocation, or a fabricated tensor. Holding them to it are a 76-file
+conformance corpus that is regenerated from code and diffed in CI, fuzz
+targets over the container, the CBOR codec and all six foreign parsers, and a
+test file holding the reproducer behind every hardening fix.
+[Formats](./formats.md#how-it-is-tested) has the detail, and
+[Platform support](./formats.md#platform-support) says which systems this is
+actually run on.
+
 ## Getting started
 
 ### Install
@@ -210,6 +253,7 @@ that does.
 ```bash
 cargo add ztensor            # the format
 cargo add ztensor-compat     # foreign-format projections
+cargo install ztensor-cli    # the `zt` command
 pip install ztensor          # Python bindings
 ```
 
