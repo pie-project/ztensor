@@ -15,7 +15,9 @@
 use std::os::raw::{c_char, c_int, c_void};
 use std::sync::Arc;
 
-use pyo3::exceptions::{PyBufferError, PyIOError, PyKeyError, PyTypeError, PyValueError};
+use pyo3::exceptions::{
+    PyBufferError, PyIOError, PyIndexError, PyKeyError, PyTypeError, PyValueError,
+};
 use pyo3::ffi;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyCapsule, PyDict, PyList, PyTuple};
@@ -43,7 +45,7 @@ struct Source {
 }
 
 impl Source {
-    fn get(&self) -> PyResult<&ztensor::Source> {
+    fn src(&self) -> PyResult<&ztensor::Source> {
         self.inner
             .as_deref()
             .ok_or_else(|| PyValueError::new_err("source is closed"))
@@ -59,28 +61,72 @@ impl Source {
 
 #[pymethods]
 impl Source {
-    /// Tensor names, sorted.
-    fn names(&self) -> PyResult<Vec<String>> {
-        Ok(self.get()?.names().map(str::to_string).collect())
+    /// Tensor names, sorted. Iterating a source yields these, as a mapping
+    /// keyed by name has to.
+    fn keys(&self) -> PyResult<Vec<String>> {
+        Ok(self.src()?.names().map(str::to_string).collect())
     }
 
-    /// Alias for [`names`], for the dict-shaped habit.
-    fn keys(&self) -> PyResult<Vec<String>> {
-        self.names()
+    /// The tensors, in name order.
+    fn values(slf: Bound<'_, Self>) -> PyResult<Vec<Tensor>> {
+        let names = slf.borrow().keys()?;
+        Ok(names
+            .into_iter()
+            .map(|name| Tensor {
+                source: slf.clone().unbind(),
+                name,
+                part: None,
+            })
+            .collect())
+    }
+
+    /// `(name, tensor)` pairs, in name order.
+    fn items(slf: Bound<'_, Self>) -> PyResult<Vec<(String, Tensor)>> {
+        let names = slf.borrow().keys()?;
+        Ok(names
+            .into_iter()
+            .map(|name| {
+                let tensor = Tensor {
+                    source: slf.clone().unbind(),
+                    name: name.clone(),
+                    part: None,
+                };
+                (name, tensor)
+            })
+            .collect())
+    }
+
+    /// The tensor, or `default` when there is no such name.
+    #[pyo3(signature = (name, default = None))]
+    fn get(
+        slf: Bound<'_, Self>,
+        name: &str,
+        default: Option<Py<PyAny>>,
+    ) -> PyResult<Option<Py<PyAny>>> {
+        let py = slf.py();
+        if slf.borrow().src()?.get(name).is_none() {
+            return Ok(default);
+        }
+        let tensor = Tensor {
+            source: slf.clone().unbind(),
+            name: name.to_string(),
+            part: None,
+        };
+        Ok(Some(Py::new(py, tensor)?.into_any()))
     }
 
     fn __len__(&self) -> PyResult<usize> {
-        Ok(self.get()?.len())
+        Ok(self.src()?.len())
     }
 
     fn __contains__(&self, name: &str) -> PyResult<bool> {
-        Ok(self.get()?.get(name).is_some())
+        Ok(self.src()?.get(name).is_some())
     }
 
     fn __getitem__(slf: Bound<'_, Self>, name: &str) -> PyResult<Tensor> {
         {
             let this = slf.borrow();
-            if this.get()?.get(name).is_none() {
+            if this.src()?.get(name).is_none() {
                 return Err(PyKeyError::new_err(name.to_string()));
             }
         }
@@ -91,11 +137,11 @@ impl Source {
         })
     }
 
-    /// Iterating a source yields its tensors, in name order.
-    fn __iter__(slf: Bound<'_, Self>) -> PyResult<TensorIter> {
-        let names = slf.borrow().names()?;
-        Ok(TensorIter {
-            source: slf.unbind(),
+    /// Yields names, so that `list(src)`, `src.keys()` and `name in src` all
+    /// speak about the same things. `src.values()` is the tensor loop.
+    fn __iter__(slf: Bound<'_, Self>) -> PyResult<NameIter> {
+        let names = slf.borrow().keys()?;
+        Ok(NameIter {
             names: names.into_iter(),
         })
     }
@@ -108,33 +154,42 @@ impl Source {
     }
 
     /// File-level attributes, or `None`.
+    #[getter]
     fn attributes<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyAny>>> {
-        self.get()?
+        self.src()?
             .attributes()
             .map(|v| value_to_py(py, v))
             .transpose()
     }
 
     /// The files this source reads from.
+    #[getter]
     fn files(&self) -> PyResult<Vec<String>> {
         Ok(self
-            .get()?
+            .src()?
             .stores()
             .iter()
             .map(|s| s.path().display().to_string())
             .collect())
     }
 
-    /// True for a `.zt` data shard: a container with no manifest.
+    /// Who is making the claim that these tensors are where this says they
+    /// are: `"root"` for a `.zt` that states its own structure, `"data-shard"`
+    /// for a container with no manifest, `"projection"` for a foreign format
+    /// or a merged set, where whoever opened the files made the claim.
     #[getter]
-    fn is_data_shard(&self) -> PyResult<bool> {
-        Ok(self.get()?.provenance() == ztensor::Provenance::DataShard)
+    fn provenance(&self) -> PyResult<&'static str> {
+        Ok(match self.src()?.provenance() {
+            ztensor::Provenance::Root(_) => "root",
+            ztensor::Provenance::DataShard => "data-shard",
+            ztensor::Provenance::Projection => "projection",
+        })
     }
 
-    /// Verifies every part of every tensor. Returns `(checked, undigested)`.
+    /// Verifies every part of every tensor.
     #[pyo3(signature = (deep = false))]
-    fn verify(&self, deep: bool) -> PyResult<(u64, u64)> {
-        let src = self.get()?;
+    fn verify(&self, deep: bool) -> PyResult<Verification> {
+        let src = self.src()?;
         let (mut checked, mut undigested) = (0u64, 0u64);
         for tensor in src.tensors() {
             for name in tensor.parts() {
@@ -147,7 +202,10 @@ impl Source {
         if deep {
             src.verify_shards().map_err(err)?;
         }
-        Ok((checked, undigested))
+        Ok(Verification {
+            checked,
+            undigested,
+        })
     }
 
     fn close(&mut self) {
@@ -166,24 +224,18 @@ impl Source {
 }
 
 #[pyclass(unsendable)]
-struct TensorIter {
-    source: Py<Source>,
+struct NameIter {
     names: std::vec::IntoIter<String>,
 }
 
 #[pymethods]
-impl TensorIter {
+impl NameIter {
     fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
         slf
     }
 
-    fn __next__(&mut self, py: Python<'_>) -> Option<Tensor> {
-        let name = self.names.next()?;
-        Some(Tensor {
-            source: self.source.clone_ref(py),
-            name,
-            part: None,
-        })
+    fn __next__(&mut self) -> Option<String> {
+        self.names.next()
     }
 }
 
@@ -204,6 +256,34 @@ struct Tensor {
     part: Option<String>,
 }
 
+/// The part an unindexed handle addresses.
+///
+/// A tensor with one part resolves to it whatever it is called. A tensor with
+/// several does not resolve at all: `zt.sparse_csr/1` has `indices`, `indptr`
+/// and `values` and no `"data"` among them, and a quantized tensor's payload
+/// is not the whole of it either. Both cases used to answer as if `"data"`
+/// existed.
+fn resolve<'a>(handle: &ztensor::Tensor<'a>, want: Option<&str>) -> PyResult<ztensor::Part<'a>> {
+    if let Some(name) = want {
+        return handle.part(name).map_err(err);
+    }
+    let names: Vec<&str> = handle.parts().collect();
+    match names.as_slice() {
+        [only] => handle.part(only).map_err(err),
+        [] => Err(PyKeyError::new_err(format!(
+            "tensor {:?} has no parts",
+            handle.name()
+        ))),
+        many => Err(PyKeyError::new_err(format!(
+            "tensor {:?} has {} parts ({}); index the one you want, as t[{:?}]",
+            handle.name(),
+            many.len(),
+            many.join(", "),
+            many[0]
+        ))),
+    }
+}
+
 /// Runs `f` against the underlying part. The closure gets a borrow that lives
 /// only as long as the call, which is what keeps the mapping honest.
 fn with_part<R>(
@@ -212,13 +292,9 @@ fn with_part<R>(
     f: impl FnOnce(ztensor::Part<'_>) -> PyResult<R>,
 ) -> PyResult<R> {
     let source = tensor.source.bind(py).borrow();
-    let src = source.get()?;
+    let src = source.src()?;
     let handle = src.tensor(&tensor.name).map_err(err)?;
-    let part = match &tensor.part {
-        None => handle.data().map_err(err)?,
-        Some(name) => handle.part(name).map_err(err)?,
-    };
-    f(part)
+    f(resolve(&handle, tensor.part.as_deref())?)
 }
 
 #[pymethods]
@@ -228,17 +304,33 @@ impl Tensor {
         &self.name
     }
 
-    /// The part this handle addresses: `"data"` unless it was indexed.
+    /// The part this handle addresses, or `None` when the tensor has several
+    /// and none was chosen. Never raises.
     #[getter]
-    fn part(&self) -> &str {
-        self.part.as_deref().unwrap_or("data")
+    fn part(&self, py: Python<'_>) -> Option<String> {
+        if let Some(name) = &self.part {
+            return Some(name.clone());
+        }
+        let source = self.source.bind(py).borrow();
+        let names: Vec<String> = source
+            .src()
+            .ok()?
+            .tensor(&self.name)
+            .ok()?
+            .parts()
+            .map(str::to_string)
+            .collect();
+        match names.as_slice() {
+            [only] => Some(only.clone()),
+            _ => None,
+        }
     }
 
     #[getter]
     fn shape(&self, py: Python<'_>) -> PyResult<Vec<u64>> {
         let source = self.source.bind(py).borrow();
         Ok(source
-            .get()?
+            .src()?
             .tensor(&self.name)
             .map_err(err)?
             .shape()
@@ -249,7 +341,7 @@ impl Tensor {
     fn layout(&self, py: Python<'_>) -> PyResult<String> {
         let source = self.source.bind(py).borrow();
         Ok(source
-            .get()?
+            .src()?
             .tensor(&self.name)
             .map_err(err)?
             .layout()
@@ -280,7 +372,7 @@ impl Tensor {
     fn parts(&self, py: Python<'_>) -> PyResult<Vec<String>> {
         let source = self.source.bind(py).borrow();
         Ok(source
-            .get()?
+            .src()?
             .tensor(&self.name)
             .map_err(err)?
             .parts()
@@ -295,7 +387,7 @@ impl Tensor {
         {
             let source = this.source.bind(py).borrow();
             source
-                .get()?
+                .src()?
                 .tensor(&this.name)
                 .map_err(err)?
                 .part(part)
@@ -343,15 +435,30 @@ impl Tensor {
         Ok(PyBytes::new(py, &owned))
     }
 
-    /// True when the bytes can be handed over without a copy.
-    fn is_mapped(&self, py: Python<'_>) -> PyResult<bool> {
-        with_part(py, self, |p| Ok(p.caps().map))
-    }
-
-    /// Checks this part's digest and its logical type's content rules.
-    /// Returns True when a digest was actually checked.
+    /// Checks digests and the content rules of the logical types involved.
+    ///
+    /// An unindexed handle checks **every** part, because a tensor is verified
+    /// when its bytes are and a quantized tensor's bytes include its scales.
+    /// An indexed one checks that part. True means a digest was checked
+    /// throughout; False means at least one part carried none.
     fn verify(&self, py: Python<'_>) -> PyResult<bool> {
-        with_part(py, self, |p| Ok(p.verify().map_err(err)?.is_checked()))
+        if self.part.is_some() {
+            return with_part(py, self, |p| Ok(p.verify().map_err(err)?.is_checked()));
+        }
+        let source = self.source.bind(py).borrow();
+        let handle = source.src()?.tensor(&self.name).map_err(err)?;
+        let mut all = true;
+        let mut any = false;
+        for name in handle.parts() {
+            any = true;
+            all &= handle
+                .part(name)
+                .map_err(err)?
+                .verify()
+                .map_err(err)?
+                .is_checked();
+        }
+        Ok(any && all)
     }
 
     fn prefetch(&self, py: Python<'_>) -> PyResult<()> {
@@ -370,19 +477,26 @@ impl Tensor {
         }
     }
 
-    fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
-        let shape = self.shape(py)?;
-        Ok(format!(
-            "<Tensor {:?} {}[{}] {}>",
-            self.name,
-            self.dtype(py)?,
-            shape
-                .iter()
-                .map(u64::to_string)
-                .collect::<Vec<_>>()
-                .join(","),
-            self.part()
-        ))
+    /// Never raises. A handle on a multi-part tensor has no dtype to show, and
+    /// a repr that throws makes the object impossible to look at.
+    fn __repr__(&self, py: Python<'_>) -> String {
+        let shape = self
+            .shape(py)
+            .map(|s| s.iter().map(u64::to_string).collect::<Vec<_>>().join(","))
+            .unwrap_or_else(|_| "?".to_string());
+        match self.part(py) {
+            Some(part) => {
+                let dtype = self.dtype(py).unwrap_or_else(|_| "?".to_string());
+                format!("<Tensor {:?} {dtype}[{shape}] {part}>", self.name)
+            }
+            None => {
+                let parts = self
+                    .parts(py)
+                    .map(|p| p.join(", "))
+                    .unwrap_or_else(|_| "?".to_string());
+                format!("<Tensor {:?} [{shape}] parts: {parts}>", self.name)
+            }
+        }
     }
 
     // ---- interchange ----
@@ -798,6 +912,67 @@ fn dl_dtype(dtype: ztensor::DType, logical: Option<&str>) -> PyResult<DlDataType
 // small value types
 // =======================================================================
 
+/// The result of verifying a whole file. It unpacks as a pair, so
+/// `checked, undigested = src.verify()` still works, but the two numbers have
+/// names now.
+#[pyclass(get_all, frozen)]
+struct Verification {
+    /// Parts whose digest was checked and matched.
+    checked: u64,
+    /// Parts that carried no digest to check.
+    undigested: u64,
+}
+
+#[pymethods]
+impl Verification {
+    fn __repr__(&self) -> String {
+        format!(
+            "Verification(checked={}, undigested={})",
+            self.checked, self.undigested
+        )
+    }
+
+    fn __iter__(&self) -> VerificationIter {
+        VerificationIter {
+            values: vec![self.checked, self.undigested].into_iter(),
+        }
+    }
+
+    fn __len__(&self) -> usize {
+        2
+    }
+
+    fn __getitem__(&self, index: isize) -> PyResult<u64> {
+        match index {
+            0 | -2 => Ok(self.checked),
+            1 | -1 => Ok(self.undigested),
+            _ => Err(PyIndexError::new_err("index out of range")),
+        }
+    }
+
+    fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {
+        other
+            .extract::<(u64, u64)>()
+            .map(|(a, b)| a == self.checked && b == self.undigested)
+            .unwrap_or(false)
+    }
+}
+
+#[pyclass(unsendable)]
+struct VerificationIter {
+    values: std::vec::IntoIter<u64>,
+}
+
+#[pymethods]
+impl VerificationIter {
+    fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+    fn __next__(&mut self) -> Option<u64> {
+        self.values.next()
+    }
+}
+
 /// What one part can do. Every field is named after the operation it gates.
 #[pyclass(get_all, frozen)]
 #[derive(Clone)]
@@ -921,6 +1096,81 @@ fn py_to_value(v: &Bound<'_, PyAny>) -> PyResult<ztensor::format::cbor::Value> {
 // Writer
 // =======================================================================
 
+/// One entry of a `parts=` dict: `{"dtype": "u8", "data": buf}` for a part
+/// whose bytes are in hand, `{"dtype": "u8", "nbytes": n}` for one that will
+/// be streamed.
+struct PartSpec {
+    name: String,
+    dtype: ztensor::DType,
+    logical: Option<String>,
+    encoding: Option<String>,
+    buffer: Option<pyo3::buffer::PyBuffer<u8>>,
+    nbytes: Option<u64>,
+}
+
+fn parse_dtype(text: &str) -> PyResult<ztensor::DType> {
+    text.parse()
+        .map_err(|_| PyValueError::new_err(format!("unknown dtype {text:?}")))
+}
+
+fn parse_parts(parts: &Bound<'_, PyDict>, streaming: bool) -> PyResult<Vec<PartSpec>> {
+    if parts.is_empty() {
+        return Err(PyValueError::new_err("an object needs at least one part"));
+    }
+    let mut out = Vec::with_capacity(parts.len());
+    for (key, spec) in parts.iter() {
+        let name: String = key
+            .extract()
+            .map_err(|_| PyTypeError::new_err("part names are strings"))?;
+        let spec: Bound<'_, PyDict> = spec.extract().map_err(|_| {
+            PyTypeError::new_err(format!(
+                "part {name:?} must be a dict, as {{\"dtype\": \"u8\", ...}}"
+            ))
+        })?;
+        let field = |k: &str| -> PyResult<Option<String>> {
+            match spec.get_item(k)? {
+                None => Ok(None),
+                Some(v) if v.is_none() => Ok(None),
+                Some(v) => Ok(Some(v.extract()?)),
+            }
+        };
+        let dtype = field("dtype")?
+            .ok_or_else(|| PyValueError::new_err(format!("part {name:?} has no dtype")))?;
+        let (mut buffer, mut nbytes) = (None, None);
+        if streaming {
+            nbytes = Some(
+                spec.get_item("nbytes")?
+                    .ok_or_else(|| {
+                        PyValueError::new_err(format!(
+                            "streamed part {name:?} needs nbytes, the length you will write"
+                        ))
+                    })?
+                    .extract()?,
+            );
+        } else {
+            let data = spec
+                .get_item("data")?
+                .ok_or_else(|| PyValueError::new_err(format!("part {name:?} has no data")))?;
+            let buf: pyo3::buffer::PyBuffer<u8> = data.extract()?;
+            if !buf.is_c_contiguous() {
+                return Err(PyValueError::new_err(format!(
+                    "part {name:?}: data must be C-contiguous"
+                )));
+            }
+            buffer = Some(buf);
+        }
+        out.push(PartSpec {
+            name,
+            dtype: parse_dtype(&dtype)?,
+            logical: field("logical")?,
+            encoding: field("encoding")?,
+            buffer,
+            nbytes,
+        });
+    }
+    Ok(out)
+}
+
 /// Writes `.zt` files.
 #[pyclass(unsendable)]
 struct Writer {
@@ -944,14 +1194,32 @@ impl Writer {
     /// `canonical=False` to choose your own `align` or insert in any order,
     /// and `publish=True` to write beside the target and rename into place, so
     /// nothing ever reads a half-written file.
+    ///
+    /// `append=True` adds to a `.zt` that already exists without rewriting the
+    /// blobs in it, so the cost is the size of what you add. It needs
+    /// `canonical=False`, since an append leaves the old manifest behind as an
+    /// unreferenced blob.
     #[new]
-    #[pyo3(signature = (path, canonical = true, align = None, publish = false))]
-    fn new(path: &str, canonical: bool, align: Option<u64>, publish: bool) -> PyResult<Self> {
+    #[pyo3(signature = (path, canonical = true, align = None, publish = false, append = false))]
+    fn new(
+        path: &str,
+        canonical: bool,
+        align: Option<u64>,
+        publish: bool,
+        append: bool,
+    ) -> PyResult<Self> {
+        if append && publish {
+            return Err(PyValueError::new_err(
+                "append and publish are two ways of writing; pick one",
+            ));
+        }
         let mut options = ztensor::write::Options::default().canonical(canonical);
         if let Some(align) = align {
             options = options.align(align);
         }
-        let inner = if publish {
+        let inner = if append {
+            options.append(path)
+        } else if publish {
             options.publish(path)
         } else {
             options.create(path)
@@ -999,6 +1267,115 @@ impl Writer {
             .map_err(err)
     }
 
+    /// Adds an object with any number of parts: a quantized tensor's payload
+    /// and its scales, a CSR tensor's indices, indptr and values.
+    ///
+    /// `parts` maps a part name to a dict with `dtype`, `data`, and
+    /// optionally `logical` and `encoding`:
+    ///
+    ///     w.add_object("q", [4096, 4096], {
+    ///         "data":   {"dtype": "u8", "data": payload},
+    ///         "scales": {"dtype": "u8", "data": scales, "logical": "f8_e8m0"},
+    ///     }, layout="zt.quant_group/1", attributes={"group_size": 128})
+    #[pyo3(signature = (name, shape, parts, layout = "dense", attributes = None))]
+    fn add_object(
+        &mut self,
+        name: &str,
+        shape: Vec<u64>,
+        parts: &Bound<'_, PyDict>,
+        layout: &str,
+        attributes: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<()> {
+        let specs = parse_parts(parts, false)?;
+        let attributes = match attributes {
+            None => None,
+            Some(dict) => Some(py_to_value(dict.as_any())?),
+        };
+        // SAFETY: every buffer is read-only for the duration of this call and
+        // the GIL is held, so no exporter can resize or free one.
+        let borrowed: Vec<&[u8]> = specs
+            .iter()
+            .map(|spec| {
+                let buf = spec.buffer.as_ref().expect("checked by parse_parts");
+                unsafe { std::slice::from_raw_parts(buf.buf_ptr() as *const u8, buf.item_count()) }
+            })
+            .collect();
+        let writer = self.get()?;
+        writer
+            .object(name, |mut o| {
+                o = o.shape(shape).layout(layout);
+                if let Some(attributes) = attributes {
+                    o = o.attributes(attributes);
+                }
+                for (spec, bytes) in specs.iter().zip(&borrowed) {
+                    o = o.part(spec.name.clone(), |mut p| {
+                        p = p.dtype(spec.dtype);
+                        if let Some(logical) = &spec.logical {
+                            p = p.logical(logical.clone());
+                        }
+                        if let Some(encoding) = &spec.encoding {
+                            p = p.encoding(encoding.clone());
+                        }
+                        p.bytes(bytes)
+                    });
+                }
+                o
+            })
+            .map_err(err)
+    }
+
+    /// Declares an object whose bytes are written afterwards, a chunk at a
+    /// time, for a tensor too large to hold in memory.
+    ///
+    /// `parts` is shaped like [`add_object`]'s, with `nbytes` in place of
+    /// `data`. The returned sink accepts the parts' bytes in name order and
+    /// must be closed before the writer is used again.
+    ///
+    ///     with w.stream("w", [n, m], {"data": {"dtype": "bf16", "nbytes": n * m * 2}}) as sink:
+    ///         for chunk in chunks:
+    ///             sink.write(chunk)
+    #[pyo3(signature = (name, shape, parts, layout = "dense", attributes = None))]
+    fn stream(
+        slf: Bound<'_, Self>,
+        name: &str,
+        shape: Vec<u64>,
+        parts: &Bound<'_, PyDict>,
+        layout: &str,
+        attributes: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Sink> {
+        let specs = parse_parts(parts, true)?;
+        let attributes = match attributes {
+            None => None,
+            Some(dict) => Some(py_to_value(dict.as_any())?),
+        };
+        let inner = {
+            let mut this = slf.borrow_mut();
+            let writer = this.get()?;
+            writer
+                .stream(name, |mut o| {
+                    o = o.shape(shape).layout(layout);
+                    if let Some(attributes) = attributes {
+                        o = o.attributes(attributes);
+                    }
+                    for spec in &specs {
+                        o = o.part(spec.name.clone(), |mut p| {
+                            p = p.dtype(spec.dtype);
+                            if let Some(logical) = &spec.logical {
+                                p = p.logical(logical.clone());
+                            }
+                            p.length(spec.nbytes.expect("checked by parse_parts"))
+                        });
+                    }
+                    o
+                })
+                .map_err(err)?
+        };
+        Ok(Sink {
+            inner: Some(Box::new(inner)),
+            writer: slf.unbind(),
+        })
+    }
+
     /// Sets file-level attributes from a dict.
     fn set_attributes(&mut self, attributes: &Bound<'_, PyDict>) -> PyResult<()> {
         let value = py_to_value(attributes.as_any())?;
@@ -1008,7 +1385,7 @@ impl Writer {
 
     /// Copies every tensor of a source into this file.
     fn ingest(&mut self, source: &Source) -> PyResult<()> {
-        let src = source.get()?;
+        let src = source.src()?;
         self.get()?.ingest(src).map_err(err)
     }
 
@@ -1043,6 +1420,76 @@ impl Writer {
         } else if self.inner.is_some() {
             self.finish()?;
         }
+        Ok(false)
+    }
+}
+
+/// Accepts the bytes of a streamed object, in part-name order.
+///
+/// The sink is boxed because `ztensor::Sink` carries a streaming xxh3 state
+/// and so wants 64-byte alignment, which a pyclass body does not give it. The
+/// unboxed version tripped a misaligned-pointer abort on the first `write`.
+#[pyclass(unsendable)]
+struct Sink {
+    inner: Option<Box<ztensor::Sink>>,
+    writer: Py<Writer>,
+}
+
+#[pymethods]
+impl Sink {
+    /// Appends a chunk to the part currently open.
+    fn write(&mut self, py: Python<'_>, chunk: pyo3::buffer::PyBuffer<u8>) -> PyResult<()> {
+        if !chunk.is_c_contiguous() {
+            return Err(PyValueError::new_err("chunk must be C-contiguous"));
+        }
+        // SAFETY: read-only for the duration of the call, with the GIL held.
+        let bytes: &[u8] =
+            unsafe { std::slice::from_raw_parts(chunk.buf_ptr() as *const u8, chunk.item_count()) };
+        let writer = self.writer.bind(py);
+        let mut writer = writer.borrow_mut();
+        let sink = self
+            .inner
+            .as_mut()
+            .ok_or_else(|| PyValueError::new_err("sink is already closed"))?;
+        sink.write(writer.get()?, bytes).map_err(err)
+    }
+
+    /// The part being written, or `None` once every part has its bytes.
+    #[getter]
+    fn part(&self) -> Option<String> {
+        self.inner.as_ref()?.current().map(str::to_string)
+    }
+
+    /// Bytes written so far.
+    #[getter]
+    fn written(&self) -> u64 {
+        self.inner.as_ref().map(|s| s.written()).unwrap_or(0)
+    }
+
+    /// Finishes the object. Every declared byte must have been written.
+    fn close(&mut self, py: Python<'_>) -> PyResult<()> {
+        let Some(sink) = self.inner.take() else {
+            return Ok(());
+        };
+        let writer = self.writer.bind(py);
+        let mut writer = writer.borrow_mut();
+        sink.close(writer.get()?).map_err(err)
+    }
+
+    fn __enter__(slf: Py<Self>) -> Py<Self> {
+        slf
+    }
+
+    #[pyo3(signature = (*args))]
+    fn __exit__(&mut self, py: Python<'_>, args: &Bound<'_, PyTuple>) -> PyResult<bool> {
+        let failed = args.get_item(0).map(|e| !e.is_none()).unwrap_or(false);
+        if failed {
+            // The object is half-written and the writer knows it; let the
+            // writer's own abandon path deal with the file.
+            self.inner = None;
+            return Ok(false);
+        }
+        self.close(py)?;
         Ok(false)
     }
 }
@@ -1123,7 +1570,7 @@ fn convert(src: &str, dst: &str, align: Option<u64>) -> PyResult<u64> {
 /// `(digest_verified, without_digests)`.
 #[pyfunction]
 #[pyo3(signature = (path, deep = false))]
-fn verify(path: &str, deep: bool) -> PyResult<(u64, u64)> {
+fn verify(path: &str, deep: bool) -> PyResult<Verification> {
     let source = ztensor_compat::open(path).map_err(err)?;
     let (mut checked, mut undigested) = (0u64, 0u64);
     for tensor in source.tensors() {
@@ -1137,7 +1584,10 @@ fn verify(path: &str, deep: bool) -> PyResult<(u64, u64)> {
     if deep {
         source.verify_shards().map_err(err)?;
     }
-    Ok((checked, undigested))
+    Ok(Verification {
+        checked,
+        undigested,
+    })
 }
 
 /// The OS page size.
@@ -1152,7 +1602,9 @@ fn _ztensor(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Tensor>()?;
     m.add_class::<Caps>()?;
     m.add_class::<Location>()?;
+    m.add_class::<Verification>()?;
     m.add_class::<Writer>()?;
+    m.add_class::<Sink>()?;
     m.add_function(wrap_pyfunction!(open_, m)?)?;
     m.add_function(wrap_pyfunction!(index, m)?)?;
     m.add_function(wrap_pyfunction!(detect, m)?)?;

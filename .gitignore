@@ -11,3 +11,8 @@ Cargo.lock
 
 # Built by website/build.py
 website/_site/
+
+# `maturin develop` output, which lands next to the sources it is built from
+__pycache__/
+*.py[cod]
+*.so

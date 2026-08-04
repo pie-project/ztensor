@@ -80,25 +80,37 @@ def _as_array(tensor, copy: bool):
 
 
 def load_file(path, copy: bool = False, dense_only: bool = True) -> dict:
-    """Loads every tensor of a file of any supported format.
+    """Loads the tensors of a file of any supported format into a dict.
 
     With ``copy=False`` (the default) arrays are zero-copy views where the
     source allows it, and copies where it does not. The per-tensor answer is
     ``src[name].caps.map``.
 
-    ``dense_only=False`` includes non-dense layouts, whose parts have no single
-    array form; each is returned as the raw bytes of its first part.
+    A dict of arrays cannot express a tensor whose parts are separate arrays,
+    so a non-dense layout has no place to go. With ``dense_only=True`` (the
+    default) meeting one raises :class:`ValueError` naming the tensors, since
+    returning a dict that is quietly missing them is the worse answer. With
+    ``dense_only=False`` each comes back as the raw bytes of its first part.
     """
     with _ztensor.open(str(path)) as src:
         out = {}
-        for tensor in src:
+        skipped = []
+        for tensor in src.values():
             if tensor.layout != "dense":
                 if dense_only:
+                    skipped.append(f"{tensor.name} ({tensor.layout})")
                     continue
                 first = tensor[tensor.parts[0]]
                 out[tensor.name] = np.frombuffer(first.tobytes(), dtype=np.uint8)
                 continue
             out[tensor.name] = _as_array(tensor, copy)
+        if skipped:
+            raise ValueError(
+                f"{path}: a dict of arrays cannot hold "
+                + ", ".join(skipped)
+                + ". Pass dense_only=False for their raw bytes, or use "
+                "ztensor.open() where a tensor keeps its parts."
+            )
         return out
 
 

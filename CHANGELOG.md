@@ -6,6 +6,64 @@ and the `ztensor` Python package, which are versioned together.
 The **file format is versioned separately**: `.zt` is container version 2,
 spec **Draft 4**.
 
+## Unreleased
+
+The Python bindings, which had not had the same pass as the Rust surface.
+Breaking for Python; the Rust crates are untouched.
+
+### Fixed
+
+- **A tensor is no longer assumed to have a `"data"` part.** `zt.sparse_csr/1`
+  has `indices`, `indptr` and `values` and no `"data"` among them, and every
+  byte member raised `KeyError: 'part "m"/"data"'` on one, including
+  `__repr__`, so the object could not even be printed. A tensor with one part
+  now resolves to it whatever it is called; a tensor with several says so and
+  names them. `t.part` is `None` in that case instead of claiming `"data"`.
+
+- **`ztensor.numpy.load_file` no longer drops tensors silently.** Its first
+  line said it loaded every tensor while `dense_only=True`, the default,
+  skipped the ones a dict of arrays cannot hold. A sparse checkpoint came back
+  as `{}`. It now raises, names them, and points at `dense_only=False` or the
+  main API.
+
+- **`Tensor.verify()` covers every part of the tensor**, matching what
+  `Tensor::verify` was changed to in 2.1.1 on the Rust side. It checked only
+  the `"data"` part, so `all(t.verify() for t in src)` passed a quantized model
+  whose scales had rotted. Indexing a part still verifies that part.
+
+- **A `Sink` is boxed.** `ztensor::Sink` carries a streaming xxh3 state and
+  wants 64-byte alignment, which a pyclass body does not provide; the first
+  `write` tripped a misaligned-pointer abort.
+
+### Changed
+
+- **`Source` is a mapping.** Iterating it yields names, as `keys()`,
+  `__contains__` and `__getitem__` always did; `values()` and `items()` are
+  new, `get(name, default)` is new, and it is registered with
+  `collections.abc.Mapping`. Iterating used to yield tensors, so `list(src)`
+  and `src.keys()` disagreed and `t in src` raised `TypeError` for a `t` that
+  iteration had just produced.
+
+- **`Source.verify()` returns a `Verification`** with `checked` and
+  `undigested` fields. It unpacks and compares as the pair it used to be.
+
+- **`Source.provenance`** replaces `is_data_shard`, which could not tell a
+  root from a projection.
+
+- **`names()` is gone** (it was `keys()` under another name), and `files` and
+  `attributes` are properties, matching everything else that answers a
+  question about the source.
+
+- **`Tensor.is_mapped()` is gone.** It returned `caps.map`.
+
+### Added
+
+- **`Writer.add_object`** writes an object with any number of parts, so a
+  quantized or sparse tensor can be produced from Python and not only read.
+- **`Writer.stream`** returns a `Sink` for a tensor too large to hold in
+  memory.
+- **`Writer(..., append=True)`** adds to a `.zt` that already exists.
+
 ## 2.1.1
 
 A second pass over the surface, after reading 2.1 back. The container is

@@ -438,8 +438,10 @@ std::io::copy(&mut reader, &mut sink.attach(&mut w))?;
 import ztensor, torch
 
 with ztensor.open("model.safetensors") as src:
-    for t in src:
-        print(t.name, t.shape, t.dtype, t.caps.map)
+    for name in src:                      # a mapping, so iteration gives names
+        print(name, src[name].shape)
+    for t in src.values():                # the tensors themselves
+        print(t.name, t.dtype, t.caps.map)
 
     t = src["layer.weight"]
     w = torch.from_dlpack(t)          # zero-copy; DLPack can say bfloat16
@@ -447,8 +449,16 @@ with ztensor.open("model.safetensors") as src:
     t["scales"]                       # parts are tensors too
 
 ztensor.convert("model.safetensors", "model.zt")
-ztensor.verify("model.zt", deep=True)
+ztensor.verify("model.zt", deep=True)  # Verification(checked=..., undigested=...)
 ```
+
+A tensor with one part answers about that part directly. A tensor with
+several does not choose one for you, so `t.tobytes()` on a CSR tensor is an
+error naming `indices`, `indptr` and `values` instead of a guess.
+
+Writing has the same three shapes as Rust: `add` for a dense tensor,
+`add_object` for one with several parts, and `stream` for one too large to
+hold in memory.
 
 The bindings link against no framework: tensors export DLPack and the buffer
 protocol, so numpy, torch and jax all read them without this package knowing

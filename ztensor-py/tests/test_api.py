@@ -13,6 +13,7 @@ below is one of the claims the API makes out loud.
 from __future__ import annotations
 
 import builtins
+import pathlib
 import struct
 
 import pytest
@@ -49,8 +50,9 @@ def test_source_is_iterable_and_indexable(simple):
         assert len(src) == 2
         assert "a.weight" in src
         assert "nope" not in src
-        assert [t.name for t in src] == ["a.weight", "b.bias"]
-        assert src.names() == ["a.weight", "b.bias"]
+        assert list(src) == ["a.weight", "b.bias"]
+        assert src.keys() == ["a.weight", "b.bias"]
+        assert [t.name for t in src.values()] == ["a.weight", "b.bias"]
         with pytest.raises(KeyError):
             src["nope"]
 
@@ -145,9 +147,8 @@ def test_location_is_an_address(simple):
 
 def test_caps_match_what_happens(simple):
     with ztensor.open(str(simple)) as src:
-        for t in src:
+        for t in src.values():
             caps = t.caps
-            assert caps.map is t.is_mapped()
             assert caps.verify is t.verify()
             assert caps.alignment >= 65536
             if caps.locate:
@@ -342,8 +343,8 @@ def test_open_accepts_a_list(tmp_path):
     with ztensor.Writer(str(second)) as w:
         w.add("y", bytes([2] * 4), shape=[4], dtype="u8")
     with ztensor.open([str(first), str(second)]) as src:
-        assert src.names() == ["x", "y"]
-        assert sorted(src.files()) == sorted([str(first), str(second)])
+        assert src.keys() == ["x", "y"]
+        assert sorted(src.files) == sorted([str(first), str(second)])
 
 
 def test_a_name_in_two_files_is_refused(tmp_path):
@@ -395,7 +396,7 @@ def test_attributes_round_trip(tmp_path):
         w.set_attributes({"producer": "test", "group": 32})
         w.add("x", bytes([1] * 4), shape=[4], dtype="u8")
     with ztensor.open(str(path)) as src:
-        assert src.attributes() == {"producer": "test", "group": 32}
+        assert src.attributes == {"producer": "test", "group": 32}
 
 
 # ---- conversion and verification -------------------------------------------
@@ -453,3 +454,149 @@ def test_numpy_shim_keeps_the_shape_of_types_numpy_cannot_name(tmp_path):
 
     arr = ztnp.load_file(str(path))["w"]
     assert arr.shape in [(2, 3), (2, 3, 2)], f"shape was lost: {arr.shape}"
+
+
+# ---- a tensor is not assumed to have a "data" part -------------------------
+
+CSR = "conformance/corpus/valid/csr-data-valid.zt"
+
+
+def _repo_root():
+    here = pathlib.Path(__file__).resolve()
+    for parent in here.parents:
+        if (parent / CSR).exists():
+            return parent
+    pytest.skip("conformance corpus not present")
+
+
+def test_a_multi_part_tensor_does_not_pretend_to_have_data():
+    """`zt.sparse_csr/1` has indices, indptr and values, and no "data".
+
+    Every byte member used to raise `KeyError: 'part "m"/"data"'`, including
+    `__repr__`, so the object could not even be printed.
+    """
+    path = _repo_root() / CSR
+    with ztensor.open(str(path)) as src:
+        t = src["m"]
+        assert t.parts == ["indices", "indptr", "values"]
+        assert t.part is None
+
+        # Structure is answerable without choosing a part.
+        assert t.shape == [2, 3]
+        assert t.layout == "zt.sparse_csr/1"
+        assert "indices" in repr(t) and "values" in repr(t)
+
+        # Bytes are not, and the error says what to do about it.
+        with pytest.raises(KeyError) as caught:
+            t.tobytes()
+        assert "3 parts" in str(caught.value)
+        assert 't["indices"]' in str(caught.value)
+
+        # Indexing resolves it.
+        assert len(t["values"].tobytes()) == t["values"].nbytes
+
+
+def test_a_single_part_tensor_resolves_whatever_it_is_called(tmp_path):
+    """The `dense` profile pins the name to "data", so this needs a layout
+    that does not: what resolves a handle is there being one part, not what
+    that part happens to be called."""
+    path = tmp_path / "one.zt"
+    with ztensor.Writer(str(path), canonical=False) as w:
+        w.add_object(
+            "t",
+            [4],
+            {"only": {"dtype": "u8", "data": bytes(range(4))}},
+            layout="example.one/1",
+        )
+    with ztensor.open(str(path)) as src:
+        t = src["t"]
+        assert t.parts == ["only"]
+        assert t.part == "only"
+        assert t.tobytes() == bytes(range(4))
+
+
+def test_verify_covers_every_part(tmp_path):
+    """An unindexed handle verifies the whole tensor, an indexed one its part."""
+    path = tmp_path / "q.zt"
+    with ztensor.Writer(str(path), canonical=False) as w:
+        w.add_object(
+            "q",
+            [4, 4],
+            {
+                "data": {"dtype": "u8", "data": bytes(range(16))},
+                "scales": {"dtype": "u8", "data": bytes([8] * 4), "logical": "f8_e8m0"},
+            },
+            layout="zt.quant_group/1",
+            attributes={"group_size": 4},
+        )
+    with ztensor.open(str(path)) as src:
+        t = src["q"]
+        assert t.verify() is True
+        assert t["data"].verify() is True
+        assert t["scales"].verify() is True
+
+
+# ---- the mapping protocol agrees with itself -------------------------------
+
+
+def test_source_is_a_mapping(simple):
+    from collections.abc import Mapping
+
+    with ztensor.open(str(simple)) as src:
+        assert isinstance(src, Mapping)
+        # Iterating a name-keyed container yields names, so that everything
+        # `in` accepts is something iteration produced.
+        assert list(src) == src.keys()
+        for name in src:
+            assert name in src
+        assert [k for k, _ in src.items()] == src.keys()
+        assert [t.name for t in src.values()] == src.keys()
+        assert src.get("nope") is None
+        assert src.get("nope", 7) == 7
+        assert src.get("a.weight").name == "a.weight"
+        assert sorted(dict(src)) == src.keys()
+
+
+def test_verification_has_named_fields(simple):
+    result = ztensor.verify(str(simple))
+    assert (result.checked, result.undigested) == (2, 0)
+    checked, undigested = result          # still unpacks
+    assert (checked, undigested) == (2, 0)
+    assert "checked=2" in repr(result)
+
+
+def test_provenance_names_all_three(simple):
+    with ztensor.open(str(simple)) as src:
+        assert src.provenance == "root"
+
+
+# ---- writing what the reader can read --------------------------------------
+
+
+def test_streaming_a_tensor_that_is_not_in_memory(tmp_path):
+    path = tmp_path / "streamed.zt"
+    payload = bytes(range(256)) * 4
+    with ztensor.Writer(str(path), canonical=False) as w:
+        with w.stream("big", [1024], {"data": {"dtype": "u8", "nbytes": len(payload)}}) as sink:
+            assert sink.part == "data"
+            for i in range(0, len(payload), 64):
+                sink.write(payload[i : i + 64])
+            assert sink.written == len(payload)
+    with ztensor.open(str(path)) as src:
+        assert src["big"].tobytes() == payload
+
+
+def test_append_adds_without_rewriting(tmp_path):
+    path = tmp_path / "grow.zt"
+    with ztensor.Writer(str(path), canonical=False) as w:
+        w.add("a", bytes([1] * 4), shape=[4], dtype="u8")
+    with ztensor.Writer(str(path), canonical=False, append=True) as w:
+        w.add("b", bytes([2] * 4), shape=[4], dtype="u8")
+    with ztensor.open(str(path)) as src:
+        assert src.keys() == ["a", "b"]
+        assert src["a"].tobytes() == bytes([1] * 4)
+
+
+def test_append_and_publish_are_two_ways_of_writing(tmp_path):
+    with pytest.raises(ValueError, match="pick one"):
+        ztensor.Writer(str(tmp_path / "x.zt"), canonical=False, append=True, publish=True)

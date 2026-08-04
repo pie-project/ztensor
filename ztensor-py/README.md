@@ -10,14 +10,17 @@ pip install ztensor
 import ztensor, torch
 
 with ztensor.open("model.safetensors") as src:   # or open([shard1, shard2])
-    for t in src:
-        print(t.name, t.shape, t.dtype)
+    for t in src.values():                       # src itself is a mapping,
+        print(t.name, t.shape, t.dtype)          # so iterating it gives names
 
     t = src["model.layers.0.mlp.w"]
     w = torch.from_dlpack(t)      # zero-copy
     t.location                    # (path, offset, nbytes) for your own I/O
     t["scales"]                   # parts are tensors too
 ```
+
+A tensor with one part answers about that part. A tensor with several, a
+quantized one or a CSR one, does not pick for you: index the part you mean.
 
 Reads `.zt`, `.safetensors`, `.gguf`, `.npz`, PyTorch `.pt`, HDF5 and ONNX,
 detected by magic. Writes exactly one format: canonical `.zt`, where every
