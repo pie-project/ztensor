@@ -210,13 +210,42 @@ practical, so the expensive checks are opt-in.
 
 ## Sharded models and overlays
 
-A multi-file model is one root manifest plus data shards. The root names each
+A multi-file model is one root manifest plus its shards. The root names each
 shard, but the name is only a label. A shard's identity is its size and
 digest, so renaming the files does not break the model or change it.
 
 ```rust
 let model = ztensor::Source::open("model.zt")?;   // positional resolver
 ```
+
+### Writing the shards
+
+A shard is an ordinary `.zt`. Write one, then ask it for its identity:
+
+```rust
+let mut w = Writer::create("model-00001.zt")?;
+w.add("blk.0.attn_q.weight", [4096u64, 4096], DType::BF16, &weights)?;
+w.finish()?;
+
+let id = ztensor::shard_identity("model-00001.zt")?;
+```
+
+The root records that identity and points its tensors at the shard:
+
+```rust
+let mut root = Writer::options().canonical(false).create("model.zt")?;
+root.add_shard("00001", &id)?;
+root.link("blk.0.attn_q.weight", &object, "00001")?;
+root.finish()?;
+```
+
+The format also allows a shard with no manifest of its own, holding nothing
+but bytes (spec §7.2). zTensor reads those, because other tools write them,
+but it does not produce them and you should not want one: a shard without a
+manifest cannot say which of its bytes are occupied, so nothing can prove a
+tensor has its pages to itself, and `evict` is refused. It carries no
+per-part digests either, so there is nothing to verify. A shard that is a
+normal `.zt` keeps both.
 
 ### Finding the shards
 

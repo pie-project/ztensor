@@ -11,12 +11,29 @@ use std::path::PathBuf;
 
 use xxhash_rust::xxh3::xxh3_64;
 use ztensor::{
-    schema, shard_identity, BlobRef, DType, DataShardWriter, Error, Rule, Shard, ShardResolver,
-    Source, Writer,
+    schema, shard_identity, BlobRef, DType, Error, Rule, Shard, ShardResolver, Source, Writer,
 };
 
 fn tmp(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name)
+}
+
+/// Writes a data shard (spec §7.2): magic, one blob at `offset`, and a footer
+/// whose manifest fields are all zero.
+///
+/// zTensor does not write these. It reads them, because other producers do, so
+/// the tests build one the way such a producer would.
+fn write_data_shard(path: &PathBuf, offset: u64, payload: &[u8]) {
+    let end = offset as usize + payload.len();
+    let mut bytes = vec![0u8; end];
+    bytes[..8].copy_from_slice(&ztensor::MAGIC);
+    bytes[offset as usize..end].copy_from_slice(payload);
+    let mut footer = [0u8; 40];
+    // offset, length and hash stay zero: that is what makes it a data shard.
+    footer[24..28].copy_from_slice(&2u32.to_le_bytes());
+    footer[32..40].copy_from_slice(&ztensor::MAGIC);
+    bytes.extend_from_slice(&footer);
+    fs::write(path, &bytes).unwrap();
 }
 
 /// Opens a root whose shards all live at one known path.
@@ -106,12 +123,14 @@ fn lora_overlay() {
 
 #[test]
 fn positional_shards() {
-    // Data shard written by DataShardWriter, root by Writer.
+    // A manifest-less shard, built here because zTensor no longer writes one:
+    // this is the shape some *other* producer hands you, and reading it is
+    // what has to keep working.
     let shard_path = tmp("posmodel-00001.zt");
     let payload = vec![9u8; 8192];
-    let mut ds = DataShardWriter::create_with_alignment(&shard_path, 4096).unwrap();
-    let offset = ds.add_blob(&payload).unwrap();
-    let identity = ds.finish().unwrap();
+    let offset = 4096u64;
+    write_data_shard(&shard_path, offset, &payload);
+    let identity = shard_identity(&shard_path).unwrap();
 
     // The data shard alone is a valid manifest-less file.
     assert!(Source::open(&shard_path).unwrap().is_data_shard());
@@ -378,20 +397,31 @@ fn resolver_trait_objects() {
 
 /// A sha256 shard identity, produced and then checked.
 ///
-/// §6.4 makes this the basis of signing: a root whose shard digests are
+/// §6.5 makes this the basis of signing: a root whose shard digests are
 /// cryptographic commits to every shard byte, so one signature over the root
 /// covers the model. That only holds if the digest can be *verified*, which is
 /// why generating one without being able to check it would be worse than not
 /// generating it at all.
+///
+/// The shard is an ordinary `.zt`, which is how shards are made: it keeps the
+/// occupancy and the per-part digests that a manifest-less one throws away.
 #[test]
 fn a_sha256_shard_identity_round_trips() {
     use ztensor::DigestAlgorithm;
 
     let shard_path = tmp("sha-shard.zt");
     let payload = vec![3u8; 4096];
-    let mut ds = DataShardWriter::create_with(&shard_path, 4096, DigestAlgorithm::Sha256).unwrap();
-    let offset = ds.add_blob(&payload).unwrap();
-    let from_writer = ds.finish().unwrap();
+    let mut w = Writer::create(&shard_path).unwrap();
+    w.add("borrowed", [4096u64], DType::U8, &payload).unwrap();
+    w.finish().unwrap();
+    let offset = Source::open(&shard_path)
+        .unwrap()
+        .tensor("borrowed")
+        .unwrap()
+        .locate()
+        .unwrap()
+        .offset;
+    let from_writer = ztensor::shard_identity_with(&shard_path, DigestAlgorithm::Sha256).unwrap();
 
     assert!(
         from_writer.digest.starts_with("sha256:"),
@@ -400,7 +430,7 @@ fn a_sha256_shard_identity_round_trips() {
     );
     assert_eq!(from_writer.digest.len(), "sha256:".len() + 64);
 
-    // Reading the finished file back must give the same identity.
+    // Asking twice gives the same answer.
     let scanned = ztensor::shard_identity_with(&shard_path, DigestAlgorithm::Sha256).unwrap();
     assert_eq!(scanned, from_writer);
     // And the default is still xxh3, over the same bytes.

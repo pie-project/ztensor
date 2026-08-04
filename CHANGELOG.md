@@ -60,11 +60,25 @@ spec **Draft 4**.
   the bytes.
 
 - **`DigestAlgorithm`**, with `sha256` alongside `xxh3`, plus
-  `shard_identity_with` and `DataShardWriter::create_with`. §6.5 makes a
-  cryptographic shard digest the thing that lets one signature over a root
-  cover every shard byte, and that was previously impossible to produce
-  through the API. Verification takes whatever algorithm a file used, so a
-  build cannot write digests it is unable to check.
+  `shard_identity_with`. §6.5 makes a cryptographic shard digest the thing
+  that lets one signature over a root cover every shard byte, and that was
+  previously impossible to produce through the API. Verification takes
+  whatever algorithm a file used, so a build cannot write digests it is
+  unable to check.
+
+### Removed
+
+- **`DataShardWriter`.** It wrote the manifest-less shard of §7.2, and the
+  name made it look like the way to produce a shard. It was the wrong way.
+  §7.2 lets any `.zt` serve as a shard, and one with a manifest is strictly
+  more useful: it states which of its bytes are occupied, so a consumer can
+  prove a tensor has its pages to itself and evict it, and it carries
+  per-part digests, so those bytes can be verified. A manifest-less shard
+  gives up both, which is exactly what a streaming loader wants.
+
+  Write shards with `Writer` and take their identity with `shard_identity`.
+  Reading manifest-less shards is unchanged: other producers write them, and
+  the format defines them.
 
 ## 2.0.0
 

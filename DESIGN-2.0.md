@@ -192,7 +192,7 @@ safetensors-shaped shim for migration, not the API.
 | `catalog` | `Catalog`, `Entry`, `PartEntry`, `Payload`, `Location` |
 | `source` | `Source`, `Tensor`, `Part`, `Caps`, `Bytes`, `Verified` |
 | `validate` | the §3.6 / §8 rules over a `.zt` image |
-| `writer` | `Writer`, `ObjectBuilder`, `Sink`, `DataShardWriter` |
+| `writer` | `Writer`, `ObjectBuilder`, `Sink` |
 | `csr` | `zt.sparse_csr/1` assembly (out of the core reader) |
 
 `Layout` as an enum (`Dense` / `Other(String)`) is gone; a layout is a string id

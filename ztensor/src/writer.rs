@@ -21,9 +21,9 @@ use xxhash_rust::xxh3::{xxh3_128, xxh3_64, Xxh3};
 use crate::cbor;
 use crate::error::{Error, Result};
 use crate::schema::{
-    check_attributes, check_digest, check_name, check_shard_name, BlobRef, DType, DigestAlgorithm,
-    Hasher, Manifest, Object, Part, Shard, ALIGN_CANONICAL, ALIGN_FLOOR, FOOTER_LEN, MAGIC,
-    MAX_MANIFEST_LEN, MAX_RANK, MIN_FILE_LEN, VERSION,
+    check_attributes, check_digest, check_name, check_shard_name, BlobRef, DType, Manifest, Object,
+    Part, Shard, ALIGN_CANONICAL, ALIGN_FLOOR, FOOTER_LEN, MAGIC, MAX_MANIFEST_LEN, MAX_RANK,
+    MIN_FILE_LEN, VERSION,
 };
 use crate::source::Source;
 use crate::vocab::Vocabulary;
@@ -386,9 +386,12 @@ impl Writer {
     /// Registering the same name twice is accepted when the identity matches
     /// and rejected when it does not: one name means one file.
     ///
-    /// The identity is a single value. Both things that produce one,
-    /// [`DataShardWriter::finish`] and
-    /// [`shard_identity`](crate::shard_identity), hand back exactly this.
+    /// The identity comes from [`shard_identity`](crate::shard_identity), or
+    /// [`shard_identity_with`](crate::shard_identity_with) to choose the
+    /// algorithm. Write the shard as an ordinary `.zt` and then ask it for its
+    /// identity; a shard that carries a manifest is one whose tensors a
+    /// consumer can evict and verify.
+    ///
     /// Canonical form is single-file (spec §6.3), so this needs
     /// `.canonical(false)`.
     pub fn add_shard(&mut self, name: impl Into<String>, shard: &Shard) -> Result<()> {
@@ -1253,84 +1256,17 @@ impl Sink {
     }
 }
 
-// =======================================================================
-// data shards
-// =======================================================================
-
-/// Writes a data shard (spec §7.2): magic, aligned blobs, and a footer with no
-/// manifest. `finish` returns the shard's identity, which is exactly what
-/// [`Writer::add_shard`] wants.
-///
-/// The whole-file digest is computed while writing, so producing a shard costs
-/// one pass.
-pub struct DataShardWriter {
-    out: BufWriter<File>,
-    hasher: Hasher,
-    offset: u64,
-    align: u64,
-}
-
-impl DataShardWriter {
-    /// Creates a data shard with canonical (64 KiB) placement.
-    pub fn create(path: impl AsRef<Path>) -> Result<Self> {
-        Self::create_with_alignment(path, ALIGN_CANONICAL)
-    }
-
-    pub fn create_with_alignment(path: impl AsRef<Path>, align: u64) -> Result<Self> {
-        Self::create_with(path, align, DigestAlgorithm::Xxh3)
-    }
-
-    /// Creates a data shard that digests itself with `algo`.
-    ///
-    /// [`DigestAlgorithm::Sha256`] is what a shard destined for signing or
-    /// distribution wants: a root whose shard digests are cryptographic
-    /// commits to every shard byte, so one signature over the root covers the
-    /// whole model (§6.5).
-    pub fn create_with(path: impl AsRef<Path>, align: u64, algo: DigestAlgorithm) -> Result<Self> {
-        check_alignment(align)?;
-        let file = File::create(path)?;
-        let mut shard = Self {
-            out: BufWriter::with_capacity(1 << 20, file),
-            hasher: Hasher::new(algo),
-            offset: 0,
-            align,
-        };
-        shard.put(&MAGIC)?;
-        Ok(shard)
-    }
-
-    fn put(&mut self, bytes: &[u8]) -> Result<()> {
-        self.out.write_all(bytes)?;
-        self.hasher.update(bytes);
-        self.offset += bytes.len() as u64;
-        Ok(())
-    }
-
-    /// Writes one blob at the next aligned offset and returns that offset,
-    /// the caller records it for the root's blob references.
-    pub fn add_blob(&mut self, data: &[u8]) -> Result<u64> {
-        const ZEROS: [u8; 4096] = [0u8; 4096];
-        let target = align_up(self.offset, self.align)?;
-        let mut gap = target - self.offset;
-        while gap > 0 {
-            let n = gap.min(ZEROS.len() as u64) as usize;
-            self.put(&ZEROS[..n])?;
-            gap -= n as u64;
-        }
-        self.put(data)?;
-        Ok(target)
-    }
-
-    /// Writes the manifest-less footer and returns the shard's identity.
-    pub fn finish(mut self) -> Result<Shard> {
-        let mut footer = [0u8; FOOTER_LEN as usize];
-        footer[24..28].copy_from_slice(&VERSION.to_le_bytes());
-        footer[32..40].copy_from_slice(&MAGIC);
-        self.put(&footer)?;
-        self.out.flush()?;
-        Ok(Shard {
-            size: self.offset,
-            digest: self.hasher.finish(),
-        })
-    }
-}
+// A writer for data shards (spec §7.2) used to live here. It is gone, and
+// nothing replaced it, because a shard is better off as an ordinary `.zt`:
+//
+//     let mut w = Writer::create("model-00001.zt")?;
+//     w.add("blk.0.attn_q.weight", shape, dtype, bytes)?;
+//     w.finish()?;
+//     let id = shard_identity_with("model-00001.zt", DigestAlgorithm::Sha256)?;
+//
+// §7.2 allows any `.zt` to serve as a shard, and one with a manifest is
+// strictly more useful: it states which of its bytes are occupied, so a
+// consumer can prove a tensor has its pages to itself and evict it, and it
+// carries per-part digests, so those bytes can be verified. A manifest-less
+// shard gives up both. Reading one is still supported, since other producers
+// write them.

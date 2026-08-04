@@ -263,9 +263,16 @@ fn canonical_form_cannot_be_appended_to() {
 #[test]
 fn a_data_shard_has_nothing_to_append_to() {
     let path = tmp("append-datashard.zt");
-    let mut ds = ztensor::DataShardWriter::create(&path).unwrap();
-    ds.add_blob(&[1u8; 64]).unwrap();
-    ds.finish().unwrap();
+    // Manifest-less (spec §7.2). zTensor reads these but does not write them,
+    // so the test builds one the way another producer would.
+    let mut bytes = vec![0u8; 4160];
+    bytes[..8].copy_from_slice(&ztensor::MAGIC);
+    bytes[4096..4160].copy_from_slice(&[1u8; 64]);
+    let mut footer = [0u8; 40];
+    footer[24..28].copy_from_slice(&2u32.to_le_bytes());
+    footer[32..40].copy_from_slice(&ztensor::MAGIC);
+    bytes.extend_from_slice(&footer);
+    fs::write(&path, &bytes).unwrap();
 
     let err = Writer::append(&path).unwrap_err();
     assert!(format!("{err}").contains("no manifest"), "{err}");
