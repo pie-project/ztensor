@@ -140,12 +140,6 @@ in the wild uses the old spelling.
 `<stem>-<n>.zt`, so naming shards `00001-of-00003` reproduces the file names
 checkpoints already ship with.
 
-### Added
-
-- **`DirectoryResolver`** scans a directory and matches shards by size and
-  whole-file digest, ignoring names entirely. It is the one convention that
-  keeps working after an arbitrary rename.
-
 ### Changed
 
 - **One reader type.** `Reader`, `Model` and `Composite` were three types
@@ -178,6 +172,9 @@ checkpoints already ship with.
 
 ### Added
 
+- **`DirectoryResolver`** scans a directory and matches shards by size and
+  whole-file digest, ignoring names entirely. It is the one convention that
+  keeps working after an arbitrary rename.
 - **`Source::index`** opens without mapping. It answers where every tensor
   lives for the cost of a header read, which is what a planner wants.
 - **`Part::locate`** gives the exact byte range of the decoded bytes, for
@@ -210,29 +207,6 @@ checkpoints already ship with.
   with `dense_only=False` raised.
 - Python: a zero-copy export now keeps the mapping alive itself, so an array
   or memoryview stays valid after the source it came from is closed.
-
-### Fixed
-
-- **A `Sink` could drive a `Writer` that did not open it.** The check was
-  whether *some* object was open on that writer, which is true of any writer
-  mid-stream, so a sink handed the wrong one appended its bytes to whatever
-  blob that writer had open. Two files quietly wrong, and the sink believing
-  it had written a part it never wrote. Sinks now carry a ticket the writer
-  checks on every call.
-
-- **`DirectoryResolver` could not match a `sha256` shard table.** It hashed
-  every candidate with one fixed algorithm and compared digest strings, so the
-  very tables signing needs (§6.5) were the ones it could not resolve. It now
-  indexes by size and computes the digest in the algorithm the shard asks for,
-  which also means the scan reads no tensor bytes at all.
-
-- **Leaving canonical form dropped the alignment to the 4 KiB floor.**
-  Placement is not part of what canonical form is; 64 KiB is what buys
-  per-tensor page exclusivity, and it matters just as much to a sharded
-  model, which cannot be canonical at all (§6.3 rule 6). Every sharded root
-  was silently losing eviction on any host with pages above 4 KiB unless its
-  author knew to ask for the alignment back. A non-canonical writer now
-  defaults to 64 KiB like any other; `.align()` still chooses.
 
 ### Removed
 

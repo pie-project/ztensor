@@ -19,7 +19,7 @@ parsers are worth porting into the compat crate later).
   tier 2 zero-copy view → tier 3 page-exclusive verified mmap
   (canonical `.zt` only). Never degrade silently; `view()` errors rather
   than falling back to a copy.
-- Spec: `spec/ztensor-v2-spec.md` (Draft 2). Alignment floor 4096, canonical
+- Spec: `spec/ztensor-v2-spec.md` (Draft 4). Alignment floor 4096, canonical
   placement 65536.
 
 ## Workspace layout
@@ -31,7 +31,7 @@ ztensor-compat/     foreign-format projections (feature-gated)   [M6]
 ztensor-cli/        zt binary: ls / verify / convert / pack / diff [M7]
 ztensor-py/         pyo3 bindings                                  [M8]
 conformance/        golden corpus generator + runner               [M2]
-spec/               Draft 2 + profile registry documents
+spec/               Draft 4 + profile registry documents
 ```
 
 Core dependencies: `memmap2`, `xxhash-rust` only.

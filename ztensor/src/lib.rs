@@ -1,6 +1,6 @@
 //! zTensor v2: an aligned, verifiable container format for tensor data.
 //!
-//! The format is specified in `spec/ztensor-v2-spec.md` (Draft 2), which
+//! The format is specified in `spec/ztensor-v2-spec.md` (Draft 4), which
 //! separates three layers:
 //!
 //! - **L0 container** (frozen): magic, 40-byte footer, aligned blob heap.
