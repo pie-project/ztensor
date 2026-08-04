@@ -25,9 +25,14 @@ parsers are worth porting into the compat crate later).
 ## Workspace layout
 
 ```text
-ztensor/            core: .zt v2 format, object model, Source trait
+ztensor/            core: .zt v2 format, object model, reader and writer
+  src/format/       L0 container + L1 manifest, frozen; opens no files
+  src/vocab.rs      L2 vocabulary, open and registry-managed
+  src/read.rs       Source, Tensor, Part, resolvers
+  src/write.rs      Writer, Sink
+  src/provide/      the face turned towards foreign-format projections
   examples/minimal_reader.rs    executable-spec reference reader
-ztensor-compat/     foreign-format projections (feature-gated)   [M6]
+ztensor-compat/     foreign-format projections + layout profiles  [M6]
 ztensor-cli/        zt binary: ls / verify / convert / pack / diff [M7]
 ztensor-py/         pyo3 bindings                                  [M8]
 conformance/        golden corpus generator + runner               [M2]
@@ -50,8 +55,9 @@ Core dependencies: `memmap2`, `xxhash-rust` only.
 - **M3: Capability ladder API**: `Source` trait, `caps()`, page-exclusivity
   detection, madvise/eviction helpers. Exit: pie-consumable surface frozen.
 - **M4: L2 framework**: `LayoutProfile`/`EncodingProfile` traits,
-  `zt.sparse_csr/1`, `zt.zstd-seekable/1` (feature-gated), logical-type
-  size functions incl. `f4_e2m1`.
+  `zt.sparse_csr/1` (assembly in `ztensor-compat`, the first profile to live
+  outside core), `zt.zstd-seekable/1` (feature-gated), logical-type size
+  functions incl. `f4_e2m1`.
 - **M5: Sharding + overlays**: shard table, resolver trait (positional /
   CAS / custom), verification ladder, LoRA-overlay integration test.
 - **M6: Compat crate**: safetensors → gguf (quant blocks as `gguf.*`

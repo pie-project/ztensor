@@ -19,7 +19,7 @@
 use std::sync::{Arc, OnceLock};
 
 use crate::error::{Error, Result, Rule};
-use crate::schema::{DType, Object};
+use crate::format::{DType, Object};
 
 /// A layout profile: how an object's parts combine into a tensor.
 ///

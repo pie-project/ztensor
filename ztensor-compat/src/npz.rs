@@ -12,8 +12,9 @@
 use std::fs::File;
 use std::io::Read;
 
-use ztensor::catalog::{Entry, Location, PartEntry, Payload};
-use ztensor::{Catalog, DType, Error, Opaque, Result, Store, StoreId, Vocabulary};
+use ztensor::provide::{Catalog, Opaque};
+use ztensor::provide::{Entry, Location, PartEntry, Payload};
+use ztensor::{DType, Error, Result, Store, StoreId, Vocabulary};
 
 use crate::project::Projection;
 

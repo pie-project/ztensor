@@ -17,7 +17,7 @@ fn f32s(vals: &[f32]) -> Vec<u8> {
 }
 
 fn digest_of(path: &PathBuf) -> String {
-    ztensor::manifest_of(path)
+    ztensor::read::manifest_of(path)
         .unwrap()
         .unwrap()
         .content_digest(DigestAlgorithm::Sha256)
@@ -80,7 +80,7 @@ fn sharding_does_not_change_the_content_digest() {
     w.add("w", [64u64], DType::F32, &payload).unwrap();
     w.finish().unwrap();
     let id = shard_identity(&shard, DigestAlgorithm::Sha256).unwrap();
-    let object = ztensor::manifest_of(&shard)
+    let object = ztensor::read::manifest_of(&shard)
         .unwrap()
         .unwrap()
         .object("w")
@@ -145,7 +145,7 @@ fn different_models_differ() {
 #[test]
 fn a_part_without_a_digest_has_no_content_digest() {
     use xxhash_rust::xxh3::xxh3_64;
-    use ztensor::cbor::{self, Value};
+    use ztensor::format::cbor::{self, Value};
 
     let text = |s: &str| Value::Text(s.to_string());
     let manifest = Value::Map(vec![(
@@ -173,19 +173,19 @@ fn a_part_without_a_digest_has_no_content_digest() {
     )]);
     let encoded = cbor::encode(&manifest).unwrap();
     let mut bytes = vec![0u8; 8192];
-    bytes[..8].copy_from_slice(&ztensor::MAGIC);
+    bytes[..8].copy_from_slice(&ztensor::format::MAGIC);
     bytes.extend_from_slice(&encoded);
     let mut footer = [0u8; 40];
     footer[0..8].copy_from_slice(&8192u64.to_le_bytes());
     footer[8..16].copy_from_slice(&(encoded.len() as u64).to_le_bytes());
     footer[16..24].copy_from_slice(&xxh3_64(&encoded).to_le_bytes());
     footer[24..28].copy_from_slice(&2u32.to_le_bytes());
-    footer[32..40].copy_from_slice(&ztensor::MAGIC);
+    footer[32..40].copy_from_slice(&ztensor::format::MAGIC);
     bytes.extend_from_slice(&footer);
     let path = tmp("cd-nodigest.zt");
     std::fs::write(&path, &bytes).unwrap();
 
-    let manifest = ztensor::manifest_of(&path).unwrap().unwrap();
+    let manifest = ztensor::read::manifest_of(&path).unwrap().unwrap();
     let err = manifest
         .content_digest(DigestAlgorithm::Sha256)
         .unwrap_err();

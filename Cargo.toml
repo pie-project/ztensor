@@ -15,8 +15,8 @@ repository = "https://github.com/pie-project/ztensor"
 # and no path dependency can go out without a version requirement, which
 # is what `cargo package` refuses to do.
 [workspace.dependencies]
-ztensor = { version = "2.0.0", path = "ztensor" }
-ztensor-compat = { version = "2.0.0", path = "ztensor-compat" }
+ztensor = { version = "2.1.0", path = "ztensor" }
+ztensor-compat = { version = "2.1.0", path = "ztensor-compat" }
 
 [profile.release]
 lto = "fat"

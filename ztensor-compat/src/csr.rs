@@ -1,13 +1,13 @@
 //! Assembling a `zt.sparse_csr/1` object.
 //!
-//! Deliberately outside the reader: a layout profile is registry vocabulary,
-//! so the one this implementation happens to ship gets a module, not a method
-//! on [`Tensor`]. A profile added downstream can live exactly here, in its own
-//! crate, with the same shape.
+//! Outside the core crate, and outside the reader, because a layout profile is
+//! registry vocabulary: L2 is open by design, so the one layout this
+//! implementation happens to understand cannot be a method on [`Tensor`] or a
+//! module of a crate whose thesis is that layouts are not its business. It
+//! lives here, beside the foreign-format projections, and a profile added
+//! downstream lives in its own crate with exactly this shape.
 
-use crate::error::{Error, Result, Rule};
-use crate::schema::DType;
-use crate::source::Tensor;
+use ztensor::{DType, Error, Result, Rule, Tensor};
 
 /// An assembled CSR object with its data-level rules checked.
 #[derive(Debug, Clone)]

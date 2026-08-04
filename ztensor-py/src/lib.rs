@@ -74,13 +74,13 @@ impl Source {
     }
 
     fn __contains__(&self, name: &str) -> PyResult<bool> {
-        Ok(self.get()?.contains(name))
+        Ok(self.get()?.get(name).is_some())
     }
 
     fn __getitem__(slf: Bound<'_, Self>, name: &str) -> PyResult<Tensor> {
         {
             let this = slf.borrow();
-            if !this.get()?.contains(name) {
+            if this.get()?.get(name).is_none() {
                 return Err(PyKeyError::new_err(name.to_string()));
             }
         }
@@ -128,7 +128,7 @@ impl Source {
     /// True for a `.zt` data shard: a container with no manifest.
     #[getter]
     fn is_data_shard(&self) -> PyResult<bool> {
-        Ok(self.get()?.is_data_shard())
+        Ok(self.get()?.provenance() == ztensor::Provenance::DataShard)
     }
 
     /// Verifies every part of every tensor. Returns `(checked, undigested)`.
@@ -843,8 +843,11 @@ impl Location {
     }
 }
 
-fn value_to_py<'py>(py: Python<'py>, v: &ztensor::cbor::Value) -> PyResult<Bound<'py, PyAny>> {
-    use ztensor::cbor::Value as V;
+fn value_to_py<'py>(
+    py: Python<'py>,
+    v: &ztensor::format::cbor::Value,
+) -> PyResult<Bound<'py, PyAny>> {
+    use ztensor::format::cbor::Value as V;
     Ok(match v {
         V::Uint(n) => n.into_pyobject(py)?.into_any(),
         V::Nint(n) => (-1i128 - *n as i128).into_pyobject(py)?.into_any(),
@@ -870,8 +873,8 @@ fn value_to_py<'py>(py: Python<'py>, v: &ztensor::cbor::Value) -> PyResult<Bound
     })
 }
 
-fn py_to_value(v: &Bound<'_, PyAny>) -> PyResult<ztensor::cbor::Value> {
-    use ztensor::cbor::Value as V;
+fn py_to_value(v: &Bound<'_, PyAny>) -> PyResult<ztensor::format::cbor::Value> {
+    use ztensor::format::cbor::Value as V;
     if v.is_none() {
         return Ok(V::Null);
     }
@@ -944,7 +947,7 @@ impl Writer {
     #[new]
     #[pyo3(signature = (path, canonical = true, align = None, publish = false))]
     fn new(path: &str, canonical: bool, align: Option<u64>, publish: bool) -> PyResult<Self> {
-        let mut options = ztensor::writer::Options::default().canonical(canonical);
+        let mut options = ztensor::write::Options::default().canonical(canonical);
         if let Some(align) = align {
             options = options.align(align);
         }
@@ -980,14 +983,20 @@ impl Writer {
             .parse()
             .map_err(|_| PyValueError::new_err(format!("unknown dtype {dtype:?}")))?;
         let writer = self.get()?;
-        let mut builder = writer.object(name).shape(shape).part("data").dtype(dtype);
-        if let Some(logical) = logical {
-            builder = builder.logical(logical);
-        }
-        if let Some(encoding) = encoding {
-            builder = builder.encoding(encoding);
-        }
-        builder.bytes(bytes).add().map_err(err)
+        writer
+            .object(name, |o| {
+                o.shape(shape).part("data", |mut p| {
+                    p = p.dtype(dtype);
+                    if let Some(logical) = logical {
+                        p = p.logical(logical);
+                    }
+                    if let Some(encoding) = encoding {
+                        p = p.encoding(encoding);
+                    }
+                    p.bytes(bytes)
+                })
+            })
+            .map_err(err)
     }
 
     /// Sets file-level attributes from a dict.
@@ -1134,7 +1143,7 @@ fn verify(path: &str, deep: bool) -> PyResult<(u64, u64)> {
 /// The OS page size.
 #[pyfunction]
 fn page_size() -> u64 {
-    ztensor::page_size()
+    ztensor::provide::page_size()
 }
 
 #[pymodule]

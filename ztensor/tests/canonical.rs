@@ -8,7 +8,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use ztensor::validate::canonical_violations;
+use ztensor::read::canonical_violations;
 use ztensor::{DType, DigestAlgorithm, Writer};
 
 fn tmp(name: &str) -> PathBuf {
@@ -137,11 +137,11 @@ fn a_data_shard_is_not_canonical() {
     let path = tmp("canon-datashard.zt");
     // Manifest-less (spec §7.2), built here because zTensor only reads these.
     let mut bytes = vec![0u8; 4160];
-    bytes[..8].copy_from_slice(&ztensor::MAGIC);
+    bytes[..8].copy_from_slice(&ztensor::format::MAGIC);
     bytes[4096..4160].copy_from_slice(&[1u8; 64]);
     let mut footer = [0u8; 40];
     footer[24..28].copy_from_slice(&2u32.to_le_bytes());
-    footer[32..40].copy_from_slice(&ztensor::MAGIC);
+    footer[32..40].copy_from_slice(&ztensor::format::MAGIC);
     bytes.extend_from_slice(&footer);
     fs::write(&path, &bytes).unwrap();
 

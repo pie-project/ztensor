@@ -1,20 +1,25 @@
 //! The `.zt` reading algorithm (spec §8) and validation summary (spec §3.6).
 //!
-//! Two entry points onto the same rules: [`crate::validate_bytes`] over a
-//! complete in-memory image, which is what the conformance corpus and the fuzz
-//! targets drive, and an internal reader over a [`Store`], which reads only the
-//! footer and the manifest blob, so opening a 100 GB checkpoint to plan
-//! against it touches two ranges, not a hundred gigabytes.
+//! Two entry points onto the same rules: [`image`] over a complete in-memory
+//! file, which is what the conformance corpus and the fuzz targets drive, and
+//! an internal one over an opened container, which reads only the footer and
+//! the manifest blob, so opening a 100 GB checkpoint to plan against it touches
+//! two ranges, not a hundred gigabytes.
+//!
+//! Canonical form (§6.3) is decided here too, as a pure function of a manifest
+//! and of where the file put things. The reader supplies both; nothing here
+//! opens a path. [`read::canonical_violations`](crate::read::canonical_violations)
+//! is the entry point that does.
 
 use xxhash_rust::xxh3::xxh3_64;
 
-use crate::cbor;
 use crate::error::{Error, Result, Rule};
-use crate::schema::{
+use crate::format::cbor;
+use crate::format::{
     check_name, check_shard_name, Manifest, ALIGN_CANONICAL, ALIGN_FLOOR, FOOTER_LEN, MAGIC,
     MAX_MANIFEST_LEN, MAX_RANK, MIN_FILE_LEN, VERSION,
 };
-use crate::store::Store;
+use crate::provide::store::Store;
 use crate::vocab::Vocabulary;
 
 /// What the footer points at. `None` where a footer describes a data shard
@@ -30,8 +35,12 @@ pub(crate) struct Footer {
 pub(crate) struct Parsed {
     pub manifest: Option<Manifest>,
     pub occupied: Vec<(u64, u64)>,
-    /// Where the manifest blob starts. `Writer::append` writes from here, so
-    /// the bytes it replaces are the ones it has just finished reading.
+    /// Where the manifest blob starts.
+    ///
+    /// `Writer::append` reads it to work out the alignment the file was
+    /// written at, and for nothing else — it writes from EOF, because §2.5
+    /// forbids moving or overwriting a byte that is already there. The old
+    /// manifest stays where it is as an unreferenced blob.
     pub manifest_at: Option<u64>,
 }
 
@@ -144,8 +153,19 @@ pub fn image(buf: &[u8], vocab: &Vocabulary) -> Result<Option<Manifest>> {
     Ok(Some(manifest))
 }
 
-/// Checks a file against canonical form (spec §6.3) and returns every rule it
-/// breaks, in rule order. An empty list means the file is canonical.
+/// Where a file put the things canonical form has an opinion about.
+///
+/// Placement is the half of canonical form that is not in the manifest, so it
+/// arrives separately and the rule walk stays a pure function of the two.
+pub(crate) struct Placement {
+    pub manifest_at: u64,
+    pub manifest_len: u64,
+    pub file_len: u64,
+}
+
+/// Checks a manifest and its placement against canonical form (spec §6.3) and
+/// returns every rule they break, in rule order. An empty list means the file
+/// is canonical.
 ///
 /// The spec calls canonical form the recommended distribution format, which is
 /// only worth saying if the receiver can tell. Nothing is stored in the file to
@@ -155,18 +175,12 @@ pub fn image(buf: &[u8], vocab: &Vocabulary) -> Result<Option<Manifest>> {
 /// Blob sharing (rule 3) is judged by digest and length rather than by
 /// comparing payloads, so two parts with the same digest are taken to have the
 /// same content. Rule 4 guarantees every part carries one.
-pub fn canonical_violations(path: impl AsRef<std::path::Path>) -> Result<Vec<String>> {
-    let store = Store::index(path.as_ref(), "zt")?;
-    let parsed = read(&store, &Vocabulary::standard())?;
-    let Some(manifest) = parsed.manifest else {
-        return Ok(vec![
-            "rule 1: a data shard carries no manifest, so it is not a canonical model".into(),
-        ]);
-    };
-    let file_len = store.len();
-    let footer = store.read(file_len - FOOTER_LEN, FOOTER_LEN)?;
-    let manifest_at = u64::from_le_bytes(footer[0..8].try_into().unwrap());
-    let manifest_len = u64::from_le_bytes(footer[8..16].try_into().unwrap());
+pub(crate) fn canonical_violations(manifest: &Manifest, at: &Placement) -> Vec<String> {
+    let Placement {
+        manifest_at,
+        manifest_len,
+        file_len,
+    } = *at;
 
     let mut bad = Vec::new();
 
@@ -180,15 +194,17 @@ pub fn canonical_violations(path: impl AsRef<std::path::Path>) -> Result<Vec<Str
     }
 
     // Rule 5. ASCII is NFC by construction, so only other names pay for this.
-    let mut not_nfc = |what: &str, name: &str| {
-        if !name.is_ascii() && !unicode_normalization::is_nfc(name) {
-            bad.push(format!("rule 5: {what} {name:?} is not in NFC"));
-        }
-    };
-    for (name, object) in &manifest.objects {
-        not_nfc("object name", name);
-        for pname in object.parts.keys() {
-            not_nfc("part name", pname);
+    {
+        let mut not_nfc = |what: &str, name: &str| {
+            if !name.is_ascii() && !unicode_normalization::is_nfc(name) {
+                bad.push(format!("rule 5: {what} {name:?} is not in NFC"));
+            }
+        };
+        for (name, object) in &manifest.objects {
+            not_nfc("object name", name);
+            for pname in object.parts.keys() {
+                not_nfc("part name", pname);
+            }
         }
     }
 
@@ -285,7 +301,7 @@ pub fn canonical_violations(path: impl AsRef<std::path::Path>) -> Result<Vec<Str
             manifest_at + manifest_len
         ));
     }
-    Ok(bad)
+    bad
 }
 
 fn align_up_canonical(offset: u64) -> Option<u64> {
@@ -294,19 +310,9 @@ fn align_up_canonical(offset: u64) -> Option<u64> {
         .map(|n| n & !(ALIGN_CANONICAL - 1))
 }
 
-/// Reads and validates one container's manifest, resolving nothing.
-///
-/// What an inspector wants: a sharded root can be listed without its shards
-/// present, because listing is a question about this file. `None` is a data
-/// shard, which has no manifest to read.
-pub fn manifest_of(path: impl AsRef<std::path::Path>) -> Result<Option<Manifest>> {
-    let store = Store::index(path.as_ref(), "zt")?;
-    Ok(read(&store, &Vocabulary::standard())?.manifest)
-}
-
 /// Opens a `.zt` store: reads the footer and the manifest blob, validates
 /// both, and reports every occupied range.
-pub(crate) fn read(store: &Store, vocab: &Vocabulary) -> Result<Parsed> {
+pub(crate) fn store(store: &Store, vocab: &Vocabulary) -> Result<Parsed> {
     let file_len = store.len();
     if file_len < MIN_FILE_LEN {
         return Err(Error::reject(

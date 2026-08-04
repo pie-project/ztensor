@@ -4,6 +4,24 @@ sidebar_position: 2
 
 # Guide
 
+## Where things live
+
+The crate's modules are the spec's layers, so a section of the specification
+and the code that implements it have the same address:
+
+| Module | What is in it |
+| --- | --- |
+| `ztensor::format` | **L0 + L1**, frozen: the magic, the footer, the alignment floor, the manifest schema, its CBOR mapping, and the rules that decide conformance and canonical form. Nothing here opens a file. |
+| `ztensor::vocab` | **L2**, open: layouts, logical types and encodings, which another crate can extend. |
+| `ztensor::read` | Opening `.zt` and getting at bytes. |
+| `ztensor::write` | Producing `.zt`. |
+| `ztensor::provide` | For a crate projecting a *foreign* format into a `Source`. Reading a checkpoint needs nothing from it. |
+
+The names a consumer actually uses are re-exported at the crate root, and only
+those — `Source`, `Tensor`, `Part`, `Writer`, `DType` and about a dozen more.
+The format constants, the shard resolvers and the projection machinery keep
+their module paths, so that what you see first is what you are likely to want.
+
 ## Reading
 
 `open` detects the format and returns a [`Source`]. The same type comes back
@@ -79,17 +97,23 @@ that survives being re-aligned or split, see the content digest below.
 ### Building anything else
 
 `add` is a shorthand for `object`, which builds everything else: several
-parts, a layout profile, attributes, or a part streamed a chunk at a time.
+parts, a layout profile, or attributes.
 
 ```rust
-w.object("q")
-    .shape([4096u64, 4096])
-    .layout("zt.quant_group/1")
-    .attr("group_size", 128u64)
-    .part("data").dtype(DType::U8).bytes(&payload)
-    .part("scales").dtype(DType::U8).logical("f8_e8m0").bytes(&scales)
-    .add()?;
+w.object("q", |o| {
+    o.shape([4096u64, 4096])
+        .layout("zt.quant_group/1")
+        .attr("group_size", 128u64)
+        .part("data", |p| p.dtype(DType::U8).bytes(&payload))
+        .part("scales", |p| p.dtype(DType::U8).logical("f8_e8m0").bytes(&scales))
+})?;
 ```
+
+Each part is described inside its own scope. That is what makes `.dtype()`
+before there is a part to apply it to a compile error rather than something
+found out when the object is added. The cost is that a description borrows its
+bytes, so a payload built inline — `.bytes(&encode(x))` — has to be bound to a
+local first.
 
 ### Leaving canonical form
 
@@ -179,7 +203,7 @@ It is computed from the manifest alone, so it costs nothing on a 100 GB
 checkpoint, and it is the same whether the model is one file or fifty.
 
 ```rust
-let digest = ztensor::manifest_of("model.zt")?
+let digest = ztensor::read::manifest_of("model.zt")?
     .unwrap()
     .content_digest(ztensor::DigestAlgorithm::Sha256)?;
 ```
@@ -244,7 +268,7 @@ let id = ztensor::shard_identity("model-00001.zt", DigestAlgorithm::Sha256)?;
 
 let mut root = Writer::options().canonical(false).create("model.zt")?;
 root.add_shard("00001", &id)?;
-for (name, object) in &ztensor::manifest_of("model-00001.zt")?.unwrap().objects {
+for (name, object) in &ztensor::read::manifest_of("model-00001.zt")?.unwrap().objects {
     root.link(name, object, "00001")?;
 }
 root.finish()?;
@@ -268,7 +292,7 @@ A resolver turns a shard name into a file. It can also ignore the name:
 ```rust
 // Match on size and digest instead, which still works after a rename.
 let model = ztensor::Source::options()
-    .resolver(ztensor::DirectoryResolver::scan("checkpoint/")?)
+    .resolver(ztensor::read::DirectoryResolver::scan("checkpoint/")?)
     .open("checkpoint/model.zt")?;
 ```
 
@@ -280,10 +304,10 @@ model's tensors.
 
 ```rust
 let base = ztensor::Source::open("base.zt")?;
-let object = base.manifest().unwrap().object("base.weight")?.clone();
+let object = base.provenance().root().unwrap().object("base.weight")?.clone();
 
 let mut w = ztensor::Writer::options().canonical(false).align(4096).create("lora.zt")?;
-w.add_shard("base", &ztensor::shard_identity("base.zt")?)?;
+w.add_shard("base", &ztensor::shard_identity("base.zt", DigestAlgorithm::Xxh3)?)?;
 w.link("base.weight", &object, "base")?;
 w.add("base.weight.lora_a", [64u64], DType::F32, &delta)?;
 w.finish()?;
@@ -313,6 +337,22 @@ The only thing tying the set together is the caller's list, so there is
 nothing to verify it against. What `open_all` does check is that no tensor
 name appears in two files.
 
+### Asking which of the three you have
+
+The difference between a root, a data shard and a projection is what can be
+verified, so it is one answer rather than two half-questions:
+
+```rust
+match src.provenance() {
+    Provenance::Root(manifest) => { /* the file states its own structure */ }
+    Provenance::DataShard      => { /* bytes only; it claims nothing */ }
+    Provenance::Projection     => { /* whoever opened it made the claim */ }
+}
+```
+
+`src.provenance().root()` is the shorthand for code that already knows it
+opened a `.zt` root and only wants the manifest.
+
 ## Streaming weights
 
 For canonical files, each tensor owns its pages, so they can be released
@@ -327,7 +367,33 @@ t.evict()?;      // MADV_DONTNEED, exact range
 ```
 
 `evict` refuses when a part shares a page with another blob, so it will not
-drop a neighbour's cache.
+drop a neighbour's cache. It is present on every platform and refused where
+there is no way to drop page cache, so `if caps.evict { t.evict()? }` compiles
+everywhere.
+
+### Writing a tensor that will not fit in memory
+
+`stream` declares an object by part lengths and hands back a `Sink`, which is
+a token rather than a borrow of the writer — that is what lets a producer
+driven from outside (one copying weights off a device, say) hold both in one
+structure.
+
+```rust
+let mut sink = w.stream("w", |o| {
+    o.shape([n]).part("data", |p| p.dtype(DType::F16).length(nbytes))
+})?;
+
+for chunk in chunks { sink.write(&mut w, chunk)?; }
+sink.close(&mut w)?;
+```
+
+When the bytes come from somewhere that already speaks `io::Write`, borrow the
+pair together instead, and the compiler is what stops the writer being used for
+anything else while the object is open:
+
+```rust
+std::io::copy(&mut reader, &mut sink.attach(&mut w))?;
+```
 
 ## Python
 

@@ -112,7 +112,7 @@ fn an_append_keeps_the_files_alignment() {
     for name in ["a", "b", "c"] {
         let at = src.tensor(name).unwrap().locate().unwrap();
         assert_eq!(
-            at.offset % ztensor::ALIGN_CANONICAL,
+            at.offset % ztensor::format::ALIGN_CANONICAL,
             0,
             "{name} landed at {}, off the file's 64 KiB grid",
             at.offset
@@ -161,7 +161,7 @@ fn the_footer_still_ends_the_file() {
     let bytes = fs::read(&path).unwrap();
     assert_eq!(
         &bytes[bytes.len() - 8..],
-        &ztensor::MAGIC,
+        &ztensor::format::MAGIC,
         "the footer must end the file"
     );
     let src = Source::open(&path).unwrap();
@@ -200,7 +200,7 @@ fn a_shard_can_be_added_to_a_finished_file() {
         .unwrap();
     w.finish().unwrap();
     let id = shard_identity(&shard, DigestAlgorithm::Xxh3).unwrap();
-    let object = ztensor::validate::manifest_of(&shard)
+    let object = ztensor::read::manifest_of(&shard)
         .unwrap()
         .unwrap()
         .object("borrowed")
@@ -266,11 +266,11 @@ fn a_data_shard_has_nothing_to_append_to() {
     // Manifest-less (spec §7.2). zTensor reads these but does not write them,
     // so the test builds one the way another producer would.
     let mut bytes = vec![0u8; 4160];
-    bytes[..8].copy_from_slice(&ztensor::MAGIC);
+    bytes[..8].copy_from_slice(&ztensor::format::MAGIC);
     bytes[4096..4160].copy_from_slice(&[1u8; 64]);
     let mut footer = [0u8; 40];
     footer[24..28].copy_from_slice(&2u32.to_le_bytes());
-    footer[32..40].copy_from_slice(&ztensor::MAGIC);
+    footer[32..40].copy_from_slice(&ztensor::format::MAGIC);
     bytes.extend_from_slice(&footer);
     fs::write(&path, &bytes).unwrap();
 

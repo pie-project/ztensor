@@ -216,28 +216,40 @@ impl Store {
     /// The caller is responsible for exclusivity; [`Source`](crate::Source)
     /// checks [`page_exclusive`](Self::page_exclusive) first, which is the
     /// same predicate `Caps::evict` reports.
-    #[cfg(unix)]
+    ///
+    /// Present on every target and refused where there is no way to do it, so
+    /// that a caller does not have to `#[cfg]` around the call.
     pub fn evict(&self, offset: u64, len: u64) -> Result<()> {
         let (_, _) = self.bounded(offset, len)?;
-        let Some(map) = &self.map else {
-            return Ok(());
-        };
-        if len == 0 {
-            return Ok(());
+        #[cfg(not(unix))]
+        {
+            let _ = (offset, len);
+            return Err(Error::Unsupported(
+                "dropping page cache is a unix facility".into(),
+            ));
         }
-        let (start, end) = page_envelope(offset, len, page_size());
-        let end = end.min(map.len() as u64);
-        // SAFETY: the map is a read-only shared file mapping, so DontNeed only
-        // drops clean page-cache pages; later accesses re-fault from the file.
-        // It cannot discard writes because none exist.
-        unsafe {
-            map.unchecked_advise_range(
-                memmap2::UncheckedAdvice::DontNeed,
-                start as usize,
-                (end - start) as usize,
-            )?;
+        #[cfg(unix)]
+        {
+            let Some(map) = &self.map else {
+                return Ok(());
+            };
+            if len == 0 {
+                return Ok(());
+            }
+            let (start, end) = page_envelope(offset, len, page_size());
+            let end = end.min(map.len() as u64);
+            // SAFETY: the map is a read-only shared file mapping, so DontNeed
+            // only drops clean page-cache pages; later accesses re-fault from
+            // the file. It cannot discard writes because none exist.
+            unsafe {
+                map.unchecked_advise_range(
+                    memmap2::UncheckedAdvice::DontNeed,
+                    start as usize,
+                    (end - start) as usize,
+                )?;
+            }
+            Ok(())
         }
-        Ok(())
     }
 }
 

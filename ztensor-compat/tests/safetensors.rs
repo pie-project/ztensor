@@ -181,7 +181,7 @@ fn convert_to_canonical_zt() {
     // digest to verify against, and (on <=64K page hosts) pages of its own.
     let caps = r.tensor("a.weight").unwrap().caps().unwrap();
     assert!(caps.verify && caps.map && caps.locate);
-    if ztensor::page_size() <= ztensor::ALIGN_CANONICAL {
+    if ztensor::provide::page_size() <= ztensor::format::ALIGN_CANONICAL {
         assert!(caps.evict);
     }
 }

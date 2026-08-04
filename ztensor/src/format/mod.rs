@@ -1,21 +1,35 @@
-//! What a `.zt` file literally says: the L1 manifest and its CBOR mapping.
+//! The frozen layers: L0 container and L1 manifest.
+//!
+//! This is the half of zTensor that a `.zt` file is, as opposed to the half
+//! that reads or writes one. The container frame (magic, footer, the alignment
+//! floor), the manifest schema and its CBOR mapping, the twelve storage types,
+//! and the rules that decide whether bytes are a conforming file — spec §2, §3
+//! and §6.3 — all live here and nowhere else.
+//!
+//! Nothing in this module opens a file or knows what a mapping is. That is
+//! deliberate: these are the definitions a second implementation would have to
+//! agree with, so they are kept where nothing about *this* implementation can
+//! leak into them.
 //!
 //! Everything here is the on-disk structure, unresolved. A [`BlobRef`]'s
-//! `shard` indexes *this file's* shard table, and an offset means an offset
-//! into whichever file that index names. The manifest is a claim about one
+//! `shard` names *this file's* shard table, and an offset means an offset into
+//! whichever file that name resolves to. The manifest is a claim about one
 //! container, not an address a consumer can use directly.
 //!
-//! Turning those claims into addresses is [`Catalog`](crate::Catalog)'s job,
-//! and it is the reason the two are different types: a catalog can span files
-//! that never heard of each other, which no single manifest could honestly
-//! describe.
+//! Turning those claims into addresses is
+//! [`Catalog`](crate::provide::Catalog)'s job, and it is the reason the two are
+//! different types: a catalog can span files that never heard of each other,
+//! which no single manifest could honestly describe.
 //!
 //! Foreign formats never build a `Manifest`. They never had one.
 
+pub mod cbor;
+pub mod validate;
+
 use std::collections::BTreeMap;
 
-use crate::cbor::Value;
 use crate::error::{Error, Result, Rule};
+use crate::format::cbor::Value;
 
 /// Magic bytes at offset 0 and at the end of the footer (spec §2.2).
 pub const MAGIC: [u8; 8] = [0x89, b'Z', b'T', b'2', 0x0d, 0x0a, 0x1a, 0x0a];
@@ -269,7 +283,7 @@ impl Manifest {
             objects.push((text(name), Value::Map(fields)));
         }
         let value = Value::Array(vec![text("zt.content/1"), Value::Map(objects)]);
-        Ok(algo.digest(&crate::cbor::encode(&value)?))
+        Ok(algo.digest(&crate::format::cbor::encode(&value)?))
     }
 }
 

@@ -104,8 +104,12 @@ fn capabilities_are_the_holding_file_s() {
 fn a_merged_set_has_no_manifest() {
     let a = file("merge-manifest-a.zt", "a", &[1u8; 8]);
     let b = file("merge-manifest-b.zt", "b", &[2u8; 8]);
-    assert!(Source::open(&a).unwrap().manifest().is_some());
-    assert!(Source::open_all(&[a, b]).unwrap().manifest().is_none());
+    assert!(Source::open(&a).unwrap().provenance().root().is_some());
+    assert!(Source::open_all(&[a, b])
+        .unwrap()
+        .provenance()
+        .root()
+        .is_none());
 }
 
 #[test]

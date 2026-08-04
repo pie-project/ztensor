@@ -14,9 +14,10 @@
 
 use std::collections::BTreeMap;
 
-use ztensor::catalog::{Entry, Location, PartEntry, Payload};
-use ztensor::cbor::Value;
-use ztensor::{Catalog, DType, Error, Result, Store, StoreId};
+use ztensor::format::cbor::Value;
+use ztensor::provide::Catalog;
+use ztensor::provide::{Entry, Location, PartEntry, Payload};
+use ztensor::{DType, Error, Result, Store, StoreId};
 
 use crate::project::Projection;
 

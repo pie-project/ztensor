@@ -9,7 +9,7 @@ use std::env;
 use std::fs;
 
 use xxhash_rust::xxh3::xxh3_64;
-use ztensor::cbor::{self, Value};
+use ztensor::format::cbor::{self, Value};
 
 fn main() {
     let path = env::args().nth(1).expect("usage: minimal_reader <file.zt>");

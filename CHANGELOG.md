@@ -8,6 +8,13 @@ spec **Draft 4**.
 
 ## 2.1.0
 
+A rewrite of the crate's surface, and a format addition. The container is
+unchanged: every `.zt` file keeps its meaning, and what moved is where the
+names live and who does the checking.
+
+The API breaks, which would ordinarily be a major bump. It is not one because
+2.0.0 has no users to break — this is the shape the crate goes out in.
+
 ### Format (spec Draft 4)
 
 - **A content digest** (§6.4). The whole-file hash of a canonical file
@@ -26,6 +33,59 @@ spec **Draft 4**.
   This is also why a canonical multi-file profile stays deferred. The reason
   to pin a shard-partition policy was to keep identity stable across splits,
   and identity is now stable without one.
+
+### Changed
+
+- **The modules are the spec's layers.** `format` is L0 + L1, frozen, and
+  opens no file: the magic, the footer, the alignment floor, the manifest
+  schema, its CBOR mapping, and the rules that decide conformance and
+  canonical form. `vocab` is L2. `read` and `write` are what this
+  implementation does with them, and `provide` is the face turned towards a
+  crate projecting a foreign format. A spec section and the code that
+  implements it now have the same address, and the dependency direction says
+  which half a second implementation would have to agree with.
+
+- **Twenty-two names at the crate root, from forty-seven.** What a consumer
+  uses is re-exported and nothing else is: the ten format constants,
+  `check_shard_name`, `BlobRef`, the four shard resolvers, and the projection
+  types keep their module paths. `Store`, `StoreId` and `Location` stay at the
+  root, because a consumer planning its own I/O has to know which file a
+  tensor is in — that is the reader's business, not just a provider's.
+
+- **Object descriptions are scoped.** `Writer::object` and `Writer::stream`
+  take a closure, and each part is described inside another:
+
+  ```rust
+  w.object("q", |o| {
+      o.shape([4096u64, 4096])
+          .layout("zt.quant_group/1")
+          .part("data", |p| p.dtype(DType::U8).bytes(&payload))
+          .part("scales", |p| p.dtype(DType::U8).logical("f8_e8m0").bytes(&scales))
+  })?;
+  ```
+
+  A part setter with no part to apply to was an error discovered when the
+  object was added, and is now a thing that cannot be written. The builder is
+  a plain description with no writer behind it, so the deferred-error field
+  and the "applies to the most recently named part" bookkeeping are both gone.
+  The cost is that a description borrows its bytes: a payload built inline has
+  to be bound to a local first.
+
+- **`Source::provenance`** replaces `manifest()` and `is_data_shard()`. Those
+  were two partial views of one three-way fact — a `.zt` root, a data shard
+  (§7.2), or a projection — which differ in *what can be verified*, so a
+  consumer deciding how far to trust a checkpoint reads one answer.
+  `provenance().root()` is the shorthand for code that already knows.
+
+- **`Tensor::verify` verifies every part**, and `verify_all` is gone. A
+  quantized tensor's bytes include its scales, so checking only `"data"`
+  passed a tensor whose scales had rotted. One part at a time is
+  `tensor.part(name)?.verify()`.
+
+- **`zt.sparse_csr/1` assembly moved to `ztensor-compat`.** L2 is open and
+  registry-managed by design, which a core module for exactly one layout
+  contradicted. It is now the first layout profile living outside the core
+  crate, which is where a profile added downstream would live.
 
 ### Added
 
@@ -52,7 +112,7 @@ spec **Draft 4**.
 
 - **`Manifest::content_digest`** and **`zt id`**, computing the digest above.
 
-- **`validate::canonical_violations`** and **`zt verify --canonical`** decide
+- **`read::canonical_violations`** and **`zt verify --canonical`** decide
   whether a file is in canonical form and name every rule it breaks. The spec
   calls canonical form the recommended distribution format, which is only
   worth saying if the receiver can tell; nothing is stored in a file to say
@@ -67,6 +127,13 @@ spec **Draft 4**.
 
   `shard_identity` now takes the algorithm, rather than there being two
   functions for one operation. The choice is a real one and worth spelling.
+
+- **`Sink::attach`** borrows a sink and its writer together as an
+  `io::Write`, so a streamed part can be fed by `io::copy`, a `BufWriter` or
+  an encoder. `Sink::write` stays: it takes the writer per call, which is what
+  lets a producer driven from outside own both, and no borrow can express
+  that. For the duration of an `attach`, the compiler rather than the sink's
+  ticket is what stops the writer being used for anything else.
 
 ### Fixed
 
@@ -90,6 +157,18 @@ spec **Draft 4**.
   was silently losing eviction on any host with pages above 4 KiB unless its
   author knew to ask for the alignment back. A non-canonical writer now
   defaults to 64 KiB like any other; `.align()` still chooses.
+
+- **`evict` did not exist off unix, but `Caps::evict` did.** The obvious
+  `if caps.evict { part.evict()? }` therefore failed to *compile* on Windows,
+  while the neighbouring `prefetch` was present everywhere and did nothing.
+  `evict` is now present everywhere too and refused where there is no way to
+  drop page cache, with `Caps::evict` reporting `false` there.
+
+- **`Source::get` scanned linearly** through a `BTreeMap`, so addressing a
+  thousand tensors by name cost a thousand scans. It needed the name as the
+  catalog stores it and had no way to ask for it; `Catalog::entry` is that
+  way. `Source::contains` is gone as `get(..).is_some()`.
+
 
 ### Removed
 

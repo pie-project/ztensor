@@ -97,7 +97,7 @@ fn ls(path: &Path) -> Result<ExitCode, Error> {
     // so `ls` still answers when the shard files are absent. Listing is a
     // question about this file alone.
     if format == "zt" {
-        let Some(manifest) = ztensor::manifest_of(path)? else {
+        let Some(manifest) = ztensor::read::manifest_of(path)? else {
             println!("{}: zt data shard (no manifest)", path.display());
             return Ok(ExitCode::SUCCESS);
         };
@@ -129,9 +129,9 @@ fn ls(path: &Path) -> Result<ExitCode, Error> {
                 "\nshards ({} expected alongside the root):",
                 manifest.shards.len()
             );
-            let resolver = ztensor::PositionalResolver::for_root(path);
+            let resolver = ztensor::read::PositionalResolver::for_root(path);
             for (name, shard) in &manifest.shards {
-                let expected = ztensor::ShardResolver::resolve(&resolver, name, shard)
+                let expected = ztensor::read::ShardResolver::resolve(&resolver, name, shard)
                     .map(|p| p.display().to_string())
                     .unwrap_or_default();
                 println!(
@@ -187,7 +187,7 @@ fn id(path: &Path) -> Result<ExitCode, Error> {
         );
         return Ok(ExitCode::FAILURE);
     }
-    let Some(manifest) = ztensor::manifest_of(path)? else {
+    let Some(manifest) = ztensor::read::manifest_of(path)? else {
         eprintln!(
             "error: {} is a data shard and describes no model",
             path.display()
@@ -229,7 +229,7 @@ fn verify(path: &Path, deep: bool, canonical: bool) -> Result<ExitCode, Error> {
     if deep {
         src.verify_shards()?;
     }
-    let shard_count = src.manifest().map(|m| m.shards.len()).unwrap_or(0);
+    let shard_count = src.provenance().root().map_or(0, |m| m.shards.len());
     println!(
         "{}: ok. {verified} part(s) digest-verified, {undigested} without digests{}{}",
         path.display(),
@@ -245,7 +245,7 @@ fn verify(path: &Path, deep: bool, canonical: bool) -> Result<ExitCode, Error> {
         // Not a failure. A non-canonical file is fully conforming (§6.3); the
         // question this answers is whether you were handed the recommended
         // distribution form, which is a different question from "is it valid".
-        let bad = ztensor::validate::canonical_violations(path)?;
+        let bad = ztensor::read::canonical_violations(path)?;
         if bad.is_empty() {
             println!("  canonical form: yes");
         } else {
@@ -290,7 +290,7 @@ fn diff(a_path: &Path, b_path: &Path) -> Result<ExitCode, Error> {
     let mut changed = 0u64;
 
     for name in b.names() {
-        if !a.contains(name) {
+        if a.get(name).is_none() {
             println!("+ {name}");
             added += 1;
         }

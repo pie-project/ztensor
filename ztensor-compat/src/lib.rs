@@ -1,7 +1,8 @@
-//! Foreign tensor formats, projected into the zTensor object model.
+//! Foreign tensor formats, projected into the zTensor object model — and the
+//! layout profiles that assemble an object once it is read.
 //!
-//! Every format here builds a [`Catalog`](ztensor::Catalog) of names, shapes,
-//! types and byte locations, then hands back an ordinary
+//! Every format here builds a [`Catalog`](ztensor::provide::Catalog) of names,
+//! shapes, types and byte locations, then hands back an ordinary
 //! [`Source`](ztensor::Source). There is no per-format type in the public API,
 //! because after projection there is nothing per-format left to say:
 //!
@@ -22,6 +23,8 @@
 //! 4096 floor, page exclusivity, digests) hold only for `.zt` files. To
 //! upgrade a foreign checkpoint, convert it: `Writer::ingest` copies any
 //! source into a canonical `.zt` file.
+
+pub mod csr;
 
 mod detect;
 mod project;

@@ -12,8 +12,11 @@ use std::fs;
 use std::path::PathBuf;
 
 use xxhash_rust::xxh3::xxh3_64;
-use ztensor::cbor::Value;
-use ztensor::{cbor, page_size, DType, Error, Source, Verified, Writer, ALIGN_CANONICAL, MAGIC};
+use ztensor::format::cbor;
+use ztensor::format::cbor::Value;
+use ztensor::format::{ALIGN_CANONICAL, MAGIC};
+use ztensor::provide::page_size;
+use ztensor::{DType, Error, Source, Verified, Writer};
 
 fn tmp(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name)
@@ -149,7 +152,7 @@ fn an_absent_tensor_is_not_found() {
     let src = Source::open(canonical_file("nf.zt")).unwrap();
     assert!(matches!(src.tensor("nope"), Err(Error::NotFound(_))));
     assert!(src.get("nope").is_none());
-    assert!(src.contains("a.weight"));
+    assert!(src.get("a.weight").is_some());
 }
 
 /// Hand-assembles a file whose single part carries no digest. The writer
@@ -225,4 +228,77 @@ fn a_source_can_be_shared_between_threads() {
     for handle in handles {
         handle.join().unwrap();
     }
+}
+
+/// Verifying a tensor covers every part, and says so honestly when there is
+/// nothing to cover.
+///
+/// `verify` used to check only `"data"`, which passed a quantized tensor whose
+/// scales had rotted. Checking every part introduces the opposite trap: a
+/// tensor with no parts has no failing part either, and an "all of them
+/// passed" answer over an empty set claims a verification that never happened.
+#[test]
+fn verifying_a_tensor_covers_every_part() {
+    use ztensor::provide::{Catalog, Entry, Store};
+
+    let path = tmp("verify-all-parts.zt");
+    let mut w = Writer::options()
+        .canonical(false)
+        .align(4096)
+        .create(&path)
+        .unwrap();
+    w.object("q", |o| {
+        o.shape([64u64])
+            .layout("zt.mx/1")
+            .attr("block_size", 32u64)
+            .part("data", |p| {
+                p.dtype(DType::U8).logical("f4_e2m1").bytes(&[0xabu8; 32])
+            })
+            .part("scales", |p| {
+                p.dtype(DType::U8).logical("f8_e8m0").bytes(&[7u8; 2])
+            })
+    })
+    .unwrap();
+    w.finish().unwrap();
+
+    // Intact: every part carries a digest, so every part was checked.
+    let src = Source::open(&path).unwrap();
+    assert_eq!(src.tensor("q").unwrap().verify().unwrap(), Verified::Digest);
+
+    // Corrupt only the *scales*. Checking `"data"` alone would still pass.
+    let scales_at = src
+        .tensor("q")
+        .unwrap()
+        .part("scales")
+        .unwrap()
+        .locate()
+        .unwrap();
+    drop(src);
+    let mut raw = std::fs::read(&path).unwrap();
+    raw[scales_at.offset as usize] ^= 0xff;
+    std::fs::write(&path, &raw).unwrap();
+
+    let src = Source::open(&path).unwrap();
+    let err = src.tensor("q").unwrap().verify().unwrap_err();
+    assert_eq!(err.rule(), Some(ztensor::Rule::Digest), "{err}");
+    assert!(format!("{err}").contains("scales"), "{err}");
+
+    // A tensor with no parts has nothing to vouch for, and must not claim it.
+    let mut catalog = Catalog::new();
+    catalog.insert(
+        "empty",
+        Entry {
+            shape: vec![],
+            layout: "dense".into(),
+            attributes: None,
+            parts: Default::default(),
+        },
+    );
+    let store = Store::index(&path, "zt").unwrap();
+    let projected = Source::from_parts(vec![store], catalog).unwrap();
+    assert_eq!(
+        projected.tensor("empty").unwrap().verify().unwrap(),
+        Verified::NoDigest,
+        "a tensor with no parts must not report a digest was checked"
+    );
 }

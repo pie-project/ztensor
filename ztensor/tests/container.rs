@@ -5,8 +5,10 @@ use std::fs;
 use std::path::PathBuf;
 
 use xxhash_rust::xxh3::xxh3_64;
-use ztensor::cbor::Value;
-use ztensor::{cbor, DType, Error, Rule, Source, Verified, Writer, ALIGN_CANONICAL, MAGIC};
+use ztensor::format::cbor;
+use ztensor::format::cbor::Value;
+use ztensor::format::{ALIGN_CANONICAL, MAGIC};
+use ztensor::{DType, Error, Rule, Source, Verified, Writer};
 
 fn tmp(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name)
@@ -30,7 +32,7 @@ fn roundtrip_dense() {
     w.finish().unwrap();
 
     let src = Source::open(&path).unwrap();
-    assert!(!src.is_data_shard());
+    assert!(matches!(src.provenance(), ztensor::Provenance::Root(_)));
     assert_eq!(src.len(), 3);
     assert_eq!(src.tensor("a.weight").unwrap().shape(), &[2, 3]);
     assert_eq!(src.tensor("a.weight").unwrap().map().unwrap(), &a[..]);
@@ -115,28 +117,25 @@ fn non_canonical_writes_are_reproducible_too() {
             .unwrap();
         // Deliberately unsorted, encoded, multi-part, attribute-carrying: the
         // freedoms canonical form removes are exactly what is exercised here.
-        w.object("z.later")
-            .shape([2u64, 2])
-            .attr("note", "written first")
-            .part("data")
-            .dtype(DType::F32)
-            .bytes(&f32_bytes(&[1.0, 2.0, 3.0, 4.0]))
-            .add()
-            .unwrap();
-        w.object("a.earlier")
-            .shape([64u64])
-            .layout("zt.mx/1")
-            .attr("block_size", 32u64)
-            .part("data")
-            .dtype(DType::U8)
-            .logical("f4_e2m1")
-            .bytes(&[0xabu8; 32])
-            .part("scales")
-            .dtype(DType::U8)
-            .logical("f8_e8m0")
-            .bytes(&[7u8; 2])
-            .add()
-            .unwrap();
+        let later = f32_bytes(&[1.0, 2.0, 3.0, 4.0]);
+        w.object("z.later", |o| {
+            o.shape([2u64, 2])
+                .attr("note", "written first")
+                .part("data", |p| p.dtype(DType::F32).bytes(&later))
+        })
+        .unwrap();
+        w.object("a.earlier", |o| {
+            o.shape([64u64])
+                .layout("zt.mx/1")
+                .attr("block_size", 32u64)
+                .part("data", |p| {
+                    p.dtype(DType::U8).logical("f4_e2m1").bytes(&[0xabu8; 32])
+                })
+                .part("scales", |p| {
+                    p.dtype(DType::U8).logical("f8_e8m0").bytes(&[7u8; 2])
+                })
+        })
+        .unwrap();
         w.add("shared", [2u64], DType::U8, &[9, 9]).unwrap();
         w.finish().unwrap();
     };
@@ -418,4 +417,35 @@ fn reject_unknown_dtype() {
     let m = manifest_of(vec![("a", dense_obj("f4", &[2], 4096, 1))]);
     assemble(&path, 8192, &m);
     expect_reject(&path, Rule::Schema);
+}
+
+/// `attributes()` hands over a whole map and `attr()` adds one entry; mixing
+/// them keeps both.
+///
+/// The scoped builder rebuilt this path, and the shape it replaced appended to
+/// whatever was already there. Dropping the wholesale map on the next `attr`
+/// would lose object metadata with nothing said, which for a quantized layout
+/// is the group size a reader needs to address bytes.
+#[test]
+fn a_wholesale_attribute_map_survives_a_later_attr() {
+    let path = tmp("attrs-mixed.zt");
+    let mut w = Writer::create(&path).unwrap();
+    w.object("q", |o| {
+        o.shape([4u64])
+            .attributes(cbor::map([("bits", 4u64), ("group_size", 32u64)]))
+            .attr("axis", 1u64)
+            .part("data", |p| p.dtype(DType::U8).bytes(&[0u8; 4]))
+    })
+    .unwrap();
+    w.finish().unwrap();
+
+    let src = Source::open(&path).unwrap();
+    let attrs = src.tensor("q").unwrap().attributes().unwrap().clone();
+    for (key, want) in [("bits", 4u64), ("group_size", 32), ("axis", 1)] {
+        assert_eq!(
+            attrs.get(key).and_then(cbor::Value::as_u64),
+            Some(want),
+            "{key} was lost: {attrs:?}"
+        );
+    }
 }

@@ -8,8 +8,9 @@
 
 use std::path::PathBuf;
 
+use ztensor::format as schema;
 use ztensor::vocab::Layout;
-use ztensor::{csr, schema, DType, Error, Rule, Source, Vocabulary, Writer};
+use ztensor::{DType, Error, Rule, Source, Vocabulary, Writer};
 
 fn tmp(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name)
@@ -24,61 +25,21 @@ fn f32s(vals: &[f32]) -> Vec<u8> {
 }
 
 #[test]
-fn csr_roundtrip() {
-    // [[1.0, 0, 2.0], [0, 3.0, 0]] as CSR
-    let path = tmp("csr.zt");
-    let values = f32s(&[1.0, 2.0, 3.0]);
-    let indices = le_u64s(&[0, 2, 1]);
-    let indptr = le_u64s(&[0, 2, 3]);
-
-    let mut w = Writer::create(&path).unwrap();
-    w.object("m")
-        .shape([2u64, 3])
-        .layout("zt.sparse_csr/1")
-        .part("values")
-        .dtype(DType::F32)
-        .bytes(&values)
-        .part("indices")
-        .dtype(DType::U64)
-        .bytes(&indices)
-        .part("indptr")
-        .dtype(DType::U64)
-        .bytes(&indptr)
-        .add()
-        .unwrap();
-    w.finish().unwrap();
-
-    let src = Source::open(&path).unwrap();
-    let tensor = src.tensor("m").unwrap();
-    let csr = csr::read(&tensor).unwrap();
-    assert_eq!((csr.rows, csr.cols), (2, 3));
-    assert_eq!(csr.indices, vec![0, 2, 1]);
-    assert_eq!(csr.indptr, vec![0, 2, 3]);
-    assert_eq!(csr.values, values);
-    assert_eq!(csr.dtype, DType::F32);
-    // The parts are ordinary mappable ranges too.
-    assert_eq!(tensor.part("values").unwrap().map().unwrap(), &values[..]);
-}
-
-#[test]
 fn writer_rejects_invalid_csr_metadata() {
     let path = tmp("csr-bad.zt");
     let mut w = Writer::create(&path).unwrap();
+    // A description borrows its bytes, so they have to outlive it: the payloads
+    // are bound here rather than built inline in the closure.
+    let (values, indices, indptr) = (f32s(&[1.0]), le_u64s(&[0]), le_u64s(&[0, 1]));
     // indptr holds 2 entries; rank-2 [2, 3] requires rows + 1 = 3
     let err = w
-        .object("m")
-        .shape([2u64, 3])
-        .layout("zt.sparse_csr/1")
-        .part("values")
-        .dtype(DType::F32)
-        .bytes(&f32s(&[1.0]))
-        .part("indices")
-        .dtype(DType::U64)
-        .bytes(&le_u64s(&[0]))
-        .part("indptr")
-        .dtype(DType::U64)
-        .bytes(&le_u64s(&[0, 1]))
-        .add()
+        .object("m", |o| {
+            o.shape([2u64, 3])
+                .layout("zt.sparse_csr/1")
+                .part("values", |p| p.dtype(DType::F32).bytes(&values))
+                .part("indices", |p| p.dtype(DType::U64).bytes(&indices))
+                .part("indptr", |p| p.dtype(DType::U64).bytes(&indptr))
+        })
         .unwrap_err();
     assert!(matches!(err, Error::InvalidInput(_)), "{err:?}");
 }
@@ -87,17 +48,13 @@ fn writer_rejects_invalid_csr_metadata() {
 fn an_unregistered_layout_is_written_and_stays_structural() {
     let path = tmp("custom-layout.zt");
     let mut w = Writer::create(&path).unwrap();
-    w.object("q")
-        .shape([64u64])
-        .layout("pie.custom/1")
-        .part("scales")
-        .dtype(DType::U8)
-        .bytes(&[1u8; 64])
-        .part("weights")
-        .dtype(DType::U8)
-        .bytes(&[2u8; 32])
-        .add()
-        .unwrap();
+    w.object("q", |o| {
+        o.shape([64u64])
+            .layout("pie.custom/1")
+            .part("scales", |p| p.dtype(DType::U8).bytes(&[1u8; 64]))
+            .part("weights", |p| p.dtype(DType::U8).bytes(&[2u8; 32]))
+    })
+    .unwrap();
     w.finish().unwrap();
 
     let src = Source::open(&path).unwrap();
@@ -107,7 +64,6 @@ fn an_unregistered_layout_is_written_and_stays_structural() {
         &*tensor.part("weights").unwrap().bytes().unwrap(),
         &[2u8; 32]
     );
-    assert!(matches!(csr::read(&tensor), Err(Error::Unsupported(_))));
 }
 
 // =======================================================================
@@ -142,28 +98,22 @@ fn a_registered_layout_is_checked_like_a_built_in() {
     let path = tmp("registered-layout.zt");
     let mut w = Writer::options().vocabulary(&vocab).create(&path).unwrap();
     let err = w
-        .object("q")
-        .shape([32u64])
-        .layout("pie.custom/1")
-        .part("data")
-        .dtype(DType::U8)
-        .bytes(&[1u8; 32])
-        .add()
+        .object("q", |o| {
+            o.shape([32u64])
+                .layout("pie.custom/1")
+                .part("data", |p| p.dtype(DType::U8).bytes(&[1u8; 32]))
+        })
         .unwrap_err();
     assert!(format!("{err}").contains("scales"), "{err}");
 
     // Written properly it round-trips.
-    w.object("q")
-        .shape([32u64])
-        .layout("pie.custom/1")
-        .part("data")
-        .dtype(DType::U8)
-        .bytes(&[1u8; 32])
-        .part("scales")
-        .dtype(DType::U8)
-        .bytes(&[2u8; 4])
-        .add()
-        .unwrap();
+    w.object("q", |o| {
+        o.shape([32u64])
+            .layout("pie.custom/1")
+            .part("data", |p| p.dtype(DType::U8).bytes(&[1u8; 32]))
+            .part("scales", |p| p.dtype(DType::U8).bytes(&[2u8; 4]))
+    })
+    .unwrap();
     w.finish().unwrap();
 
     // Reading with the vocabulary validates; reading without it is structural,
@@ -178,14 +128,12 @@ fn a_registered_layout_rejects_a_file_that_violates_it() {
     // Written by someone who did not have the profile...
     let path = tmp("violates-registered-layout.zt");
     let mut w = Writer::create(&path).unwrap();
-    w.object("q")
-        .shape([32u64])
-        .layout("pie.custom/1")
-        .part("data")
-        .dtype(DType::U8)
-        .bytes(&[1u8; 32])
-        .add()
-        .unwrap();
+    w.object("q", |o| {
+        o.shape([32u64])
+            .layout("pie.custom/1")
+            .part("data", |p| p.dtype(DType::U8).bytes(&[1u8; 32]))
+    })
+    .unwrap();
     w.finish().unwrap();
 
     // ...is refused by a reader that does.
@@ -220,19 +168,16 @@ mod zstd_seekable {
         let data: Vec<u8> = (0..3_000_000u32).map(|i| (i % 251) as u8).collect();
 
         let mut w = writer(&path);
-        w.object("t")
-            .shape([3_000_000u64])
-            .part("data")
-            .dtype(DType::U8)
-            .encoding(ENC)
-            .bytes(&data)
-            .add()
-            .unwrap();
+        w.object("t", |o| {
+            o.shape([3_000_000u64])
+                .part("data", |p| p.dtype(DType::U8).encoding(ENC).bytes(&data))
+        })
+        .unwrap();
         w.finish().unwrap();
 
         let src = Source::open(&path).unwrap();
         let tensor = src.tensor("t").unwrap();
-        let stored = src.manifest().unwrap().part("t", "data").unwrap();
+        let stored = src.provenance().root().unwrap().part("t", "data").unwrap();
         assert_eq!(stored.encoding.as_deref(), Some(ENC));
         assert!(stored.blob.length < data.len() as u64, "should compress");
 
@@ -252,14 +197,11 @@ mod zstd_seekable {
     fn encoded_empty_part() {
         let path = tmp("zstd-empty.zt");
         let mut w = writer(&path);
-        w.object("e")
-            .shape([0u64])
-            .part("data")
-            .dtype(DType::U8)
-            .encoding(ENC)
-            .bytes(&[])
-            .add()
-            .unwrap();
+        w.object("e", |o| {
+            o.shape([0u64])
+                .part("data", |p| p.dtype(DType::U8).encoding(ENC).bytes(&[]))
+        })
+        .unwrap();
         w.finish().unwrap();
         let src = Source::open(&path).unwrap();
         assert_eq!(&*src.tensor("e").unwrap().bytes().unwrap(), &[] as &[u8]);
@@ -270,13 +212,11 @@ mod zstd_seekable {
         let path = tmp("zstd-canonical.zt");
         let mut w = Writer::create(&path).unwrap();
         let err = w
-            .object("t")
-            .shape([4u64])
-            .part("data")
-            .dtype(DType::U8)
-            .encoding(ENC)
-            .bytes(&[1, 2, 3, 4])
-            .add()
+            .object("t", |o| {
+                o.shape([4u64]).part("data", |p| {
+                    p.dtype(DType::U8).encoding(ENC).bytes(&[1, 2, 3, 4])
+                })
+            })
             .unwrap_err();
         assert!(format!("{err}").contains("canonical(false)"), "{err}");
     }
@@ -286,14 +226,11 @@ mod zstd_seekable {
         let path = tmp("zstd-unknown-encoding.zt");
         let data = vec![9u8; 4096];
         let mut w = writer(&path);
-        w.object("t")
-            .shape([4096u64])
-            .part("data")
-            .dtype(DType::U8)
-            .encoding(ENC)
-            .bytes(&data)
-            .add()
-            .unwrap();
+        w.object("t", |o| {
+            o.shape([4096u64])
+                .part("data", |p| p.dtype(DType::U8).encoding(ENC).bytes(&data))
+        })
+        .unwrap();
         w.finish().unwrap();
 
         // A reader without the profile can open the file and see the tensor,
@@ -309,14 +246,11 @@ mod zstd_seekable {
         let path = tmp("zstd-corrupt.zt");
         let data = vec![9u8; 100_000];
         let mut w = writer(&path);
-        w.object("t")
-            .shape([100_000u64])
-            .part("data")
-            .dtype(DType::U8)
-            .encoding(ENC)
-            .bytes(&data)
-            .add()
-            .unwrap();
+        w.object("t", |o| {
+            o.shape([100_000u64])
+                .part("data", |p| p.dtype(DType::U8).encoding(ENC).bytes(&data))
+        })
+        .unwrap();
         w.finish().unwrap();
 
         // Flip a byte inside the compressed frame body.

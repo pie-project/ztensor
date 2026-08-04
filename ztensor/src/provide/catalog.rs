@@ -1,7 +1,7 @@
 //! The resolved index: names to addresses.
 //!
 //! A [`Catalog`] is what a consumer queries, and it is deliberately not a
-//! [`Manifest`](crate::schema::Manifest). A manifest is one file's own claim,
+//! [`Manifest`](crate::format::Manifest). A manifest is one file's own claim,
 //! addressed through that file's shard table. A catalog is process-local: its
 //! addresses are [`StoreId`]s, so it can span files that never heard of each
 //! other: a sharded snapshot, a mixed set, or a single foreign file, without
@@ -12,10 +12,10 @@
 
 use std::collections::BTreeMap;
 
-use crate::cbor::Value;
 use crate::error::{Error, Result, Rule};
-use crate::schema::DType;
-use crate::store::StoreId;
+use crate::format::cbor::Value;
+use crate::format::DType;
+use crate::provide::store::StoreId;
 
 /// Where a part's decoded bytes are: a range of one store.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,7 +32,7 @@ impl Location {
         if self.offset == 0 {
             // Offset zero divides by everything; report the page size rather
             // than a meaningless 2^63.
-            return crate::store::page_size();
+            return crate::provide::store::page_size();
         }
         1u64 << self.offset.trailing_zeros().min(63)
     }
@@ -184,6 +184,17 @@ impl Catalog {
 
     pub fn get(&self, name: &str) -> Option<&Entry> {
         self.entries.get(name)
+    }
+
+    /// The entry and the name as this catalog stores it.
+    ///
+    /// A reader hands out tensor handles that borrow their name from here, so
+    /// it needs the stored `&str` rather than the caller's. Without this it
+    /// would have to scan for it, which is a linear lookup in a `BTreeMap`.
+    pub fn entry(&self, name: &str) -> Option<(&str, &Entry)> {
+        self.entries
+            .get_key_value(name)
+            .map(|(k, v)| (k.as_str(), v))
     }
 
     pub fn contains(&self, name: &str) -> bool {

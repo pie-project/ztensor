@@ -38,7 +38,7 @@ pub fn detect(path: impl AsRef<Path>) -> Result<&'static str> {
     }
     let head = &head[..n];
 
-    if head.len() >= 8 && head[..8] == ztensor::MAGIC {
+    if head.len() >= 8 && head[..8] == ztensor::format::MAGIC {
         return Ok("zt");
     }
     if head.starts_with(b"GGUF") {
@@ -76,7 +76,7 @@ pub fn detect(path: impl AsRef<Path>) -> Result<&'static str> {
     )))
 }
 
-/// How to open. Mirrors [`ztensor::source::Options`], minus shard resolution:
+/// How to open. Mirrors [`ztensor::read::Options`], minus shard resolution:
 /// no foreign format has a shard table.
 #[derive(Clone, Default)]
 pub struct Open {

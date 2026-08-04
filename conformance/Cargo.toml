@@ -13,6 +13,11 @@ license.workspace = true
 ztensor = { workspace = true, features = ["zstd"] }
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
+[dev-dependencies]
+# `zt.sparse_csr/1` assembly lives with the other layout profiles, outside the
+# core crate, so the corpus reaches it through here.
+ztensor-compat = { workspace = true }
+
 [[bin]]
 name = "gen"
 path = "src/bin/gen.rs"

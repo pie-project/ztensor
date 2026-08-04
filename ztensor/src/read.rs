@@ -13,16 +13,16 @@
 //! - [`locate`](Part::locate) gives the address, so the caller can do its own
 //!   I/O with io_uring, cuFile or a staged host-to-device copy.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::catalog::{Catalog, Entry, Location, PartEntry, Payload};
-use crate::cbor::Value;
 use crate::error::{Error, Result, Rule};
-use crate::schema::{digest_matches, DType, DigestAlgorithm, Hasher, Manifest, Shard};
-use crate::store::{Store, StoreId};
-use crate::validate;
+use crate::format::cbor::Value;
+use crate::format::validate;
+use crate::format::{digest_matches, DType, DigestAlgorithm, Hasher, Manifest, Shard};
+use crate::provide::catalog::{Catalog, Entry, Location, PartEntry, Payload};
+use crate::provide::store::{Store, StoreId};
 use crate::vocab::Vocabulary;
 
 // =======================================================================
@@ -116,6 +116,41 @@ impl Verified {
     }
 }
 
+/// Where a [`Source`]'s description came from, and therefore who is making the
+/// claim that its tensors are where it says they are.
+///
+/// The three cases differ in what can be verified, so a consumer deciding how
+/// much to trust a checkpoint reads them here rather than assembling the answer
+/// out of two half-questions:
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Provenance<'a> {
+    /// A `.zt` root: the file states its own structure, hash-checked on open,
+    /// and every part may carry a digest.
+    Root(&'a Manifest),
+    /// A `.zt` data shard (spec §7.2): a container holding bytes and no
+    /// manifest. It claims nothing — not which of its bytes are occupied, not
+    /// a digest — so some other file's manifest has to address into it.
+    DataShard,
+    /// A foreign format, or several sources merged. The description was built
+    /// by whoever opened the files, so there is no manifest and nothing signed
+    /// the set: the caller's list is the only thing binding it together.
+    Projection,
+}
+
+impl<'a> Provenance<'a> {
+    /// The manifest, when this is a `.zt` root.
+    ///
+    /// A projection of [`Provenance`] rather than a second way to ask, the way
+    /// [`Verified::checked`] projects that enum: for code that already knows it
+    /// opened a root and only wants the manifest.
+    pub fn root(self) -> Option<&'a Manifest> {
+        match self {
+            Provenance::Root(manifest) => Some(manifest),
+            _ => None,
+        }
+    }
+}
+
 // =======================================================================
 // shard resolution
 // =======================================================================
@@ -191,9 +226,17 @@ pub struct DirectoryResolver {
     ///
     /// Only sizes are collected, because a digest cannot be computed until
     /// the shard being looked for says which algorithm it is in. Size is the
-    /// cheap half of the identity and narrows the field to almost always one
-    /// candidate; `resolve` hashes only that one, in the algorithm asked for.
+    /// cheap half of the identity, and free.
     by_size: BTreeMap<u64, Vec<PathBuf>>,
+    /// `(size, algorithm)` -> digest -> path, filled in the first time a shard
+    /// of that size and algorithm is looked for.
+    ///
+    /// Without this, resolving a model whose shards are all the same size —
+    /// which is what a checkpoint split at a size limit looks like — rehashes
+    /// the bucket for every shard, so an *n*-shard model is hashed O(n²)
+    /// times. Each bucket is hashed once instead, which is the least that
+    /// matching on content can cost.
+    digests: std::sync::Mutex<HashMap<(u64, DigestAlgorithm), BTreeMap<String, PathBuf>>>,
 }
 
 impl DirectoryResolver {
@@ -220,22 +263,35 @@ impl DirectoryResolver {
         for paths in by_size.values_mut() {
             paths.sort();
         }
-        Ok(Self { by_size })
+        Ok(Self {
+            by_size,
+            digests: Default::default(),
+        })
     }
 }
 
 impl ShardResolver for DirectoryResolver {
     fn resolve(&self, name: &str, shard: &Shard) -> Result<PathBuf> {
         let algo = DigestAlgorithm::of_digest(&shard.digest)?;
-        for path in self.by_size.get(&shard.size).into_iter().flatten() {
-            if shard_identity(path, algo).is_ok_and(|id| id.digest == shard.digest) {
-                return Ok(path.clone());
+        let mut cache = self.digests.lock().unwrap_or_else(|e| e.into_inner());
+        let bucket = cache.entry((shard.size, algo)).or_insert_with(|| {
+            let mut found = BTreeMap::new();
+            for path in self.by_size.get(&shard.size).into_iter().flatten() {
+                // A file of the right size that is not a readable container is
+                // simply not a shard; the miss is reported below, with the
+                // identity that was being looked for.
+                if let Ok(id) = shard_identity(path, algo) {
+                    found.entry(id.digest).or_insert_with(|| path.clone());
+                }
             }
-        }
-        Err(Error::NotFound(format!(
-            "shard {name:?} ({} bytes, {}) is not in the scanned directory",
-            shard.size, shard.digest
-        )))
+            found
+        });
+        bucket.get(&shard.digest).cloned().ok_or_else(|| {
+            Error::NotFound(format!(
+                "shard {name:?} ({} bytes, {}) is not in the scanned directory",
+                shard.size, shard.digest
+            ))
+        })
     }
 }
 
@@ -298,7 +354,7 @@ impl Options {
         let path = path.as_ref();
         let vocab = self.vocabulary_arc();
         let root = self.open_store(path, "zt")?;
-        let parsed = validate::read(&root, &vocab)?;
+        let parsed = validate::store(&root, &vocab)?;
         let root = root.with_occupied(parsed.occupied);
 
         let Some(manifest) = parsed.manifest else {
@@ -341,7 +397,7 @@ impl Options {
             }
             // The two cheap rungs of the ladder at open time: exact size, and
             // a container frame that parses. Digests are Source::verify_shards.
-            let parsed = validate::read(&store, &vocab)
+            let parsed = validate::store(&store, &vocab)
                 .map_err(|e| Error::reject(Rule::ShardIdentity, format!("shard {name:?}: {e}")))?;
             store_of.insert(name.as_str(), StoreId(stores.len() as u32));
             stores.push(store.with_occupied(parsed.occupied));
@@ -578,10 +634,6 @@ impl Source {
         self.catalog.is_empty()
     }
 
-    pub fn contains(&self, name: &str) -> bool {
-        self.catalog.contains(name)
-    }
-
     /// Tensor names, sorted, across every file of this source.
     pub fn names(&self) -> impl Iterator<Item = &str> {
         self.catalog.names()
@@ -595,13 +647,15 @@ impl Source {
         })
     }
 
+    /// One tensor by name, or [`Error::NotFound`].
     pub fn tensor(&self, name: &str) -> Result<Tensor<'_>> {
         self.get(name)
             .ok_or_else(|| Error::NotFound(format!("tensor {name:?}")))
     }
 
+    /// One tensor by name, for a caller to whom absence is not an error.
     pub fn get(&self, name: &str) -> Option<Tensor<'_>> {
-        let (name, entry) = self.catalog.iter().find(|(n, _)| *n == name)?;
+        let (name, entry) = self.catalog.entry(name)?;
         Some(Tensor {
             src: self,
             name,
@@ -614,16 +668,17 @@ impl Source {
         self.catalog.attributes()
     }
 
-    /// The root manifest, when this source is a single `.zt` root. Foreign
-    /// formats and merged sets do not have one, so they return `None`.
-    pub fn manifest(&self) -> Option<&Manifest> {
-        self.manifest.as_ref()
-    }
-
-    /// True if this is a `.zt` data shard: a container with no manifest, whose
-    /// bytes some other file addresses into (spec §7.2).
-    pub fn is_data_shard(&self) -> bool {
-        self.data_shard
+    /// Who is claiming that this source's tensors are where it says they are.
+    ///
+    /// A `.zt` root hands back its own [`Manifest`]; a data shard claims
+    /// nothing; a foreign format or a merged set was described by whoever
+    /// opened it. See [`Provenance`].
+    pub fn provenance(&self) -> Provenance<'_> {
+        match (&self.manifest, self.data_shard) {
+            (Some(manifest), _) => Provenance::Root(manifest),
+            (None, true) => Provenance::DataShard,
+            (None, false) => Provenance::Projection,
+        }
     }
 
     pub fn catalog(&self) -> &Catalog {
@@ -789,17 +844,22 @@ impl<'a> Tensor<'a> {
         Ok(self.data()?.caps())
     }
 
-    pub fn verify(&self) -> Result<Verified> {
-        self.data()?.verify()
-    }
-
-    /// Verifies every part of this tensor. Returns whether a digest was
+    /// Verifies **every** part of this tensor, and reports whether a digest was
     /// checked for all of them.
-    pub fn verify_all(&self) -> Result<Verified> {
-        let mut all = Verified::Digest;
-        for name in self.parts() {
-            if self.part(name)?.verify()? == Verified::NoDigest {
-                all = Verified::NoDigest;
+    ///
+    /// Every part, because a tensor is verified when its bytes are, and a
+    /// quantized tensor's bytes include its scales: checking only `"data"`
+    /// would pass a tensor whose scales had rotted. To check one part, ask that
+    /// part — [`part`](Self::part) then [`Part::verify`].
+    pub fn verify(&self) -> Result<Verified> {
+        // Starts at `NoDigest` so that a tensor with no parts at all — which a
+        // projection is free to build — reports that nothing was checked,
+        // rather than vacuously reporting that everything was.
+        let mut all = Verified::NoDigest;
+        for (index, name) in self.parts().enumerate() {
+            let one = self.part(name)?.verify()?;
+            if index == 0 || one == Verified::NoDigest {
+                all = one;
             }
         }
         Ok(all)
@@ -809,7 +869,6 @@ impl<'a> Tensor<'a> {
         self.data()?.prefetch()
     }
 
-    #[cfg(unix)]
     pub fn evict(&self) -> Result<()> {
         self.data()?.evict()
     }
@@ -866,7 +925,13 @@ impl<'a> Part<'a> {
         self.src.store(at.store).is_mapped().then_some(at)
     }
 
+    /// Dropping page cache is a unix facility, so on every other target this is
+    /// `None` and [`Caps::evict`] is `false` — which is the honest report, and
+    /// keeps `if caps.evict { part.evict()? }` compiling everywhere.
     fn evictable(&self) -> Option<Location> {
+        if !cfg!(unix) {
+            return None;
+        }
         let at = self.mappable()?;
         self.src
             .store(at.store)
@@ -1018,14 +1083,17 @@ impl<'a> Part<'a> {
     /// Drops these pages from the page cache.
     ///
     /// Requires page exclusivity, so this never touches a page another blob
-    /// occupies, which is what per-tensor eviction depends on.
-    #[cfg(unix)]
+    /// occupies, which is what per-tensor eviction depends on. Refused rather
+    /// than absent on a target with no way to drop page cache, so that code
+    /// guarded by [`Caps::evict`] compiles everywhere it can run.
     pub fn evict(&self) -> Result<()> {
         let at = self.evictable().ok_or_else(|| {
             Error::Unsupported(format!(
                 "{}: not evictable; {}",
                 self.label(),
-                if self.mappable().is_some() {
+                if !cfg!(unix) {
+                    "dropping page cache is a unix facility"
+                } else if self.mappable().is_some() {
                     "it shares an OS page with another blob"
                 } else {
                     "its bytes are not a mapped range"
@@ -1051,6 +1119,10 @@ impl<'a> Part<'a> {
 /// The identity of a `.zt` container: its size and whole-file digest. This is
 /// exactly what [`Writer::add_shard`](crate::Writer::add_shard) records.
 ///
+/// A read operation, though a writer is what consumes the answer: it is also
+/// what [`DirectoryResolver`] matches candidate files with, which is how a
+/// sharded model survives its files being renamed.
+///
 /// The frame is checked first, so a file that is not a container is an error
 /// rather than a digest of something else.
 ///
@@ -1060,7 +1132,7 @@ impl<'a> Part<'a> {
 /// [`DigestAlgorithm::Xxh3`] is faster and enough for a local, unsigned set.
 pub fn shard_identity(path: impl AsRef<Path>, algo: DigestAlgorithm) -> Result<Shard> {
     let store = Store::index(path.as_ref(), "zt")?;
-    validate::read(&store, &Vocabulary::shared())?;
+    validate::store(&store, &Vocabulary::shared())?;
     let mut hasher = Hasher::new(algo);
     let mut at = 0u64;
     while at < store.len() {
@@ -1072,4 +1144,43 @@ pub fn shard_identity(path: impl AsRef<Path>, algo: DigestAlgorithm) -> Result<S
         size: store.len(),
         digest: hasher.finish(),
     })
+}
+
+/// Reads and validates one container's manifest, resolving nothing.
+///
+/// What an inspector wants: a sharded root can be listed without its shards
+/// present, because listing is a question about this file. `None` is a data
+/// shard (§7.2), which has no manifest to read.
+pub fn manifest_of(path: impl AsRef<Path>) -> Result<Option<Manifest>> {
+    let store = Store::index(path.as_ref(), "zt")?;
+    Ok(validate::store(&store, &Vocabulary::standard())?.manifest)
+}
+
+/// Checks a file against canonical form (spec §6.3) and returns every rule it
+/// breaks, in rule order. An empty list means the file is canonical.
+///
+/// Canonical form is the recommended distribution format and a file carries no
+/// mark saying it is one, which is only worth saying if the receiver can tell.
+/// It can: all six rules are decidable from the bytes.
+pub fn canonical_violations(path: impl AsRef<Path>) -> Result<Vec<String>> {
+    let store = Store::index(path.as_ref(), "zt")?;
+    let parsed = validate::store(&store, &Vocabulary::standard())?;
+    let Some(manifest) = parsed.manifest else {
+        return Ok(vec![
+            "rule 1: a data shard carries no manifest, so it is not a canonical model".into(),
+        ]);
+    };
+    let file_len = store.len();
+    let footer = store.read(
+        file_len - crate::format::FOOTER_LEN,
+        crate::format::FOOTER_LEN,
+    )?;
+    Ok(validate::canonical_violations(
+        &manifest,
+        &validate::Placement {
+            manifest_at: u64::from_le_bytes(footer[0..8].try_into().unwrap()),
+            manifest_len: u64::from_le_bytes(footer[8..16].try_into().unwrap()),
+            file_len,
+        },
+    ))
 }

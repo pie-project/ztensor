@@ -19,9 +19,10 @@ use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::io::Read;
 
-use ztensor::catalog::{Entry, Location, PartEntry, Payload};
-use ztensor::cbor::Value;
-use ztensor::{Catalog, DType, Error, Opaque, Result, Store, StoreId};
+use ztensor::format::cbor::Value;
+use ztensor::provide::{Catalog, Opaque};
+use ztensor::provide::{Entry, Location, PartEntry, Payload};
+use ztensor::{DType, Error, Result, Store, StoreId};
 
 use crate::project::Projection;
 

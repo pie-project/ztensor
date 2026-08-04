@@ -46,12 +46,10 @@ fn a_streamed_object_matches_a_slice_written_one() {
         let mut w = Writer::create(&streamed).unwrap();
         for (name, bytes) in [("t.a", &a), ("t.b", &b)] {
             let mut sink = w
-                .object(name)
-                .shape([bytes.len() as u64])
-                .part("data")
-                .dtype(DType::U8)
-                .length(bytes.len() as u64)
-                .stream()
+                .stream(name, |o| {
+                    o.shape([bytes.len() as u64])
+                        .part("data", |p| p.dtype(DType::U8).length(bytes.len() as u64))
+                })
                 .unwrap();
             // Deliberately uneven chunks: the file must not depend on how the
             // producer happened to slice its copies.
@@ -88,18 +86,16 @@ fn a_multi_part_object_streams_in_name_order() {
         .create(&path)
         .unwrap();
     let mut sink = w
-        .object("w")
-        .shape([1024u64])
-        .layout("zt.mx/1")
-        .part("data")
-        .dtype(DType::U8)
-        .logical("f4_e2m1")
-        .length(512)
-        .part("scales")
-        .dtype(DType::U8)
-        .logical("f8_e8m0")
-        .length(16)
-        .stream()
+        .stream("w", |o| {
+            o.shape([1024u64])
+                .layout("zt.mx/1")
+                .part("data", |p| {
+                    p.dtype(DType::U8).logical("f4_e2m1").length(512)
+                })
+                .part("scales", |p| {
+                    p.dtype(DType::U8).logical("f8_e8m0").length(16)
+                })
+        })
         .unwrap();
 
     assert_eq!(sink.current(), Some("data"));
@@ -125,12 +121,10 @@ fn writing_past_a_declared_length_is_an_error() {
     let path = tmp("overrun.zt");
     let mut w = Writer::create(&path).unwrap();
     let mut sink = w
-        .object("t")
-        .shape([16u64])
-        .part("data")
-        .dtype(DType::U8)
-        .length(16)
-        .stream()
+        .stream("t", |o| {
+            o.shape([16u64])
+                .part("data", |p| p.dtype(DType::U8).length(16))
+        })
         .unwrap();
     sink.write(&mut w, &[0u8; 8]).unwrap();
     let err = sink.write(&mut w, &[0u8; 9]).unwrap_err();
@@ -142,12 +136,10 @@ fn closing_a_short_part_is_an_error() {
     let path = tmp("short.zt");
     let mut w = Writer::create(&path).unwrap();
     let mut sink = w
-        .object("t")
-        .shape([16u64])
-        .part("data")
-        .dtype(DType::U8)
-        .length(16)
-        .stream()
+        .stream("t", |o| {
+            o.shape([16u64])
+                .part("data", |p| p.dtype(DType::U8).length(16))
+        })
         .unwrap();
     sink.write(&mut w, &[0u8; 8]).unwrap();
     let err = sink.close(&mut w).unwrap_err();
@@ -164,12 +156,10 @@ fn nothing_else_may_be_written_while_a_stream_is_open() {
     let path = tmp("interleaved.zt");
     let mut w = Writer::create(&path).unwrap();
     let mut sink = w
-        .object("a")
-        .shape([16u64])
-        .part("data")
-        .dtype(DType::U8)
-        .length(16)
-        .stream()
+        .stream("a", |o| {
+            o.shape([16u64])
+                .part("data", |p| p.dtype(DType::U8).length(16))
+        })
         .unwrap();
 
     let err = w.add("b", [4u64], DType::U8, &[0u8; 4]).unwrap_err();
@@ -189,25 +179,19 @@ fn bytes_and_length_do_not_mix() {
     let path = tmp("mixed.zt");
     let mut w = Writer::create(&path).unwrap();
     let err = w
-        .object("t")
-        .shape([8u64])
-        .part("data")
-        .dtype(DType::U8)
-        .length(4)
-        .part("scales")
-        .dtype(DType::U8)
-        .bytes(&[1u8; 4])
-        .stream()
+        .stream("t", |o| {
+            o.shape([8u64])
+                .part("data", |p| p.dtype(DType::U8).length(4))
+                .part("scales", |p| p.dtype(DType::U8).bytes(&[1u8; 4]))
+        })
         .unwrap_err();
     assert!(matches!(err, Error::InvalidInput(_)), "{err:?}");
 
     let err = w
-        .object("t")
-        .shape([4u64])
-        .part("data")
-        .dtype(DType::U8)
-        .length(4)
-        .add()
+        .object("t", |o| {
+            o.shape([4u64])
+                .part("data", |p| p.dtype(DType::U8).length(4))
+        })
         .unwrap_err();
     assert!(format!("{err}").contains("stream"), "{err}");
 }
@@ -224,20 +208,14 @@ fn layout_rules_are_checked_before_the_first_chunk() {
         .create(&path)
         .unwrap();
     let err = w
-        .object("m")
-        .shape([2u64, 3])
-        .layout("zt.sparse_csr/1")
-        // indptr must hold rows + 1 = 3 entries; this declares 2.
-        .part("indptr")
-        .dtype(DType::U64)
-        .length(16)
-        .part("indices")
-        .dtype(DType::U64)
-        .length(24)
-        .part("values")
-        .dtype(DType::F32)
-        .length(12)
-        .stream()
+        .stream("m", |o| {
+            o.shape([2u64, 3])
+                .layout("zt.sparse_csr/1")
+                // indptr must hold rows + 1 = 3 entries; this declares 2.
+                .part("indptr", |p| p.dtype(DType::U64).length(16))
+                .part("indices", |p| p.dtype(DType::U64).length(24))
+                .part("values", |p| p.dtype(DType::F32).length(12))
+        })
         .expect_err("a malformed CSR object must be refused up front");
     assert!(matches!(err, Error::InvalidInput(_)), "{err:?}");
 }
@@ -303,11 +281,9 @@ fn closing_onto_the_wrong_writer_is_refused() {
 
 /// One eight-byte u8 part, streamed.
 fn open_sink(w: &mut Writer, name: &str) -> ztensor::Sink {
-    w.object(name)
-        .shape([8u64])
-        .part("data")
-        .dtype(DType::U8)
-        .length(8)
-        .stream()
-        .unwrap()
+    w.stream(name, |o| {
+        o.shape([8u64])
+            .part("data", |p| p.dtype(DType::U8).length(8))
+    })
+    .unwrap()
 }

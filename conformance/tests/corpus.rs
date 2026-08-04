@@ -6,7 +6,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use conformance::{all_cases, Expect, Op};
-use ztensor::{csr, validate_bytes, Error, Source, Vocabulary};
+use ztensor::format::validate::image as validate_bytes;
+use ztensor::{Error, Source, Vocabulary};
+use ztensor_compat::csr;
 
 fn tmp(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name)

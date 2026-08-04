@@ -1,16 +1,9 @@
 //! zTensor v2: an aligned, verifiable container format for tensor data.
 //!
-//! The format is specified in `spec/ztensor-v2-spec.md` (Draft 4), which
-//! separates three layers:
-//!
-//! - **L0 container** (frozen): magic, 40-byte footer, aligned blob heap.
-//! - **L1 manifest**: deterministic CBOR naming structure.
-//! - **L2 vocabulary** (mortal, registry-managed): layouts, logical types,
-//!   encodings.
-//!
-//! This crate reads and writes `.zt` with full spec validation. Foreign
-//! formats (safetensors, gguf, ...) are projections that live in the separate
-//! compat crate and arrive here as ordinary [`Source`]s.
+//! zTensor carries what can be *proved* about a checkpoint's bytes: where they
+//! are ([`Part::locate`]), whether they are intact ([`Part::verify`]), whether
+//! they can be dropped without disturbing a neighbour ([`Part::evict`]), and
+//! which model they are ([`Manifest::content_digest`]).
 //!
 //! ```no_run
 //! use ztensor::{DType, Source, Writer};
@@ -25,44 +18,54 @@
 //! # Ok::<(), ztensor::Error>(())
 //! ```
 //!
+//! # The modules are the spec's layers
+//!
+//! The format is specified in `spec/ztensor-v2-spec.md` (Draft 4), which
+//! separates three layers, and this crate is laid out to match so that a spec
+//! section and the code that implements it have the same address:
+//!
+//! - [`format`](mod@format) — **L0 container and L1 manifest**, frozen. The magic, the
+//!   40-byte footer, the alignment floor, the manifest schema and its CBOR
+//!   mapping, and the rules that decide conformance and canonical form.
+//!   Nothing here opens a file.
+//! - [`vocab`](mod@vocab) — **L2**, open and registry-managed: layouts, logical types and
+//!   encodings, which another crate can extend and which are then validated
+//!   exactly like the built-ins.
+//! - [`read`](mod@read) — opening `.zt` and getting at bytes.
+//! - [`write`](mod@write) — producing `.zt`.
+//! - [`provide`](mod@provide) — the face turned towards a crate that projects a *foreign*
+//!   format into a [`Source`]. Reading a checkpoint needs nothing from it.
+//!
+//! The names a consumer actually uses are re-exported at the crate root, and
+//! only those: the format constants, the builder types you never have to name,
+//! the shard resolvers and the projection machinery keep their module paths.
+//!
 //! # Getting bytes
 //!
 //! Three methods, one per intent: [`bytes`](Part::bytes) gives the best the
 //! source can do and says which it gave, [`map`](Part::map) insists on a
 //! borrow, and [`locate`](Part::locate) gives the address so the caller can do
-//! the I/O itself. [`Caps`] reports per part what each will do, and
-//! whose fields are named after those very methods.
+//! the I/O itself. [`Caps`] reports per part what each will do, and whose
+//! fields are named after those very methods.
 //!
 //! # Two layers of description
 //!
-//! [`schema::Manifest`] is what one `.zt` file literally says. [`Catalog`] is
-//! the resolved index a consumer queries, whose addresses are [`StoreId`]s and
-//! which can therefore span files that never heard of each other. Foreign
-//! projections build catalogs; only a `.zt` root has a manifest.
+//! [`Manifest`] is what one `.zt` file literally says. [`Catalog`](provide::Catalog)
+//! is the resolved index a consumer queries, whose addresses are [`StoreId`]s
+//! and which can therefore span files that never heard of each other. Foreign
+//! projections build catalogs; only a `.zt` root has a manifest, which is what
+//! [`Source::provenance`] reports.
 
-pub mod catalog;
-pub mod cbor;
-pub mod csr;
 mod error;
-pub mod schema;
-pub mod source;
-pub mod store;
-pub mod validate;
+pub mod format;
+pub mod provide;
+pub mod read;
 pub mod vocab;
-pub mod writer;
+pub mod write;
 
-pub use catalog::{Catalog, Entry, Location, PartEntry, Payload};
 pub use error::{Error, Result, Rule};
-pub use schema::{
-    check_shard_name, BlobRef, DType, DigestAlgorithm, Manifest, Object, Shard, ALIGN_CANONICAL,
-    ALIGN_FLOOR, FOOTER_LEN, MAGIC, MAX_MANIFEST_LEN, MAX_NAME_LEN, MAX_RANK, MAX_SHARD_NAME,
-    MIN_FILE_LEN, VERSION,
-};
-pub use source::{
-    shard_identity, Bytes, Caps, CasResolver, DirectoryResolver, Part, PositionalResolver,
-    ShardResolver, Source, Tensor, Verified,
-};
-pub use store::{page_size, Opaque, Store, StoreId};
-pub use validate::{canonical_violations, image as validate_bytes, manifest_of};
+pub use format::{DType, DigestAlgorithm, Manifest, Object, Shard};
+pub use provide::{Location, Store, StoreId};
+pub use read::{shard_identity, Bytes, Caps, Part, Provenance, Source, Tensor, Verified};
 pub use vocab::Vocabulary;
-pub use writer::{ObjectBuilder, Sink, Writer};
+pub use write::{Sink, Writer};

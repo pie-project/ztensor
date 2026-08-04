@@ -10,10 +10,10 @@ use std::fs;
 use std::path::PathBuf;
 
 use xxhash_rust::xxh3::xxh3_64;
-use ztensor::{
-    schema, shard_identity, BlobRef, DType, DigestAlgorithm, Error, Rule, Shard, ShardResolver,
-    Source, Writer,
-};
+use ztensor::format as schema;
+use ztensor::format::BlobRef;
+use ztensor::read::ShardResolver;
+use ztensor::{shard_identity, DType, DigestAlgorithm, Error, Rule, Shard, Source, Writer};
 
 fn tmp(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name)
@@ -27,12 +27,12 @@ fn tmp(name: &str) -> PathBuf {
 fn write_data_shard(path: &PathBuf, offset: u64, payload: &[u8]) {
     let end = offset as usize + payload.len();
     let mut bytes = vec![0u8; end];
-    bytes[..8].copy_from_slice(&ztensor::MAGIC);
+    bytes[..8].copy_from_slice(&ztensor::format::MAGIC);
     bytes[offset as usize..end].copy_from_slice(payload);
     let mut footer = [0u8; 40];
     // offset, length and hash stay zero: that is what makes it a data shard.
     footer[24..28].copy_from_slice(&2u32.to_le_bytes());
-    footer[32..40].copy_from_slice(&ztensor::MAGIC);
+    footer[32..40].copy_from_slice(&ztensor::format::MAGIC);
     bytes.extend_from_slice(&footer);
     fs::write(path, &bytes).unwrap();
 }
@@ -62,7 +62,8 @@ fn lora_overlay() {
     let delta = vec![7u8; 256];
     let base_source = Source::open(&base_path).unwrap();
     let base_object = base_source
-        .manifest()
+        .provenance()
+        .root()
         .unwrap()
         .object("base.weight")
         .unwrap()
@@ -108,7 +109,7 @@ fn lora_overlay() {
     // another file is as evictable as one at home.
     let caps = model.tensor("base.weight").unwrap().caps().unwrap();
     assert!(caps.map && caps.locate && caps.verify);
-    if ztensor::page_size() <= ztensor::ALIGN_CANONICAL {
+    if ztensor::provide::page_size() <= ztensor::format::ALIGN_CANONICAL {
         assert!(caps.evict, "{caps:?}");
     }
 
@@ -134,7 +135,10 @@ fn positional_shards() {
     let identity = shard_identity(&shard_path, DigestAlgorithm::Xxh3).unwrap();
 
     // The data shard alone is a valid manifest-less file.
-    assert!(Source::open(&shard_path).unwrap().is_data_shard());
+    assert_eq!(
+        Source::open(&shard_path).unwrap().provenance(),
+        ztensor::Provenance::DataShard
+    );
     assert!(Source::open(&shard_path).unwrap().is_empty());
 
     let root_path = tmp("posmodel.zt");
@@ -156,13 +160,11 @@ fn positional_shards() {
         decoded_length: None,
         digest: Some(format!("xxh3:{:016x}", xxh3_64(&payload))),
     };
-    w.object("t")
-        .shape([8192u64])
-        .part("data")
-        .dtype(DType::U8)
-        .external(part)
-        .add()
-        .unwrap();
+    w.object("t", |o| {
+        o.shape([8192u64])
+            .part("data", |p| p.dtype(DType::U8).external(part))
+    })
+    .unwrap();
     w.finish().unwrap();
 
     // The positional convention: posmodel.zt -> posmodel-00001.zt
@@ -191,7 +193,8 @@ fn shard_size_mismatch_rejected() {
     let mut identity = shard_identity(&base_path, DigestAlgorithm::Xxh3).unwrap();
     let base_object = Source::open(&base_path)
         .unwrap()
-        .manifest()
+        .provenance()
+        .root()
         .unwrap()
         .object("t")
         .unwrap()
@@ -221,7 +224,8 @@ fn shard_digest_mismatch_caught_by_deep_verify() {
     let identity = shard_identity(&base_path, DigestAlgorithm::Xxh3).unwrap();
     let base_object = Source::open(&base_path)
         .unwrap()
-        .manifest()
+        .provenance()
+        .root()
         .unwrap()
         .object("t")
         .unwrap()
@@ -292,7 +296,8 @@ fn shards_found_by_identity_after_a_rename() {
     let identity = shard_identity(&base_path, DigestAlgorithm::Xxh3).unwrap();
     let base_object = Source::open(&base_path)
         .unwrap()
-        .manifest()
+        .provenance()
+        .root()
         .unwrap()
         .object("t")
         .unwrap()
@@ -314,7 +319,7 @@ fn shards_found_by_identity_after_a_rename() {
     assert!(Source::open(&root_path).is_err(), "positional must miss it");
 
     let model = Source::options()
-        .resolver(ztensor::DirectoryResolver::scan(&dir).unwrap())
+        .resolver(ztensor::read::DirectoryResolver::scan(&dir).unwrap())
         .open(&root_path)
         .unwrap();
     assert_eq!(&*model.tensor("t").unwrap().bytes().unwrap(), &[1, 2, 3, 4]);
@@ -385,7 +390,7 @@ fn a_name_means_one_shard() {
 #[test]
 fn resolver_trait_objects() {
     // The CAS path shape (no file IO, just the mapping).
-    let cas = ztensor::CasResolver {
+    let cas = ztensor::read::CasResolver {
         store: PathBuf::from("/store"),
     };
     let shard = Shard {
@@ -445,24 +450,23 @@ fn a_sha256_shard_identity_round_trips() {
         .create(&root_path)
         .unwrap();
     w.add_shard("data", &from_writer).unwrap();
-    w.object("t")
-        .shape([4096u64])
-        .part("data")
-        .dtype(DType::U8)
-        .external(schema::Part {
-            dtype: DType::U8,
-            logical: None,
-            blob: BlobRef {
-                shard: Some("data".into()),
-                offset,
-                length: payload.len() as u64,
-            },
-            encoding: None,
-            decoded_length: None,
-            digest: None,
+    w.object("t", |o| {
+        o.shape([4096u64]).part("data", |p| {
+            p.dtype(DType::U8).external(schema::Part {
+                dtype: DType::U8,
+                logical: None,
+                blob: BlobRef {
+                    shard: Some("data".into()),
+                    offset,
+                    length: payload.len() as u64,
+                },
+                encoding: None,
+                decoded_length: None,
+                digest: None,
+            })
         })
-        .add()
-        .unwrap();
+    })
+    .unwrap();
     w.finish().unwrap();
 
     let model = open_with_shard_at(&root_path, shard_path.clone()).unwrap();
@@ -489,7 +493,7 @@ fn a_sha256_shard_identity_round_trips() {
 #[test]
 fn a_sha256_part_digest_is_verified() {
     use xxhash_rust::xxh3::xxh3_64;
-    use ztensor::cbor::{self, Value};
+    use ztensor::format::cbor::{self, Value};
     let data = vec![0xabu8; 256];
     let text = |s: &str| Value::Text(s.to_string());
 
@@ -522,7 +526,7 @@ fn a_sha256_part_digest_is_verified() {
         )]);
         let encoded = cbor::encode(&manifest).unwrap();
         let mut bytes = vec![0u8; 8192];
-        bytes[..8].copy_from_slice(&ztensor::MAGIC);
+        bytes[..8].copy_from_slice(&ztensor::format::MAGIC);
         bytes[4096..4096 + data.len()].copy_from_slice(&data);
         bytes.extend_from_slice(&encoded);
         let mut footer = [0u8; 40];
@@ -530,7 +534,7 @@ fn a_sha256_part_digest_is_verified() {
         footer[8..16].copy_from_slice(&(encoded.len() as u64).to_le_bytes());
         footer[16..24].copy_from_slice(&xxh3_64(&encoded).to_le_bytes());
         footer[24..28].copy_from_slice(&2u32.to_le_bytes());
-        footer[32..40].copy_from_slice(&ztensor::MAGIC);
+        footer[32..40].copy_from_slice(&ztensor::format::MAGIC);
         bytes.extend_from_slice(&footer);
         let path = tmp(name);
         fs::write(&path, &bytes).unwrap();
@@ -613,7 +617,7 @@ fn the_directory_resolver_matches_a_sha256_shard_table() {
     let mut w = Writer::create(&shard).unwrap();
     w.add("t", [4u64], DType::U8, &[5u8; 4]).unwrap();
     w.finish().unwrap();
-    let object = ztensor::manifest_of(&shard)
+    let object = ztensor::read::manifest_of(&shard)
         .unwrap()
         .unwrap()
         .object("t")
@@ -630,7 +634,7 @@ fn the_directory_resolver_matches_a_sha256_shard_table() {
 
         // The name in the table says nothing about the file name on disk.
         let model = Source::options()
-            .resolver(ztensor::DirectoryResolver::scan(&dir).unwrap())
+            .resolver(ztensor::read::DirectoryResolver::scan(&dir).unwrap())
             .open(&root)
             .unwrap();
         assert_eq!(
@@ -641,4 +645,74 @@ fn the_directory_resolver_matches_a_sha256_shard_table() {
         model.verify_shards().unwrap();
         fs::remove_file(&root).unwrap();
     }
+}
+
+/// Shards of the *same size* are told apart, and each candidate is hashed once.
+///
+/// This is what a real sharded checkpoint looks like: a producer splitting at a
+/// size limit emits files that are byte-for-byte the same length, so size
+/// narrows nothing and every shard's identity comes down to its digest. The
+/// resolver used to rehash the whole same-size bucket for every shard, which
+/// makes an n-shard model cost O(n^2) whole-file hashes — invisible in a test
+/// with two small files, and hours on a real checkpoint.
+#[test]
+fn equal_sized_shards_are_resolved_by_content() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("equalsize");
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+
+    // Same shape, same dtype, same tensor name: identical layout, so the two
+    // files differ only in their payload bytes and therefore only in digest.
+    let mut ids = Vec::new();
+    let mut objects = Vec::new();
+    for (index, fill) in [1u8, 2].into_iter().enumerate() {
+        let path = dir.join(format!("part-{index}.zt"));
+        let mut w = Writer::create(&path).unwrap();
+        w.add("t", [64u64], DType::U8, &[fill; 64]).unwrap();
+        w.finish().unwrap();
+        ids.push(shard_identity(&path, DigestAlgorithm::Xxh3).unwrap());
+        objects.push(
+            Source::open(&path)
+                .unwrap()
+                .provenance()
+                .root()
+                .unwrap()
+                .object("t")
+                .unwrap()
+                .clone(),
+        );
+    }
+    assert_eq!(ids[0].size, ids[1].size, "the shards must be the same size");
+    assert_ne!(ids[0].digest, ids[1].digest);
+
+    let root_path = dir.join("root.zt");
+    let mut w = Writer::options()
+        .canonical(false)
+        .align(4096)
+        .create(&root_path)
+        .unwrap();
+    for (index, id) in ids.iter().enumerate() {
+        w.add_shard(format!("s{index}"), id).unwrap();
+        w.link(format!("t{index}"), &objects[index], &format!("s{index}"))
+            .unwrap();
+    }
+    w.finish().unwrap();
+
+    // Rename both so nothing positional can help.
+    fs::rename(dir.join("part-0.zt"), dir.join("zzz.zt")).unwrap();
+    fs::rename(dir.join("part-1.zt"), dir.join("aaa.zt")).unwrap();
+
+    let model = Source::options()
+        .resolver(ztensor::read::DirectoryResolver::scan(&dir).unwrap())
+        .open(&root_path)
+        .unwrap();
+    assert_eq!(
+        &*model.tensor("t0").unwrap().bytes().unwrap(),
+        &[1u8; 64][..]
+    );
+    assert_eq!(
+        &*model.tensor("t1").unwrap().bytes().unwrap(),
+        &[2u8; 64][..]
+    );
+    model.verify_shards().unwrap();
 }

@@ -18,14 +18,14 @@ use std::sync::Arc;
 
 use xxhash_rust::xxh3::{xxh3_128, xxh3_64, Xxh3};
 
-use crate::cbor;
 use crate::error::{Error, Result};
-use crate::schema::{
+use crate::format::cbor;
+use crate::format::{
     check_attributes, check_digest, check_name, check_shard_name, BlobRef, DType, Manifest, Object,
     Part, Shard, ALIGN_CANONICAL, ALIGN_FLOOR, FOOTER_LEN, MAGIC, MAX_MANIFEST_LEN, MAX_RANK,
     MIN_FILE_LEN, VERSION,
 };
-use crate::source::Source;
+use crate::read::Source;
 use crate::vocab::Vocabulary;
 
 /// Hands out a fresh ticket for every [`Sink`] ever opened, in this process.
@@ -161,8 +161,8 @@ impl Options {
         }
         let path = path.as_ref().to_path_buf();
         let vocab = self.vocab.clone().unwrap_or_else(Vocabulary::shared);
-        let store = crate::store::Store::index(&path, "zt")?;
-        let parsed = crate::validate::read(&store, &vocab)?;
+        let store = crate::provide::store::Store::index(&path, "zt")?;
+        let parsed = crate::format::validate::store(&store, &vocab)?;
         let end = store.len();
         let (Some(manifest), Some(manifest_at)) = (parsed.manifest, parsed.manifest_at) else {
             return Err(Error::InvalidInput(format!(
@@ -382,26 +382,9 @@ impl Writer {
         dtype: DType,
         data: &[u8],
     ) -> Result<()> {
-        self.object(name)
-            .shape(shape)
-            .part("data")
-            .dtype(dtype)
-            .bytes(data)
-            .add()
-    }
-
-    /// Begins any object. See [`ObjectBuilder`].
-    pub fn object(&mut self, name: impl Into<String>) -> ObjectBuilder<'_, '_> {
-        ObjectBuilder {
-            writer: self,
-            name: name.into(),
-            shape: Vec::new(),
-            layout: "dense".to_string(),
-            attributes: Vec::new(),
-            parts: Vec::new(),
-            current: None,
-            error: None,
-        }
+        self.object(name, |o| {
+            o.shape(shape).part("data", |p| p.dtype(dtype).bytes(data))
+        })
     }
 
     /// Registers an external shard under `name`.
@@ -454,25 +437,27 @@ impl Writer {
     /// `shard` must already be registered with
     /// [`add_shard`](Self::add_shard).
     pub fn link(&mut self, name: impl Into<String>, object: &Object, shard: &str) -> Result<()> {
-        let name = name.into();
-        let mut builder = self
-            .object(&name)
-            .shape(object.shape.clone())
-            .layout(&object.layout);
-        if let Some(attrs) = &object.attributes {
-            builder = builder.attributes(attrs.clone());
-        }
+        let mut linked = Vec::with_capacity(object.parts.len());
         for (pname, part) in &object.parts {
             if part.blob.shard.is_some() {
                 return Err(Error::InvalidInput(format!(
                     "part {pname:?} is itself a foreign reference; only local parts can be linked"
                 )));
             }
-            let mut linked = part.clone();
-            linked.blob.shard = Some(shard.to_string());
-            builder = builder.part(pname).external(linked);
+            let mut part = part.clone();
+            part.blob.shard = Some(shard.to_string());
+            linked.push((pname.clone(), part));
         }
-        builder.add()
+        self.object(name, |mut o| {
+            o = o.shape(object.shape.clone()).layout(&object.layout);
+            if let Some(attrs) = &object.attributes {
+                o = o.attributes(attrs.clone());
+            }
+            for (pname, part) in linked {
+                o = o.part(pname, |p| p.external(part));
+            }
+            o
+        })
     }
 
     /// Copies every tensor of a [`Source`] into this file. This is the
@@ -500,20 +485,24 @@ impl Writer {
                     part.bytes()?.into_owned(),
                 ));
             }
-            let mut builder = self
-                .object(tensor.name())
-                .shape(tensor.shape().to_vec())
-                .layout(tensor.layout());
-            if let Some(attrs) = tensor.attributes() {
-                builder = builder.attributes(attrs.clone());
-            }
-            for (pname, dtype, logical, data) in &payloads {
-                builder = builder.part(pname).dtype(*dtype).bytes(data);
-                if let Some(l) = logical {
-                    builder = builder.logical(l);
+            let (shape, layout) = (tensor.shape().to_vec(), tensor.layout().to_string());
+            let attrs = tensor.attributes().cloned();
+            self.object(tensor.name(), |mut o| {
+                o = o.shape(shape).layout(layout);
+                if let Some(attrs) = attrs {
+                    o = o.attributes(attrs);
                 }
-            }
-            builder.add()?;
+                for (pname, dtype, logical, data) in &payloads {
+                    o = o.part(pname, |mut p| {
+                        p = p.dtype(*dtype).bytes(data);
+                        if let Some(l) = logical {
+                            p = p.logical(l);
+                        }
+                        p
+                    });
+                }
+                o
+            })?;
         }
         Ok(())
     }
@@ -759,38 +748,52 @@ struct PartDraft<'d> {
     source: Source_<'d>,
 }
 
-/// Builds one object.
+/// Object-level attributes: either accumulated one at a time, or handed over
+/// whole. Whichever came last wins, and a non-map is caught when the object is
+/// built rather than remembered as a deferred error.
+enum Attrs {
+    Pairs(Vec<(cbor::Value, cbor::Value)>),
+    Whole(cbor::Value),
+}
+
+/// Describes one object.
 ///
-/// Parts are declared with [`part`](Self::part) and described by the setters
-/// that follow it, which apply to the part most recently named:
+/// A plain description with no writer behind it: it is handed to
+/// [`Writer::object`] or [`Writer::stream`], which is what turns it into bytes.
+///
+/// Each part is described inside its own scope, so a part setter cannot be
+/// written before there is a part to apply it to — that is a compile error
+/// rather than something discovered when the object is added:
 ///
 /// ```no_run
 /// # use ztensor::{DType, Writer};
 /// # fn f(w: &mut Writer, blocks: &[u8], scales: &[u8]) -> ztensor::Result<()> {
-/// w.object("q")
-///     .shape([4096u64, 4096])
-///     .layout("zt.quant_group/1")
-///     .attr("group", 32u64)
-///     .part("data").dtype(DType::U8).logical("f4_e2m1").bytes(blocks)
-///     .part("scales").dtype(DType::U8).logical("f8_e8m0").bytes(scales)
-///     .add()
+/// w.object("q", |o| {
+///     o.shape([4096u64, 4096])
+///         .layout("zt.quant_group/1")
+///         .attr("group", 32u64)
+///         .part("data", |p| p.dtype(DType::U8).logical("f4_e2m1").bytes(blocks))
+///         .part("scales", |p| p.dtype(DType::U8).logical("f8_e8m0").bytes(scales))
+/// })
 /// # }
 /// ```
-///
-/// End with [`add`](Self::add) for parts whose bytes are in hand, or
-/// [`stream`](Self::stream) for parts declared by length.
-pub struct ObjectBuilder<'w, 'd> {
-    writer: &'w mut Writer,
-    name: String,
+pub struct ObjectBuilder<'d> {
     shape: Vec<u64>,
     layout: String,
-    attributes: Vec<(cbor::Value, cbor::Value)>,
+    attributes: Attrs,
     parts: Vec<PartDraft<'d>>,
-    current: Option<PartDraft<'d>>,
-    error: Option<Error>,
 }
 
-impl<'w, 'd> ObjectBuilder<'w, 'd> {
+impl<'d> ObjectBuilder<'d> {
+    fn new() -> Self {
+        ObjectBuilder {
+            shape: Vec::new(),
+            layout: "dense".to_string(),
+            attributes: Attrs::Pairs(Vec::new()),
+            parts: Vec::new(),
+        }
+    }
+
     pub fn shape(mut self, shape: impl Into<Vec<u64>>) -> Self {
         self.shape = shape.into();
         self
@@ -804,260 +807,269 @@ impl<'w, 'd> ObjectBuilder<'w, 'd> {
 
     /// One object-level attribute.
     pub fn attr(mut self, key: impl Into<String>, value: impl Into<cbor::Value>) -> Self {
-        self.attributes
-            .push((cbor::Value::Text(key.into()), value.into()));
+        let entry = (cbor::Value::Text(key.into()), value.into());
+        match &mut self.attributes {
+            // Adding to a map handed over wholesale keeps both, which is what
+            // the two being separate calls is for.
+            Attrs::Pairs(pairs) | Attrs::Whole(cbor::Value::Map(pairs)) => pairs.push(entry),
+            // Not a map: nothing to add to, and `build` refuses it by itself.
+            Attrs::Whole(_) => {}
+        }
         self
     }
 
     /// Object-level attributes, wholesale. Replaces anything set by
     /// [`attr`](Self::attr).
     pub fn attributes(mut self, attributes: cbor::Value) -> Self {
-        match attributes {
-            cbor::Value::Map(entries) => self.attributes = entries,
-            other => {
-                self.attributes = vec![];
-                self.fail(Error::InvalidInput(format!(
-                    "attributes must be a map, got {other:?}"
-                )));
-            }
-        }
+        self.attributes = Attrs::Whole(attributes);
         self
     }
 
-    /// Begins a part. Setters after this one describe it.
-    pub fn part(mut self, name: impl Into<String>) -> Self {
-        self.flush();
-        self.current = Some(PartDraft {
-            name: name.into(),
-            dtype: None,
-            logical: None,
-            encoding: None,
-            source: Source_::Missing,
-        });
+    /// Describes one part of this object.
+    ///
+    /// The part's setters live on the [`PartBuilder`] this hands the closure,
+    /// which is the whole reason for the scope: there is no way to spell
+    /// `.dtype()` where no part is open.
+    pub fn part(
+        mut self,
+        name: impl Into<String>,
+        describe: impl FnOnce(PartBuilder<'d>) -> PartBuilder<'d>,
+    ) -> Self {
+        self.parts.push(
+            describe(PartBuilder {
+                draft: PartDraft {
+                    name: name.into(),
+                    dtype: None,
+                    logical: None,
+                    encoding: None,
+                    source: Source_::Missing,
+                },
+            })
+            .draft,
+        );
         self
     }
+}
 
+/// Describes one part of an object: what its elements are, and where its bytes
+/// come from.
+pub struct PartBuilder<'d> {
+    draft: PartDraft<'d>,
+}
+
+impl<'d> PartBuilder<'d> {
+    /// The storage type of this part's elements.
     pub fn dtype(mut self, dtype: DType) -> Self {
-        self.with_current("dtype", |p| p.dtype = Some(dtype));
+        self.draft.dtype = Some(dtype);
         self
     }
 
     /// Logical type id: `"bool"`, `"f8_e4m3fn"`, `"f4_e2m1"`, ...
     pub fn logical(mut self, logical: impl Into<String>) -> Self {
-        let logical = logical.into();
-        self.with_current("logical", |p| p.logical = Some(logical));
+        self.draft.logical = Some(logical.into());
         self
     }
 
     /// Stores this part through an encoding profile. Canonical form is raw by
     /// definition, so this needs `.canonical(false)`.
     pub fn encoding(mut self, encoding: impl Into<String>) -> Self {
-        let encoding = encoding.into();
-        self.with_current("encoding", |p| p.encoding = Some(encoding));
+        self.draft.encoding = Some(encoding.into());
         self
     }
 
     /// The part's decoded bytes.
     pub fn bytes(mut self, data: &'d [u8]) -> Self {
-        self.with_current("bytes", |p| p.source = Source_::Bytes(data));
+        self.draft.source = Source_::Bytes(data);
         self
     }
 
-    /// The part's byte length, to be streamed. See [`stream`](Self::stream).
+    /// The part's byte length, to be streamed. See [`Writer::stream`].
     pub fn length(mut self, length: u64) -> Self {
-        self.with_current("length", |p| p.source = Source_::Length(length));
+        self.draft.source = Source_::Length(length);
         self
     }
 
     /// A blob that already exists in a registered shard: nothing is written
     /// for this part.
     pub fn external(mut self, part: Part) -> Self {
-        self.with_current("external", |p| p.source = Source_::External(part));
+        self.draft.source = Source_::External(part);
         self
     }
+}
 
-    fn with_current(&mut self, what: &str, f: impl FnOnce(&mut PartDraft<'d>)) {
-        match &mut self.current {
-            Some(part) => f(part),
-            None => self.fail(Error::InvalidInput(format!(
-                "object {:?}: .{what}() applies to a part; call .part(name) first",
-                self.name
-            ))),
-        }
+/// Validates an object's metadata against the writer and produces its parts in
+/// name order, with offsets left at zero.
+fn build<'d>(
+    writer: &Writer,
+    name: &str,
+    builder: ObjectBuilder<'d>,
+) -> Result<(Object, Vec<PartDraft<'d>>)> {
+    let ObjectBuilder {
+        shape,
+        layout,
+        attributes,
+        parts,
+    } = builder;
+    writer.check_new_object(name, &shape)?;
+    if parts.is_empty() {
+        return Err(Error::InvalidInput(format!("object {name:?} has no parts")));
     }
-
-    fn fail(&mut self, error: Error) {
-        if self.error.is_none() {
-            self.error = Some(error);
-        }
-    }
-
-    fn flush(&mut self) {
-        if let Some(part) = self.current.take() {
-            self.parts.push(part);
-        }
-    }
-
-    /// Validates the object's metadata and produces its parts in name order,
-    /// with offsets left at zero.
-    fn build(&mut self) -> Result<(Object, Vec<PartDraft<'d>>)> {
-        self.flush();
-        if let Some(error) = self.error.take() {
-            return Err(error);
-        }
-        let writer = &*self.writer;
-        writer.check_new_object(&self.name, &self.shape)?;
-        if self.parts.is_empty() {
+    let attributes = match attributes {
+        Attrs::Pairs(pairs) if pairs.is_empty() => None,
+        Attrs::Pairs(pairs) => Some(cbor::Value::Map(pairs)),
+        Attrs::Whole(cbor::Value::Map(pairs)) if pairs.is_empty() => None,
+        Attrs::Whole(cbor::Value::Map(pairs)) => Some(cbor::Value::Map(pairs)),
+        Attrs::Whole(other) => {
             return Err(Error::InvalidInput(format!(
-                "object {:?} has no parts",
-                self.name
-            )));
+                "object {name:?}: attributes must be a map, got {other:?}"
+            )))
         }
-        let attributes = if self.attributes.is_empty() {
-            None
-        } else {
-            let value = cbor::Value::Map(std::mem::take(&mut self.attributes));
-            check_attributes(&value).map_err(invalid)?;
-            Some(value)
+    };
+    if let Some(value) = &attributes {
+        check_attributes(value).map_err(invalid)?;
+    }
+
+    // Parts in name order: canonical blob order is (object, part).
+    let mut drafts = parts;
+    drafts.sort_by(|a, b| a.name.cmp(&b.name));
+
+    let mut built: BTreeMap<String, Part> = BTreeMap::new();
+    for draft in &drafts {
+        check_name(&draft.name).map_err(invalid)?;
+        writer.check_canonical_name(&draft.name)?;
+        // An external part already states its own dtype and logical type;
+        // making the caller repeat them would only create a way to
+        // disagree with the file being referenced.
+        let external = match &draft.source {
+            Source_::External(part) => Some(part),
+            _ => None,
         };
-
-        // Parts in name order: canonical blob order is (object, part).
-        let mut drafts = std::mem::take(&mut self.parts);
-        drafts.sort_by(|a, b| a.name.cmp(&b.name));
-
-        let mut built: BTreeMap<String, Part> = BTreeMap::new();
-        for draft in &drafts {
-            check_name(&draft.name).map_err(invalid)?;
-            writer.check_canonical_name(&draft.name)?;
-            // An external part already states its own dtype and logical type;
-            // making the caller repeat them would only create a way to
-            // disagree with the file being referenced.
-            let external = match &draft.source {
-                Source_::External(part) => Some(part),
-                _ => None,
-            };
-            let dtype = draft
-                .dtype
-                .or_else(|| external.map(|p| p.dtype))
-                .ok_or_else(|| {
-                    Error::InvalidInput(format!(
-                        "object {:?} part {:?}: no dtype",
-                        self.name, draft.name
-                    ))
-                })?;
-            let logical = draft
-                .logical
-                .clone()
-                .or_else(|| external.and_then(|p| p.logical.clone()));
-            if let Some(logical) = &logical {
-                if let Some(required) = writer.vocab.dtype_of(logical) {
-                    if dtype != required {
-                        return Err(Error::InvalidInput(format!(
-                            "part {:?}: type {logical:?} requires dtype {required:?}",
-                            draft.name
-                        )));
-                    }
+        let dtype = draft
+            .dtype
+            .or_else(|| external.map(|p| p.dtype))
+            .ok_or_else(|| {
+                Error::InvalidInput(format!("object {:?} part {:?}: no dtype", name, draft.name))
+            })?;
+        let logical = draft
+            .logical
+            .clone()
+            .or_else(|| external.and_then(|p| p.logical.clone()));
+        if let Some(logical) = &logical {
+            if let Some(required) = writer.vocab.dtype_of(logical) {
+                if dtype != required {
+                    return Err(Error::InvalidInput(format!(
+                        "part {:?}: type {logical:?} requires dtype {required:?}",
+                        draft.name
+                    )));
                 }
             }
-            let part = match &draft.source {
-                Source_::Missing => {
-                    return Err(Error::InvalidInput(format!(
-                        "object {:?} part {:?}: no bytes, length, or external blob",
-                        self.name, draft.name
-                    )))
-                }
-                Source_::External(part) => {
-                    let mut part = part.clone();
-                    part.dtype = dtype;
-                    part.logical = logical.clone();
-                    validate_external(&writer.manifest, &draft.name, &part)?;
-                    part
-                }
-                Source_::Length(length) => Part {
+        }
+        let part = match &draft.source {
+            Source_::Missing => {
+                return Err(Error::InvalidInput(format!(
+                    "object {:?} part {:?}: no bytes, length, or external blob",
+                    name, draft.name
+                )))
+            }
+            Source_::External(part) => {
+                let mut part = part.clone();
+                part.dtype = dtype;
+                part.logical = logical.clone();
+                validate_external(&writer.manifest, &draft.name, &part)?;
+                part
+            }
+            Source_::Length(length) => Part {
+                dtype,
+                logical: logical.clone(),
+                blob: BlobRef {
+                    shard: None,
+                    offset: 0,
+                    length: *length,
+                },
+                encoding: None,
+                decoded_length: None,
+                digest: None, // computed from the streamed bytes
+            },
+            Source_::Bytes(data) => {
+                let (length, encoding, decoded_length) = match &draft.encoding {
+                    None => (data.len() as u64, None, None),
+                    Some(id) => {
+                        if writer.canonical {
+                            return Err(Error::InvalidInput(
+                                "canonical form forbids encoded parts; add .canonical(false)"
+                                    .into(),
+                            ));
+                        }
+                        let profile = writer.vocab.encoding(id).ok_or_else(|| {
+                            Error::Unsupported(format!("encoding profile {id:?} is not registered"))
+                        })?;
+                        // Encoded once here to learn the stored length; the
+                        // bytes are produced again when written. Encoding is
+                        // the rare path, and holding every encoded payload
+                        // for a whole checkpoint is the thing to avoid.
+                        let stored = profile.encode(data)?;
+                        (
+                            stored.len() as u64,
+                            Some(id.clone()),
+                            Some(data.len() as u64),
+                        )
+                    }
+                };
+                Part {
                     dtype,
                     logical: logical.clone(),
                     blob: BlobRef {
                         shard: None,
                         offset: 0,
-                        length: *length,
+                        length,
                     },
-                    encoding: None,
-                    decoded_length: None,
-                    digest: None, // computed from the streamed bytes
-                },
-                Source_::Bytes(data) => {
-                    let (length, encoding, decoded_length) = match &draft.encoding {
-                        None => (data.len() as u64, None, None),
-                        Some(id) => {
-                            if writer.canonical {
-                                return Err(Error::InvalidInput(
-                                    "canonical form forbids encoded parts; add .canonical(false)"
-                                        .into(),
-                                ));
-                            }
-                            let profile = writer.vocab.encoding(id).ok_or_else(|| {
-                                Error::Unsupported(format!(
-                                    "encoding profile {id:?} is not registered"
-                                ))
-                            })?;
-                            // Encoded once here to learn the stored length; the
-                            // bytes are produced again when written. Encoding is
-                            // the rare path, and holding every encoded payload
-                            // for a whole checkpoint is the thing to avoid.
-                            let stored = profile.encode(data)?;
-                            (
-                                stored.len() as u64,
-                                Some(id.clone()),
-                                Some(data.len() as u64),
-                            )
-                        }
-                    };
-                    Part {
-                        dtype,
-                        logical: logical.clone(),
-                        blob: BlobRef {
-                            shard: None,
-                            offset: 0,
-                            length,
-                        },
-                        encoding,
-                        decoded_length,
-                        digest: Some(format!("xxh3:{:016x}", xxh3_64(data))),
-                    }
+                    encoding,
+                    decoded_length,
+                    digest: Some(format!("xxh3:{:016x}", xxh3_64(data))),
                 }
-            };
-            if built.insert(draft.name.clone(), part).is_some() {
-                return Err(Error::InvalidInput(format!(
-                    "duplicate part {:?}",
-                    draft.name
-                )));
             }
-        }
-
-        let object = Object {
-            shape: std::mem::take(&mut self.shape),
-            layout: std::mem::take(&mut self.layout),
-            attributes,
-            parts: built,
         };
-        if let Some(profile) = writer.vocab.layout(&object.layout) {
-            profile
-                .validate(&self.name, &object, &writer.vocab)
-                .map_err(invalid)?;
+        if built.insert(draft.name.clone(), part).is_some() {
+            return Err(Error::InvalidInput(format!(
+                "duplicate part {:?}",
+                draft.name
+            )));
         }
-        Ok((object, drafts))
     }
 
-    /// Writes the object. Every part must have bytes or be external.
-    pub fn add(mut self) -> Result<()> {
-        let (mut object, drafts) = self.build()?;
+    let object = Object {
+        shape,
+        layout,
+        attributes,
+        parts: built,
+    };
+    if let Some(profile) = writer.vocab.layout(&object.layout) {
+        profile
+            .validate(name, &object, &writer.vocab)
+            .map_err(invalid)?;
+    }
+    Ok((object, drafts))
+}
+
+impl Writer {
+    /// Writes one object, described by `describe`. Every part must have bytes
+    /// or be external.
+    ///
+    /// See [`ObjectBuilder`] for what a description can say, and
+    /// [`stream`](Self::stream) for parts whose bytes are not in hand.
+    pub fn object<'d>(
+        &mut self,
+        name: impl Into<String>,
+        describe: impl FnOnce(ObjectBuilder<'d>) -> ObjectBuilder<'d>,
+    ) -> Result<()> {
+        let name = name.into();
+        let (mut object, drafts) = build(self, &name, describe(ObjectBuilder::new()))?;
         if drafts
             .iter()
             .any(|d| matches!(d.source, Source_::Length(_)))
         {
             return Err(Error::InvalidInput(format!(
-                "object {:?} declares a streamed part; end with .stream() instead of .add()",
-                self.name
+                "object {name:?} declares a part by length; use .stream() instead"
             )));
         }
 
@@ -1067,51 +1079,51 @@ impl<'w, 'd> ObjectBuilder<'w, 'd> {
                 Source_::Bytes(data) => {
                     part.blob.offset = match (&draft.encoding, &part.encoding) {
                         (Some(id), Some(_)) => {
-                            let profile = self
-                                .writer
-                                .vocab
-                                .encoding(id)
-                                .expect("checked while building");
+                            let profile = self.vocab.encoding(id).expect("checked while building");
                             let stored = profile.encode(data)?;
-                            self.writer.write_blob(&stored)?
+                            self.write_blob(&stored)?
                         }
-                        _ => self.writer.write_or_share_blob(data)?,
+                        _ => self.write_or_share_blob(data)?,
                     };
                 }
                 Source_::External(_) => {} // offsets belong to the other file
                 _ => unreachable!("checked above"),
             }
         }
-        let name = std::mem::take(&mut self.name);
-        self.writer.commit(name, object);
+        self.commit(name, object);
         Ok(())
     }
 
-    /// Opens the object for streaming. Every part must have been declared with
-    /// [`length`](Self::length).
+    /// Opens an object for streaming. Every part must have been declared with
+    /// [`PartBuilder::length`].
     ///
     /// Parts are written in name order, each receiving exactly the byte count
     /// it declared. The returned [`Sink`] is a token, not a borrow: it is
     /// passed back to [`Sink::write`] and consumed by [`Sink::close`], so a
-    /// producer driven from outside can exist at all, feeding one chunk per
-    /// call while holding both the writer and the open object.
-    pub fn stream(mut self) -> Result<Sink> {
-        let (object, drafts) = self.build()?;
+    /// producer driven from outside can exist at all, holding both the writer
+    /// and the open object and feeding one chunk per call. For the bytes
+    /// themselves, [`Sink::attach`] gives an [`io::Write`](std::io::Write).
+    pub fn stream<'d>(
+        &mut self,
+        name: impl Into<String>,
+        describe: impl FnOnce(ObjectBuilder<'d>) -> ObjectBuilder<'d>,
+    ) -> Result<Sink> {
+        let name = name.into();
+        let (object, drafts) = build(self, &name, describe(ObjectBuilder::new()))?;
         if !drafts
             .iter()
             .all(|d| matches!(d.source, Source_::Length(_)))
         {
             return Err(Error::InvalidInput(format!(
-                "object {:?}: streaming declares every part with .length(); \
-                 use .add() for parts whose bytes are in hand",
-                self.name
+                "object {name:?}: streaming declares every part with .length(); \
+                 use .object() for parts whose bytes are in hand"
             )));
         }
         let ticket = NEXT_SINK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.writer.open_sink = Some(ticket);
+        self.open_sink = Some(ticket);
         Ok(Sink {
             ticket,
-            name: std::mem::take(&mut self.name),
+            name,
             order: object.parts.keys().cloned().collect(),
             object: Some(object),
             at: 0,
@@ -1203,6 +1215,27 @@ impl Sink {
     /// Bytes written into the current part so far.
     pub fn written(&self) -> u64 {
         self.written
+    }
+
+    /// Borrows this sink and its writer together as an [`io::Write`](std::io::Write).
+    ///
+    /// [`write`](Self::write) takes the writer per call so that a producer
+    /// driven from outside can own both, which no borrow could express. The
+    /// cost is that the pair is not an `io::Write`, and so cannot be handed to
+    /// [`io::copy`](std::io::copy), wrapped in a `BufWriter`, or fed to an
+    /// encoder. This hands it over for as long as one borrow lasts, during
+    /// which the compiler — not the sink's ticket — is what stops the writer
+    /// being used for anything else.
+    ///
+    /// ```no_run
+    /// # fn f(w: &mut ztensor::Writer, sink: &mut ztensor::Sink,
+    /// #      src: &mut impl std::io::Read) -> std::io::Result<()> {
+    /// std::io::copy(src, &mut sink.attach(w))?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn attach<'a>(&'a mut self, writer: &'a mut Writer) -> Attached<'a> {
+        Attached { sink: self, writer }
     }
 
     /// Appends bytes to the current part.
@@ -1297,6 +1330,34 @@ impl Sink {
                 self.name
             )));
         }
+        Ok(())
+    }
+}
+
+/// A [`Sink`] and its [`Writer`], borrowed together as an [`io::Write`](std::io::Write).
+///
+/// Made by [`Sink::attach`]. Writing past the current part's declared length is
+/// still an error rather than a rollover, and surfaces as
+/// [`io::ErrorKind::InvalidInput`](std::io::ErrorKind::InvalidInput).
+pub struct Attached<'a> {
+    sink: &'a mut Sink,
+    writer: &'a mut Writer,
+}
+
+impl std::io::Write for Attached<'_> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        // All of it or none of it: a short write would leave the caller to
+        // resume mid-part, and the part's digest is computed over the bytes in
+        // the order they arrive.
+        self.sink
+            .write(self.writer, buf)
+            .map(|()| buf.len())
+            .map_err(std::io::Error::other)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        // The writer buffers into its own `BufWriter` and flushes at `finish`;
+        // there is nothing this borrow could usefully push further.
         Ok(())
     }
 }

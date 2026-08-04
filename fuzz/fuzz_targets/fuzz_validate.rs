@@ -4,5 +4,5 @@
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
-    let _ = ztensor::validate_bytes(data, &ztensor::Vocabulary::standard());
+    let _ = ztensor::format::validate::image(data, &ztensor::Vocabulary::standard());
 });

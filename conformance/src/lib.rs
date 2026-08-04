@@ -9,8 +9,9 @@
 //! outcome. For rejections that means the specific spec rule.
 
 use xxhash_rust::xxh3::xxh3_64;
-use ztensor::cbor::{self, Value};
-use ztensor::{DType, Rule, Writer, MAGIC};
+use ztensor::format::cbor::{self, Value};
+use ztensor::format::MAGIC;
+use ztensor::{DType, Rule, Writer};
 
 #[derive(Debug, Clone, Copy)]
 pub enum Op {

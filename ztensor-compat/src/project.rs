@@ -6,13 +6,14 @@
 //! for formats whose bytes are not simply lying there, how to produce the
 //! ones that have no address.
 //!
-//! It never builds a [`Manifest`](ztensor::schema::Manifest). A safetensors
+//! It never builds a [`Manifest`](ztensor::format::Manifest). A safetensors
 //! file has no manifest; saying otherwise would be inventing a document
 //! nobody wrote.
 
 use std::sync::Arc;
 
-use ztensor::{Catalog, Opaque, Result, Source, Store, Vocabulary};
+use ztensor::provide::{Catalog, Opaque};
+use ztensor::{Result, Source, Store, Vocabulary};
 
 pub(crate) struct Projection {
     pub catalog: Catalog,
