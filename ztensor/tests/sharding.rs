@@ -600,3 +600,76 @@ fn the_digests_match_the_published_vectors() {
     );
     assert_eq!(streamed.size, whole_file.len() as u64);
 }
+
+/// `link_shard` is the four-step assembly done in one call.
+///
+/// Doing three of the four by hand still writes a file; the trouble surfaces
+/// in whoever reads it. This checks the shortcut agrees with the long way,
+/// byte for byte in what it produces.
+#[test]
+fn link_shard_matches_the_manual_assembly() {
+    use ztensor::DigestAlgorithm;
+
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
+    let shard = dir.join("ls-shard.zt");
+    let mut w = Writer::create(&shard).unwrap();
+    w.add("a.weight", [4u64], DType::F32, &[1u8; 16]).unwrap();
+    w.add("b.weight", [8u64], DType::U8, &[2u8; 8]).unwrap();
+    w.finish().unwrap();
+
+    // The long way.
+    let manual = dir.join("ls-manual.zt");
+    let mut w = Writer::options().canonical(false).create(&manual).unwrap();
+    let id = ztensor::shard_identity_with(&shard, DigestAlgorithm::Sha256).unwrap();
+    w.add_shard("s", &id).unwrap();
+    let m = ztensor::manifest_of(&shard).unwrap().unwrap();
+    for (name, object) in &m.objects {
+        w.link(name, object, "s").unwrap();
+    }
+    w.finish().unwrap();
+
+    // The one call.
+    let easy = dir.join("ls-easy.zt");
+    let mut w = Writer::options().canonical(false).create(&easy).unwrap();
+    let linked = w.link_shard("s", &shard, DigestAlgorithm::Sha256).unwrap();
+    w.finish().unwrap();
+
+    assert_eq!(linked, vec!["a.weight", "b.weight"]);
+    assert_eq!(
+        fs::read(&manual).unwrap(),
+        fs::read(&easy).unwrap(),
+        "the shortcut must produce exactly what the long way does"
+    );
+
+    // And it reads back.
+    let sp = shard.clone();
+    let src = Source::options()
+        .resolver(move |_: &str, _: &Shard| Ok(sp.clone()))
+        .open(&easy)
+        .unwrap();
+    assert_eq!(
+        src.names().collect::<Vec<_>>(),
+        vec!["a.weight", "b.weight"]
+    );
+    assert_eq!(
+        &*src.tensor("a.weight").unwrap().bytes().unwrap(),
+        &[1u8; 16]
+    );
+    src.verify_shards().unwrap();
+}
+
+/// A manifest-less shard names no tensors, so there is nothing to link and
+/// saying so beats linking nothing and looking like it worked.
+#[test]
+fn link_shard_refuses_a_manifest_less_shard() {
+    let path = tmp("ls-datashard.zt");
+    write_data_shard(&path, 4096, &[1u8; 64]);
+
+    let root = tmp("ls-datashard-root.zt");
+    let mut w = Writer::options().canonical(false).create(&root).unwrap();
+    let err = w
+        .link_shard("s", &path, ztensor::DigestAlgorithm::Xxh3)
+        .unwrap_err();
+    assert!(format!("{err}").contains("no manifest"), "{err}");
+    w.abandon();
+}

@@ -66,6 +66,28 @@ spec **Draft 4**.
   whatever algorithm a file used, so a build cannot write digests it is
   unable to check.
 
+- **`Writer::link_shard`** takes a whole `.zt` in as a shard: identity,
+  registration and one link per tensor, in the one order that works. Done by
+  hand it is four steps, and doing three of them still writes a file whose
+  trouble surfaces only in whoever reads it.
+
+### Fixed
+
+- **A `Sink` could drive a `Writer` that did not open it.** The check was
+  whether *some* object was open on that writer, which is true of any writer
+  mid-stream, so a sink handed the wrong one appended its bytes to whatever
+  blob that writer had open. Two files quietly wrong, and the sink believing
+  it had written a part it never wrote. Sinks now carry a ticket the writer
+  checks on every call.
+
+- **Leaving canonical form dropped the alignment to the 4 KiB floor.**
+  Placement is not part of what canonical form is; 64 KiB is what buys
+  per-tensor page exclusivity, and it matters just as much to a sharded
+  model, which cannot be canonical at all (§6.3 rule 6). Every sharded root
+  was silently losing eviction on any host with pages above 4 KiB unless its
+  author knew to ask for the alignment back. A non-canonical writer now
+  defaults to 64 KiB like any other; `.align()` still chooses.
+
 ### Removed
 
 - **`DataShardWriter`.** It wrote the manifest-less shard of §7.2, and the
@@ -185,6 +207,28 @@ checkpoints already ship with.
   with `dense_only=False` raised.
 - Python: a zero-copy export now keeps the mapping alive itself, so an array
   or memoryview stays valid after the source it came from is closed.
+
+- **`Writer::link_shard`** takes a whole `.zt` in as a shard: identity,
+  registration and one link per tensor, in the one order that works. Done by
+  hand it is four steps, and doing three of them still writes a file whose
+  trouble surfaces only in whoever reads it.
+
+### Fixed
+
+- **A `Sink` could drive a `Writer` that did not open it.** The check was
+  whether *some* object was open on that writer, which is true of any writer
+  mid-stream, so a sink handed the wrong one appended its bytes to whatever
+  blob that writer had open. Two files quietly wrong, and the sink believing
+  it had written a part it never wrote. Sinks now carry a ticket the writer
+  checks on every call.
+
+- **Leaving canonical form dropped the alignment to the 4 KiB floor.**
+  Placement is not part of what canonical form is; 64 KiB is what buys
+  per-tensor page exclusivity, and it matters just as much to a sharded
+  model, which cannot be canonical at all (§6.3 rule 6). Every sharded root
+  was silently losing eviction on any host with pages above 4 KiB unless its
+  author knew to ask for the alignment back. A non-canonical writer now
+  defaults to 64 KiB like any other; `.align()` still chooses.
 
 ### Removed
 

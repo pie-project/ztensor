@@ -241,3 +241,73 @@ fn layout_rules_are_checked_before_the_first_chunk() {
         .expect_err("a malformed CSR object must be refused up front");
     assert!(matches!(err, Error::InvalidInput(_)), "{err:?}");
 }
+
+/// A sink drives the writer that opened it, and no other.
+///
+/// The check used to be "is *some* object open on that writer", which any
+/// writer mid-stream satisfies. A sink handed the wrong writer appended its
+/// bytes to whatever blob that writer had open: two files quietly wrong, and
+/// the sink believing it had written a part it never wrote.
+#[test]
+fn a_sink_refuses_a_writer_that_did_not_open_it() {
+    let a = tmp("sink-owner-a.zt");
+    let b = tmp("sink-owner-b.zt");
+    let mut wa = Writer::options().canonical(false).create(&a).unwrap();
+    let mut wb = Writer::options().canonical(false).create(&b).unwrap();
+
+    let mut sa = open_sink(&mut wa, "from_a");
+    let mut sb = open_sink(&mut wb, "from_b");
+
+    // Both writers are streaming, which is exactly when the old check passed.
+    let err = sa.write(&mut wb, &[0xAA; 8]).unwrap_err();
+    assert!(matches!(err, Error::InvalidInput(_)), "{err}");
+
+    // Each still works with its own, and the crossed write left no trace.
+    sa.write(&mut wa, &[0xAA; 8]).unwrap();
+    sa.close(&mut wa).unwrap();
+    sb.write(&mut wb, &[0xBB; 8]).unwrap();
+    sb.close(&mut wb).unwrap();
+    wa.finish().unwrap();
+    wb.finish().unwrap();
+
+    for (path, name, byte) in [(&a, "from_a", 0xAAu8), (&b, "from_b", 0xBB)] {
+        let src = Source::open(path).unwrap();
+        assert_eq!(src.names().collect::<Vec<_>>(), vec![name]);
+        assert_eq!(&*src.tensor(name).unwrap().bytes().unwrap(), &[byte; 8]);
+    }
+}
+
+/// `close` is checked too: committing an object onto the wrong writer would
+/// put it in the wrong manifest.
+#[test]
+fn closing_onto_the_wrong_writer_is_refused() {
+    let a = tmp("sink-close-a.zt");
+    let b = tmp("sink-close-b.zt");
+    let mut wa = Writer::options().canonical(false).create(&a).unwrap();
+    let mut wb = Writer::options().canonical(false).create(&b).unwrap();
+
+    let mut sa = open_sink(&mut wa, "from_a");
+    let sb = open_sink(&mut wb, "from_b");
+    sa.write(&mut wa, &[0xAA; 8]).unwrap();
+
+    assert!(sb.close(&mut wa).is_err(), "b's object onto a's writer");
+
+    // `wa` is untouched: its own sink still finishes, and `from_b` is absent.
+    sa.close(&mut wa).unwrap();
+    wa.finish().unwrap();
+    let src = Source::open(&a).unwrap();
+    assert_eq!(src.names().collect::<Vec<_>>(), vec!["from_a"]);
+
+    wb.abandon();
+}
+
+/// One eight-byte u8 part, streamed.
+fn open_sink(w: &mut Writer, name: &str) -> ztensor::Sink {
+    w.object(name)
+        .shape([8u64])
+        .part("data")
+        .dtype(DType::U8)
+        .length(8)
+        .stream()
+        .unwrap()
+}

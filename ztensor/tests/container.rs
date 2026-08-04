@@ -213,6 +213,55 @@ fn alignment_is_not_the_canonical_switch() {
     assert_eq!(Source::open(&path).unwrap().len(), 2);
 }
 
+/// Leaving canonical form gives up byte-reproducible placement, not placement.
+///
+/// It used to drop to the 4 KiB floor, which mattered because a sharded model
+/// *cannot* be canonical (§6.3 rule 6): every sharded root silently lost
+/// per-tensor page exclusivity on any host with pages above 4 KiB unless its
+/// author knew to ask for the alignment back.
+#[test]
+fn a_non_canonical_writer_still_places_at_64_kib() {
+    let path = tmp("noncanon-align.zt");
+    let mut w = Writer::options().canonical(false).create(&path).unwrap();
+    w.add("t", [4u64], DType::F32, &f32_bytes(&[1.0; 4]))
+        .unwrap();
+    w.add("u", [4u64], DType::F32, &f32_bytes(&[2.0; 4]))
+        .unwrap();
+    w.finish().unwrap();
+
+    let src = Source::open(&path).unwrap();
+    for name in ["t", "u"] {
+        let at = src.tensor(name).unwrap().locate().unwrap();
+        assert_eq!(
+            at.offset % ALIGN_CANONICAL,
+            0,
+            "{name} landed at {}, off the 64 KiB grid",
+            at.offset
+        );
+    }
+
+    // And asking for the floor still gets the floor.
+    let floor = tmp("noncanon-floor.zt");
+    let mut w = Writer::options()
+        .canonical(false)
+        .align(4096)
+        .create(&floor)
+        .unwrap();
+    w.add("t", [4u64], DType::F32, &f32_bytes(&[1.0; 4]))
+        .unwrap();
+    w.finish().unwrap();
+    assert_eq!(
+        Source::open(&floor)
+            .unwrap()
+            .tensor("t")
+            .unwrap()
+            .locate()
+            .unwrap()
+            .offset,
+        4096
+    );
+}
+
 // =======================================================================
 // Must-reject cases
 // =======================================================================

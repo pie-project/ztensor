@@ -93,16 +93,25 @@ w.object("q")
 
 ### Leaving canonical form
 
-For files that are not for distribution, ask for what you want instead:
-smaller alignment, compression, or sharding.
+For files that are not for distribution, turn it off to insert in any order,
+encode parts, or reference other files:
 
 ```rust
-let mut w = Writer::options().canonical(false).align(4096).create("scratch.zt")?;
+let mut w = Writer::options().canonical(false).create("scratch.zt")?;
 ```
 
-Alignment and canonical form are separate options. Asking for an alignment
-while leaving canonical form on is an error, and the message says how to mean
-what you probably meant.
+Placement is not part of what you give up: a non-canonical writer still puts
+blobs on 64 KiB boundaries, because that is what buys per-tensor page
+exclusivity and a sharded model wants it as much as any other. Ask for
+something else when the model is many small tensors, where a page of padding
+each is most of the file:
+
+```rust
+let mut w = Writer::options().canonical(false).align(4096).create("tiny.zt")?;
+```
+
+Asking for an alignment while leaving canonical form on is an error, and the
+message says how to mean what you probably meant.
 
 ### Adding to a finished file
 
@@ -226,18 +235,20 @@ A shard is an ordinary `.zt`. Write one, then ask it for its identity:
 let mut w = Writer::create("model-00001.zt")?;
 w.add("blk.0.attn_q.weight", [4096u64, 4096], DType::BF16, &weights)?;
 w.finish()?;
-
-let id = ztensor::shard_identity("model-00001.zt")?;
 ```
 
-The root records that identity and points its tensors at the shard:
+The root records that identity and points its tensors at the shard.
+`link_shard` does the whole thing, since taking the identity, registering it
+and linking each tensor only work together:
 
 ```rust
 let mut root = Writer::options().canonical(false).create("model.zt")?;
-root.add_shard("00001", &id)?;
-root.link("blk.0.attn_q.weight", &object, "00001")?;
+root.link_shard("00001", "model-00001.zt", DigestAlgorithm::Sha256)?;
 root.finish()?;
 ```
+
+`add_shard` and `link` are still there for a root that links only some of a
+shard's tensors.
 
 The format also allows a shard with no manifest of its own, holding nothing
 but bytes (spec §7.2). zTensor reads those, because other tools write them,

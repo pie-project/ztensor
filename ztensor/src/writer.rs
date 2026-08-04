@@ -21,12 +21,22 @@ use xxhash_rust::xxh3::{xxh3_128, xxh3_64, Xxh3};
 use crate::cbor;
 use crate::error::{Error, Result};
 use crate::schema::{
-    check_attributes, check_digest, check_name, check_shard_name, BlobRef, DType, Manifest, Object,
-    Part, Shard, ALIGN_CANONICAL, ALIGN_FLOOR, FOOTER_LEN, MAGIC, MAX_MANIFEST_LEN, MAX_RANK,
-    MIN_FILE_LEN, VERSION,
+    check_attributes, check_digest, check_name, check_shard_name, BlobRef, DType, DigestAlgorithm,
+    Manifest, Object, Part, Shard, ALIGN_CANONICAL, ALIGN_FLOOR, FOOTER_LEN, MAGIC,
+    MAX_MANIFEST_LEN, MAX_RANK, MIN_FILE_LEN, VERSION,
 };
 use crate::source::Source;
 use crate::vocab::Vocabulary;
+
+/// Hands out a fresh ticket for every [`Sink`] ever opened, in this process.
+///
+/// A sink is a token the caller passes back to the writer, so the writer has
+/// to be able to tell *its* token from someone else's. A per-writer flag
+/// cannot: two writers streaming at once each have it set, and a sink closed
+/// on one writer looks alive while a later sink is open on the same one.
+/// Either way the bytes land in a blob that was not expecting them and both
+/// files are quietly wrong.
+static NEXT_SINK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 /// Writer-side violations of reader rules surface as `InvalidInput` carrying
 /// the rule's own message.
@@ -71,14 +81,21 @@ impl Options {
     /// Canonical form (the default): 64 KiB placement, ascending insertion,
     /// a digest on every part, raw parts only, single file.
     ///
-    /// Turn it off to choose your own placement, insert in any order, encode
-    /// parts, or reference other files.
+    /// Turn it off to insert in any order, encode parts, or reference other
+    /// files. Placement is *not* part of what you give up: a non-canonical
+    /// writer still defaults to 64 KiB, because that is what buys per-tensor
+    /// page exclusivity and a sharded model wants it as much as any other.
+    /// Use [`align`](Self::align) to choose something else.
     pub fn canonical(mut self, canonical: bool) -> Self {
         self.canonical = canonical;
         self
     }
 
-    /// Placement alignment: a power of two ≥ 4096.
+    /// Placement alignment: a power of two ≥ 4096. Defaults to 64 KiB.
+    ///
+    /// Smaller is worth asking for when a model is made of many small
+    /// tensors, where a page of padding each is most of the file. See the
+    /// benchmarks for where that turns over.
     pub fn align(mut self, align: u64) -> Self {
         self.align = Some(align);
         self
@@ -181,7 +198,7 @@ impl Options {
             // share with each other.
             dedup: HashMap::new(),
             last_name: None,
-            streaming: false,
+            open_sink: None,
             vocab: self.vocab.unwrap_or_else(Vocabulary::shared),
             appending: true,
         })
@@ -201,7 +218,14 @@ impl Options {
                 check_alignment(a)?;
                 a
             }
-            (false, None) => ALIGN_FLOOR,
+            // Leaving canonical form gives up byte-reproducible *placement*,
+            // not placement. 64 KiB is what buys per-tensor page exclusivity
+            // on every page size in use, and it is worth just as much to a
+            // sharded model, which cannot be canonical at all (§6.3 rule 6).
+            // Dropping to the floor here would have meant every sharded root
+            // silently losing eviction unless its author knew to ask for the
+            // alignment back. `.align(ALIGN_FLOOR)` still gets it.
+            (false, None) => ALIGN_CANONICAL,
         };
         let file = File::create(&path)?;
         let mut out = BufWriter::with_capacity(1 << 20, file);
@@ -216,7 +240,7 @@ impl Options {
             manifest: Manifest::default(),
             dedup: HashMap::new(),
             last_name: None,
-            streaming: false,
+            open_sink: None,
             vocab: self.vocab.unwrap_or_else(Vocabulary::shared),
             appending: false,
         })
@@ -286,9 +310,14 @@ pub struct Writer {
     /// *byte-identical* sharing, and hashes can collide).
     dedup: HashMap<(u128, u64), u64>,
     last_name: Option<String>,
-    /// Whether a [`Sink`] is open. Every other object-adding method refuses
-    /// while one is: their bytes would land in the middle of the streamed part.
-    streaming: bool,
+    /// The ticket of the [`Sink`] currently open on this writer, if any.
+    ///
+    /// Every other object-adding method refuses while one is open: their bytes
+    /// would land in the middle of the streamed part. It is a ticket rather
+    /// than a flag so that a sink can be checked against *this* writer and
+    /// *this* streaming session, not merely against "something is streaming
+    /// somewhere".
+    open_sink: Option<u64>,
     /// Set when adding to a file this writer did not create. It decides who
     /// owns `path`: an appending writer that gives up must leave the file
     /// alone, where one that created it deletes what it started.
@@ -447,6 +476,44 @@ impl Writer {
         builder.add()
     }
 
+    /// Takes a whole `.zt` in as a shard: registers its identity and links
+    /// every tensor it holds.
+    ///
+    /// This is the four steps a shard set otherwise needs by hand, in the one
+    /// order that works: read the identity, register it, read the manifest,
+    /// link each object through it. Doing three of the four still produces a
+    /// file, and the trouble only shows up in whoever reads it, which is why
+    /// they belong together.
+    ///
+    /// `algo` chooses the shard digest. Use [`DigestAlgorithm::Sha256`] for
+    /// anything to be signed or distributed (§6.5).
+    ///
+    /// Returns the names linked, in manifest order.
+    pub fn link_shard(
+        &mut self,
+        name: impl Into<String>,
+        path: impl AsRef<Path>,
+        algo: DigestAlgorithm,
+    ) -> Result<Vec<String>> {
+        let name = name.into();
+        let path = path.as_ref();
+        let identity = crate::source::shard_identity_with(path, algo)?;
+        let Some(manifest) = crate::validate::manifest_of(path)? else {
+            return Err(Error::InvalidInput(format!(
+                "{}: a shard with no manifest names no tensors, so there is nothing to \
+                 link; reference it with add_shard and build the parts yourself",
+                path.display()
+            )));
+        };
+        self.add_shard(&name, &identity)?;
+        let mut linked = Vec::with_capacity(manifest.objects.len());
+        for (object_name, object) in &manifest.objects {
+            self.link(object_name, object, &name)?;
+            linked.push(object_name.clone());
+        }
+        Ok(linked)
+    }
+
     /// Copies every tensor of a [`Source`] into this file. This is the
     /// conversion path for every supported format.
     ///
@@ -493,7 +560,7 @@ impl Writer {
     /// Writes the manifest blob and footer, then flushes. A publishing writer
     /// also fsyncs and renames into place. Returns the file size.
     pub fn finish(mut self) -> Result<u64> {
-        if self.streaming {
+        if self.open_sink.is_some() {
             return Err(Error::InvalidInput(
                 "a streamed object is still open; close its sink before finishing".into(),
             ));
@@ -646,7 +713,7 @@ impl Writer {
     }
 
     fn check_new_object(&self, name: &str, shape: &[u64]) -> Result<()> {
-        if self.streaming {
+        if self.open_sink.is_some() {
             return Err(Error::InvalidInput(format!(
                 "object {name:?} cannot be added while a streamed object is open"
             )));
@@ -1079,8 +1146,10 @@ impl<'w, 'd> ObjectBuilder<'w, 'd> {
                 self.name
             )));
         }
-        self.writer.streaming = true;
+        let ticket = NEXT_SINK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.writer.open_sink = Some(ticket);
         Ok(Sink {
+            ticket,
             name: std::mem::take(&mut self.name),
             order: object.parts.keys().cloned().collect(),
             object: Some(object),
@@ -1141,6 +1210,9 @@ fn validate_external(manifest: &Manifest, pname: &str, part: &Part) -> Result<()
 /// stay in the file as unreferenced blobs, which the format allows (§2.5) but
 /// canonical form does not, so there is no honest way to carry on.
 pub struct Sink {
+    /// Which streaming session this sink is. Checked against the writer's on
+    /// every call, so a sink can only drive the writer that opened it.
+    ticket: u64,
     name: String,
     object: Option<Object>,
     /// Part names, in the order they must be written.
@@ -1179,12 +1251,7 @@ impl Sink {
     /// the next one: a producer that has miscounted should hear about it where
     /// it happened.
     pub fn write(&mut self, writer: &mut Writer, chunk: &[u8]) -> Result<()> {
-        if !writer.streaming {
-            return Err(Error::InvalidInput(format!(
-                "object {:?} is not open on this writer",
-                self.name
-            )));
-        }
+        self.check_owner(writer)?;
         let Some(part_name) = self.order.get(self.at).cloned() else {
             return Err(Error::InvalidInput(format!(
                 "object {:?}: every part is already written",
@@ -1239,6 +1306,7 @@ impl Sink {
 
     /// Completes the object and adds it to the manifest.
     pub fn close(mut self, writer: &mut Writer) -> Result<()> {
+        self.check_owner(writer)?;
         if self.at < self.order.len() {
             let part = &self.order[self.at];
             let declared = self.object.as_ref().expect("object present").parts[part]
@@ -1251,7 +1319,23 @@ impl Sink {
         }
         let object = self.object.take().expect("object present");
         writer.commit(std::mem::take(&mut self.name), object);
-        writer.streaming = false;
+        writer.open_sink = None;
+        Ok(())
+    }
+
+    /// Refuses a writer this sink was not opened on.
+    ///
+    /// Without it, the only question asked is whether *some* object is open,
+    /// which is true of any writer mid-stream. A sink handed the wrong writer
+    /// would append its bytes to whatever blob that writer had open, and both
+    /// files would be wrong with nothing said.
+    fn check_owner(&self, writer: &Writer) -> Result<()> {
+        if writer.open_sink != Some(self.ticket) {
+            return Err(Error::InvalidInput(format!(
+                "object {:?}: this sink is not the one open on that writer",
+                self.name
+            )));
+        }
         Ok(())
     }
 }
