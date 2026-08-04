@@ -6,14 +6,20 @@ and the `ztensor` Python package, which are versioned together.
 The **file format is versioned separately**: `.zt` is container version 2,
 spec **Draft 4**.
 
-## 2.2.0
+## 2.1.1
 
 A second pass over the surface, after reading 2.1 back. The container is
 untouched — no file changes meaning — and so is every operation. What changed
 is which of them exist, since several turned out to be two ways of saying one
 thing, and two others let a caller write something contradictory and compile.
 
-Breaking, and again not a major bump: 2.1 has one user, updated with it.
+**This breaks the API in a patch release**, which is not what a patch number
+means. It is deliberate and it is a one-off: 2.1.0 has a single user, updated
+in the same breath, and spending 3.0.0 on a surface that had been public for a
+week would have priced the next real major bump out of the range where it
+belongs. Anything depending on `ztensor = "2.1"` resolves into this and will
+not compile; pin `=2.1.0` if that is a problem. From here on the number means
+what it says.
 
 ### Removed
 

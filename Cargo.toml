@@ -3,7 +3,7 @@ members = ["ztensor", "ztensor-compat", "ztensor-cli", "ztensor-py", "conformanc
 resolver = "2"
 
 [workspace.package]
-version = "2.2.0"
+version = "2.1.1"
 edition = "2021"
 # `u64::is_multiple_of`, which clippy asks for and the writer uses.
 rust-version = "1.87"
@@ -15,8 +15,8 @@ repository = "https://github.com/pie-project/ztensor"
 # and no path dependency can go out without a version requirement, which
 # is what `cargo package` refuses to do.
 [workspace.dependencies]
-ztensor = { version = "2.2.0", path = "ztensor" }
-ztensor-compat = { version = "2.2.0", path = "ztensor-compat" }
+ztensor = { version = "2.1.1", path = "ztensor" }
+ztensor-compat = { version = "2.1.1", path = "ztensor-compat" }
 
 [profile.release]
 lto = "fat"
