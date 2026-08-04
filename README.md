@@ -178,17 +178,17 @@ The format separates what must never change from what is expected to:
 | --- | --- | --- |
 | **L0: Container** | Magic, 40-byte footer, aligned blob heap, byte order | **Frozen** |
 | **L1: Manifest** | Deterministic-CBOR schema | Gated by the footer's version integer |
-| **L2: Vocabulary** | Layouts, logical types, encodings, digests | **Deliberately mortal**, registry-managed |
+| **L2: Vocabulary** | Layouts, logical types, encodings, digests | Expected to change; registry-managed |
 
 A minimal conforming reader is `ztensor/examples/minimal_reader.rs`, at 68
 lines, needing only a CBOR decoder and XXH3.
 
-## The capability ladder
+## What a given file supports
 
-Formats differ in what they can guarantee, and the API says so instead of
-pretending otherwise:
+A projected `.npz` cannot offer what a canonical `.zt` can, so the API reports
+per part what will work rather than degrading quietly:
 
-| Tier | Guarantee | Where |
+| Operation | What it gives you | Where it works |
 | --- | --- | --- |
 | `bytes()` | decoded bytes, and it says whether they were borrowed or copied | every format |
 | `map()` | a borrow, or an error; never a copy | mapped raw parts |
@@ -196,10 +196,10 @@ pretending otherwise:
 | `verify()` | a digest check | `.zt` |
 | `evict()` | drops these pages without touching a neighbour's | page-exclusive parts |
 
-`caps()` reports, per part, which of those will work. Every field is
-named after the method it gates, computed by that method's own precondition,
-so the report cannot drift from the behaviour. Converting a foreign checkpoint
-is how you get the ones it cannot offer.
+`caps()` answers all five at once, before a caller commits to a plan. Each of
+its fields is named after the method it gates and is computed from that
+method's own precondition, so the report cannot drift from the behaviour.
+`ingest` converts a foreign checkpoint into a `.zt` that offers the rest.
 
 ## Supported formats
 

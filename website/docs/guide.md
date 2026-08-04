@@ -258,9 +258,14 @@ practical, so the expensive checks are opt-in.
 
 ## Sharded models and overlays
 
-A multi-file model is one root manifest plus its shards. The root names each
-shard, but the name is only a label. A shard's identity is its size and
-digest, so renaming the files does not break the model or change it.
+A multi-file model is one root `.zt` whose manifest addresses blobs in other
+`.zt` files. Those files are containers like any other; what makes them shards
+is that they carry no manifest, so the root's is the only description of what
+their bytes are.
+
+The root's table gives each shard a name, but what it records is size and
+digest. Resolution goes from that identity to a path, which is why renaming
+the files does not break the model or quietly change it.
 
 ```rust
 let model = ztensor::Source::open("model.zt")?;   // positional resolver
